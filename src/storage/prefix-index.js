@@ -152,6 +152,39 @@ async function queryLookupValue(collection, fieldPath, value) {
 }
 
 /**
+ * FYLO's document model treats an array of objects as data that wants to be
+ * its own collection, referenced by key, so such a document cannot be indexed.
+ * Callers assert this before any disk work, which turns a mid-write index
+ * failure into a deterministic, rollback-free rejection.
+ *
+ * @param {unknown} data
+ * @param {string=} parentField
+ * @returns {void}
+ */
+export function assertIndexableDocument(data, parentField) {
+    if (!data || typeof data !== 'object') return
+    for (const field in /** @type {Record<string, any>} */ (data)) {
+        const fieldPath = parentField ? `${parentField}/${field}` : field
+        const value = /** @type {Record<string, any>} */ (data)[field]
+        if (Array.isArray(value)) {
+            if (value.some((item) => item && typeof item === 'object')) {
+                const error = /** @type {Error & { code: string }} */ (
+                    new Error(
+                        `Cannot index an array of objects at "${fieldPath}": FYLO documents may ` +
+                            'contain arrays of scalars only. Store the objects in their own ' +
+                            'collection and reference them by key.'
+                    )
+                )
+                error.code = 'EARRAYOFOBJECTS'
+                throw error
+            }
+            continue
+        }
+        if (value && typeof value === 'object') assertIndexableDocument(value, fieldPath)
+    }
+}
+
+/**
  * Encodes document field values into prefix-searchable index keys and query
  * lookup prefixes.
  */

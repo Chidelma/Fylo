@@ -16,7 +16,7 @@ import {
 } from './files.js'
 import { FilesystemQueryEngine } from './query.js'
 import { materializeDoc } from '../schema/migrate.js'
-import { LocalFsPrefixIndexStore } from './prefix-index.js'
+import { LocalFsPrefixIndexStore, assertIndexableDocument } from './prefix-index.js'
 import { parseStoredValue, stringifyStoredValue } from './value-codec.js'
 import { getXattr, listXattr, removeXattr, setXattr } from './xattr.js'
 import { rawFileKey } from '../core/raw-file.js'
@@ -661,6 +661,7 @@ export class FilesystemEngine {
         nextAccess = undefined
     ) {
         const metaUpdates = meta === undefined ? undefined : metaMutations(meta)
+        assertIndexableDocument(nextDoc)
         await validateDocId(docId)
         if (this.wormEnabled()) throw new Error('Update is not allowed in WORM mode')
         await this.requireCollectionKind(collection, 'document')
@@ -1199,6 +1200,7 @@ export class FilesystemEngine {
     /** @param {string} collection @param {TTID} docId @param {Record<string, any>} doc @param {Record<string, any>=} meta @param {{ uid?: number, gid?: number, mode?: number }=} access @param {boolean=} createOnly @returns {Promise<boolean>} */
     async putDocument(collection, docId, doc, meta, access, createOnly = false) {
         const metaUpdates = meta === undefined ? undefined : metaMutations(meta)
+        assertIndexableDocument(doc)
         await validateDocId(docId)
         await this.requireCollection(collection)
         await this.requireCollectionKind(collection, 'document')

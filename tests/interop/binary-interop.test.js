@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import packageManifest from '../../package.json' with { type: 'json' }
@@ -87,6 +87,36 @@ afterAll(async () => {
 })
 
 describe('compiled binary language interop', () => {
+    test('compiled loop rejects array-of-object documents without partial state (#82)', async () => {
+        const root = await tempRoot('fylo-binary-array-objects-')
+        const requests = [
+            { op: 'createCollection', collection: 'events' },
+            { op: 'putData', collection: 'events', data: { kind: 'e', items: [{ a: 'b' }] } },
+            { op: 'putData', collection: 'events', data: { items: [{ a: 1 }] } },
+            { op: 'putData', collection: 'events', data: { state: { deep: [{ a: 'b' }] } } },
+            { op: 'putData', collection: 'events', data: { items: ['plain', 'strings'] } },
+            { op: 'putData', collection: 'events', data: { items: [] } },
+            { op: 'putData', collection: 'events', data: { nested: { a: 'b' } } }
+        ]
+        const result = await run([binaryPath, 'exec', '--loop', '--root', path.join(root, 'db')], {
+            stdin: `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`
+        })
+        expectSuccess('compiled array-of-objects probe', result)
+
+        const [, ...puts] = result.stdout.trim().split('\n').map(JSON.parse)
+        for (const rejected of puts.slice(0, 3)) {
+            expect(rejected.ok).toBe(false)
+            expect(rejected.error.code).toBe('EARRAYOFOBJECTS')
+        }
+        for (const accepted of puts.slice(3)) expect(accepted.ok).toBe(true)
+
+        // Documents live in TTID-prefix shard directories, so count the files themselves.
+        const docs = await readdir(path.join(root, 'db', '.collections', 'events', 'docs'), {
+            recursive: true
+        })
+        expect(docs.filter((entry) => entry.endsWith('.json'))).toHaveLength(3)
+    })
+
     test('compiled CLI and loop expose the same immutable runtime identity', async () => {
         const version = await run([binaryPath, '--version'])
         expectSuccess('compiled --version', version)

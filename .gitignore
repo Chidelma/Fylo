@@ -32,5 +32,6 @@ AGENTS.md
 .claude
 .codex
 dist-web
+dist-staging-*
 src/browser/wasm/target/
 benchmarks/

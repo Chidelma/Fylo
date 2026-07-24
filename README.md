@@ -1406,6 +1406,7 @@ text.
 | `EBADREQUEST`                                                          | The request shape, field types, access object, or page options are invalid | Do not retry; fix the request                                |
 | `EUNSUPPORTEDOP`                                                       | The operation is unknown to this runtime                                   | Do not retry; check the handshake capabilities               |
 | `EINVALIDDOCID`                                                        | The supplied document ID is not a valid TTID                               | Do not retry; fix the ID                                     |
+| `EARRAYOFOBJECTS`                                                      | The document contains an array of objects, which the data model rejects    | Do not retry; restructure per the document-model rule below  |
 | `EACCES`                                                               | The access context is not permitted to perform the operation               | Do not retry with the same identity                          |
 | `EINVALIDCURSOR`                                                       | The pagination cursor is invalid, expired, or from another process         | Restart the traversal from page one                          |
 | `EROOTLOCKED` / `EROOTLEASELOST`                                       | Exclusive root ownership was unavailable or lost                           | Fail over per your supervisor policy                         |
@@ -1417,6 +1418,28 @@ text.
 Storage-level failures may carry additional stable codes (for example
 `FYLO_COLLECTION_NOT_FOUND`); those retain their meaning across releases under
 the same additive policy.
+
+#### Document model: no arrays of objects
+
+A stored document may contain scalars, nested objects, and arrays of scalars.
+It may **not** contain an array of objects at any depth. FYLO treats an array
+of objects as a sign the data wants to be its own collection, referenced by
+key, so every field is independently indexable.
+
+```json
+{ "tags": ["draft", "review"], "author": { "name": "Ada" } }
+{ "items": [{ "sku": "a" }] }
+```
+
+The first document is accepted; the second is rejected before any disk work
+with `EARRAYOFOBJECTS` and a message naming the offending field path. The
+rejection is deterministic and leaves no partial state — the write never
+starts. This applies equally to `putData`, `batchPutData`, patches, and the
+in-process API.
+
+To model a collection of records, store them in their own collection and
+reference them by key or public ID. To keep an opaque payload that is never
+field-queried, serialize it to a single string field.
 
 #### Exclusive root owner
 
