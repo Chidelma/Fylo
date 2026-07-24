@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { readFile, rm, stat } from 'node:fs/promises'
+import { readFile, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { runMachineRequest } from '../../src/cli/machine.js'
 import { createTestRoot } from '../helpers/root.js'
@@ -319,6 +319,60 @@ describe('CLI machine interface', () => {
         expect(unclassified.ok).toBe(false)
         expect(typeof unclassified.error.code).toBe('string')
         expect(unclassified.error.code.length).toBeGreaterThan(0)
+    })
+
+    test('rejects arrays of objects deterministically and leaves no partial state (#82)', async () => {
+        const root = await createRoot('fylo-machine-array-objects-')
+        const overrides = { root, cache: new Map() }
+        await runMachineRequest({ op: 'createCollection', collection: 'events' }, overrides)
+        const docsDir = path.join(root, '.collections', 'events', 'docs')
+
+        for (const data of [
+            { kind: 'e', items: [{ a: 'b' }] },
+            { items: [{ a: 1 }] },
+            { state: { deep: { deeper: [{ a: 'b' }] } } }
+        ]) {
+            const response = await runMachineRequest(
+                { op: 'putData', collection: 'events', data },
+                overrides
+            )
+            expect(response.ok).toBe(false)
+            expect(response.error.code).toBe('EARRAYOFOBJECTS')
+            expect(response.error.message).toContain('own collection')
+        }
+
+        // A rejected put must never reach disk: no document survives the three failures.
+        expect(await readdir(docsDir).catch(() => [])).toEqual([])
+
+        for (const data of [
+            { items: ['plain', 'strings'] },
+            { items: [] },
+            { nested: { a: 'b' } }
+        ]) {
+            const accepted = await runMachineRequest(
+                { op: 'putData', collection: 'events', data },
+                overrides
+            )
+            expect(accepted.ok).toBe(true)
+        }
+
+        const stored = await runMachineRequest(
+            { op: 'findDocs', collection: 'events', query: { $onlyIds: true } },
+            overrides
+        )
+        expect(stored.result).toHaveLength(3)
+
+        const patched = await runMachineRequest(
+            {
+                op: 'patchDoc',
+                collection: 'events',
+                id: stored.result[0],
+                newDoc: { items: [{ a: 'b' }] }
+            },
+            overrides
+        )
+        expect(patched.ok).toBe(false)
+        expect(patched.error.code).toBe('EARRAYOFOBJECTS')
     })
 
     test('exec exposes version-control operations for language-agnostic callers', async () => {
