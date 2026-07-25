@@ -374,7 +374,8 @@ export default class Fylo {
             onEvent: options.onEvent,
             queue: this.queue,
             queryCache: this.cache,
-            catalogRoot: this.repositoryRoot
+            catalogRoot: this.repositoryRoot,
+            ensureEncryptionLoaded: (collection) => this.loadEncryptionWithEvent(collection)
         })
         this.sql = this.createSqlTag()
         this.startup = (async () => {
@@ -659,10 +660,17 @@ export default class Fylo {
                 throw new Error(`Schema $encrypted for ${collection} must only contain strings`)
             if (!Cipher.isConfigured()) {
                 const secret = process.env.FYLO_ENCRYPTION_KEY
-                if (!secret)
-                    throw new Error(
-                        'Schema declares $encrypted fields but FYLO_ENCRYPTION_KEY env var is not set'
+                if (!secret) {
+                    // Fail closed: reads of this collection must not fall back
+                    // to handing the caller stored ciphertext.
+                    const error = /** @type {Error & { code: string }} */ (
+                        new Error(
+                            `Collection "${collection}" declares $encrypted fields but FYLO_ENCRYPTION_KEY env var is not set`
+                        )
                     )
+                    error.code = 'EDECRYPTFAILED'
+                    throw error
+                }
                 if (secret.length < 32)
                     throw new Error('FYLO_ENCRYPTION_KEY must be at least 32 characters long')
                 await Cipher.configure(secret)
