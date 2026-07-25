@@ -397,7 +397,7 @@ jobs:
                   VERSION: ${{ needs.version.outputs.version }}
               run: |
                   set -euo pipefail
-                  if [[ ! "$VERSION" =~ ^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+                  if [[ ! "$VERSION" =~ ^[0-9]{2}\.[0-9]{2}\.[0-9]{2}(-[0-9]+)?$ ]]; then
                     echo "Explorer release requires a CalVer package version, received $VERSION." >&2
                     exit 1
                   fi

@@ -985,13 +985,23 @@ export class FilesystemEngine {
                 'no encryption key is configured; set FYLO_ENCRYPTION_KEY'
             )
         }
-        try {
-            return parseStoredValue((await Cipher.decrypt(stored)).replaceAll('%2F', '/'))
-        } catch (error) {
+        // Classify the cause here rather than forwarding the underlying error:
+        // its message quotes a prefix of the stored value, which for a field
+        // holding legacy plaintext would echo the secret into logs.
+        if (!Cipher.isCiphertext(stored)) {
             throw decryptionFailure(
                 collection,
                 field,
-                `the configured key could not decrypt it (${/** @type {Error} */ (error).message})`
+                'the stored value is not FYLO ciphertext, so it predates encryption on this field and must be rewritten'
+            )
+        }
+        try {
+            return parseStoredValue((await Cipher.decrypt(stored)).replaceAll('%2F', '/'))
+        } catch {
+            throw decryptionFailure(
+                collection,
+                field,
+                'the configured key could not authenticate it'
             )
         }
     }
