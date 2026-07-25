@@ -1,20 +1,54 @@
 # Changelog
 
-## 26.30.05-1 - 2026-07-24
+## 26.30.06 - 2026-07-25
 
 ### Added
 
 - Every `ok: false` machine-protocol response now carries a stable, documented
   `error.code`: `EBADREQUEST` for request-shape/access/page validation
   failures, `EUNSUPPORTEDOP` for unknown operations, `EINVALIDDOCID` for
-  invalid document IDs, and the deterministic `EUNKNOWN` fallback for
-  unclassified engine failures (#79). The code set is additive and documented
-  in the machine-interface README.
+  invalid document IDs, `EARRAYOFOBJECTS` for documents the data model
+  rejects, `EDECRYPTFAILED` for undecryptable `$encrypted` fields, and the
+  deterministic `EUNKNOWN` fallback for unclassified engine failures (#79).
+  The code set is additive and documented in the machine-interface README.
+
+### Security
+
+- `$encrypted` fields now decrypt on every read path. Decryption registration
+  was loaded only when a process wrote, so a process that only read returned
+  the stored ciphertext with `ok: true`; read-only consumers such as replicas,
+  reporting jobs, and event-sourced startup replay silently received encrypted
+  blobs typed as ordinary strings (#84).
+- Reads of `$encrypted` fields fail closed. A missing key, a wrong key, or a
+  value that fails authentication now raises `EDECRYPTFAILED` naming the
+  collection and field instead of yielding the stored value.
+- Decryption failures no longer quote any part of the stored value, so a field
+  still holding a pre-encryption plaintext secret cannot echo it into an error
+  message or log.
+
+### Changed
+
+- Documents containing an array of objects are rejected before any disk work
+  with `EARRAYOFOBJECTS`, naming the offending field path and the rule. The
+  constraint was previously enforced mid-write during index building, which
+  surfaced as an unclassified failure claiming an incomplete rollback (#82).
+- The Explorer release gate accepts CalVer same-date suffixes (`YY.WW.DD-N`),
+  which previously blocked asset packaging for a second release in one day.
 
 ### Fixed
 
 - The pinned `fylo-web.mjs` browser example in the client shim guide now
   references the current release instead of 26.30.04.
+- A TTID timestamp test allowed only 1 ms of clock slack and failed
+  intermittently under full-suite load.
+
+### Documentation
+
+- The machine-interface README documents the stable error-code table, the
+  no-arrays-of-objects document-model rule, and read-path decryption
+  semantics. The `$encrypted` guide now shows the slash-separated nested field
+  path (`payload/verifier`); a dotted path is accepted as a literal field name
+  and silently leaves the field unencrypted.
 
 ## 26.30.05 - 2026-07-24
 
