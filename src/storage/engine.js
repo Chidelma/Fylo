@@ -63,6 +63,22 @@ import {
  */
 
 /**
+ * @param {string} collection
+ * @param {string} field
+ * @param {string} reason
+ * @returns {Error & { code: string }}
+ */
+function decryptionFailure(collection, field, reason) {
+    const error = /** @type {Error & { code: string }} */ (
+        new Error(
+            `Cannot decrypt encrypted field "${field}" in collection "${collection}": ${reason}.`
+        )
+    )
+    error.code = 'EDECRYPTFAILED'
+    return error
+}
+
+/**
  * `writeDurable` replaces the target inode. Preserve developer metadata and
  * the protected-record access descriptor across JSON document rewrites.
  * @param {string} target
@@ -160,7 +176,7 @@ export class FilesystemEngine {
     /**
      * Creates the filesystem-backed FYLO engine and its persistence collaborators.
      * @param {string} [root]
-     * @param {{ sync?: FyloSyncHooks, syncMode?: FyloSyncMode, worm?: FyloWormOptions, access?: FyloAccessOptions, onEvent?: FyloEventHandler, queue?: LocalQueue, queryCache?: QueryCache, catalogRoot?: string, repositoryGate?: boolean }} [options]
+     * @param {{ sync?: FyloSyncHooks, syncMode?: FyloSyncMode, worm?: FyloWormOptions, access?: FyloAccessOptions, onEvent?: FyloEventHandler, queue?: LocalQueue, queryCache?: QueryCache, catalogRoot?: string, repositoryGate?: boolean, ensureEncryptionLoaded?: (collection: string) => Promise<void> }} [options]
      */
     constructor(
         root = process.env.FYLO_ROOT || path.join(process.cwd(), '.fylo-data'),
@@ -199,6 +215,14 @@ export class FilesystemEngine {
         this.events = new FilesystemEventBus(this.collectionRoot.bind(this), this.storage)
         this.queue = options.queue
         this.queryCache = options.queryCache
+        /**
+         * Loads a collection's schema-driven `$encrypted` registration. Every
+         * decode calls this, so a read-only process decrypts without first
+         * having to write. Defaults to a no-op for engines built without the
+         * API layer (no schema directory is in play there).
+         * @type {(collection: string) => Promise<void>}
+         */
+        this.ensureEncryptionLoaded = options.ensureEncryptionLoaded ?? (async () => {})
         this.index = new LocalFsPrefixIndexStore(this.collectionRoot.bind(this))
         this.documents = new FilesystemDocuments(
             this.storage,
@@ -943,20 +967,51 @@ export class FilesystemEngine {
         }
         return value
     }
+    /**
+     * Decrypts one stored value for a field the schema declares `$encrypted`.
+     * Always fails closed: returning an undecryptable value verbatim would hand
+     * the caller an opaque blob typed as an ordinary string.
+     *
+     * @param {string} collection
+     * @param {string} field
+     * @param {string} stored
+     * @returns {Promise<any>}
+     */
+    async decryptStoredField(collection, field, stored) {
+        if (!Cipher.isConfigured()) {
+            throw decryptionFailure(
+                collection,
+                field,
+                'no encryption key is configured; set FYLO_ENCRYPTION_KEY'
+            )
+        }
+        try {
+            return parseStoredValue((await Cipher.decrypt(stored)).replaceAll('%2F', '/'))
+        } catch (error) {
+            throw decryptionFailure(
+                collection,
+                field,
+                `the configured key could not decrypt it (${/** @type {Error} */ (error).message})`
+            )
+        }
+    }
+
     /** @param {string} collection @param {any} value @param {string} [parentField] @returns {Promise<any>} */
     async decodeEncrypted(collection, value, parentField) {
+        // Registration is schema-driven and lazy, so load it before the first
+        // decode instead of relying on a write having happened in this process.
+        if (parentField === undefined) await this.ensureEncryptionLoaded(collection)
         if (Array.isArray(value)) {
             const decodedItems = await Promise.all(
                 value.map(async (item) => {
                     if (item && typeof item === 'object')
-                        return await this.decodeEncrypted(collection, item)
+                        return await this.decodeEncrypted(collection, item, parentField)
                     if (
                         parentField &&
-                        Cipher.isConfigured() &&
                         Cipher.isEncryptedField(collection, parentField) &&
                         typeof item === 'string'
                     ) {
-                        return parseStoredValue((await Cipher.decrypt(item)).replaceAll('%2F', '/'))
+                        return await this.decryptStoredField(collection, parentField, item)
                     }
                     return item
                 })
@@ -972,13 +1027,10 @@ export class FilesystemEngine {
                 if (fieldValue && typeof fieldValue === 'object')
                     copy[field] = await this.decodeEncrypted(collection, fieldValue, nextField)
                 else if (
-                    Cipher.isConfigured() &&
                     Cipher.isEncryptedField(collection, nextField) &&
                     typeof fieldValue === 'string'
                 ) {
-                    copy[field] = parseStoredValue(
-                        (await Cipher.decrypt(fieldValue)).replaceAll('%2F', '/')
-                    )
+                    copy[field] = await this.decryptStoredField(collection, nextField, fieldValue)
                 } else copy[field] = fieldValue
             }
             return copy

@@ -925,19 +925,38 @@ Fields declared in `$encrypted` arrays are stored with AES-GCM. Equality queries
 
 ```json
 {
-    "$encrypted": ["ssn", "email"],
+    "$encrypted": ["ssn", "email", "payload/verifier"],
     "id": "^[0-9]+$",
     "name": "^.+$",
     "email": "^.+$",
-    "ssn?": "^[0-9-]+$"
+    "ssn?": "^[0-9-]+$",
+    "payload?": { "verifier?": "^.+$" }
 }
 ```
+
+Nested fields use a **slash-separated** path (`payload/verifier`), matching the
+index field-path format. A dotted path such as `payload.verifier` is accepted
+as a literal field name, matches nothing, and silently leaves the field
+unencrypted — check the stored document if a field is not being encrypted.
 
 Requirements:
 
 - `FYLO_ENCRYPTION_KEY` must be ≥32 characters
 - `FYLO_CIPHER_SALT` is recommended
 - Process-global: one key for all collections
+
+Decryption is schema-driven and does not depend on write history: a read-only
+process loads a collection's `$encrypted` registration on its first read, so
+replicas, reporting jobs, and event-sourced startup replay decrypt correctly
+without writing first.
+
+Reads fail closed. If a field the schema declares `$encrypted` cannot be
+decrypted — missing key, wrong key, a value that fails authentication, or a
+value stored before the field was encrypted — the operation fails with
+`EDECRYPTFAILED` naming the collection and field. FYLO never returns a stored
+value to a caller as if it were plaintext when it cannot verify it. Adding a
+field to `$encrypted` therefore requires rewriting the documents that already
+hold a plaintext value for it.
 
 ---
 
@@ -1408,6 +1427,7 @@ text.
 | `EINVALIDDOCID`                                                        | The supplied document ID is not a valid TTID                               | Do not retry; fix the ID                                     |
 | `EARRAYOFOBJECTS`                                                      | The document contains an array of objects, which the data model rejects    | Do not retry; restructure per the document-model rule below  |
 | `EACCES`                                                               | The access context is not permitted to perform the operation               | Do not retry with the same identity                          |
+| `EDECRYPTFAILED`                                                       | An `$encrypted` field could not be decrypted with the configured key       | Do not retry; fix the key configuration                      |
 | `EINVALIDCURSOR`                                                       | The pagination cursor is invalid, expired, or from another process         | Restart the traversal from page one                          |
 | `EROOTLOCKED` / `EROOTLEASELOST`                                       | Exclusive root ownership was unavailable or lost                           | Fail over per your supervisor policy                         |
 | `EBACKUPNOTCONFIGURED`                                                 | A backup operation was sent to a loop without backup configuration         | Do not retry without configuration                           |
