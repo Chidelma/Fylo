@@ -1,6 +1,7 @@
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
 const WASM_ERROR = -1
+const WASM_ABI_VERSION = 1
 const INITIAL_OUTPUT_CAPACITY = 64 * 1024
 
 /** @type {Map<string, Promise<WebAssembly.Module>>} */
@@ -60,10 +61,22 @@ export class WasmIndexScanner {
         if (!(exports.memory instanceof WebAssembly.Memory)) {
             throw new Error('FYLO Wasm index scanner did not export memory')
         }
-        for (const name of ['allocate', 'deallocate', 'load_snapshot', 'scan_queries']) {
+        for (const name of [
+            'abi_version',
+            'allocate',
+            'deallocate',
+            'load_snapshot',
+            'scan_queries'
+        ]) {
             if (typeof exports[name] !== 'function') {
                 throw new Error(`FYLO Wasm index scanner did not export ${name}`)
             }
+        }
+        const actualVersion = exports.abi_version()
+        if (actualVersion !== WASM_ABI_VERSION) {
+            throw new Error(
+                `Unsupported FYLO Wasm index ABI ${actualVersion}; expected ${WASM_ABI_VERSION}`
+            )
         }
         this.memory = exports.memory
         this.allocate = exports.allocate

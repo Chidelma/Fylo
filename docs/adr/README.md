@@ -24,6 +24,7 @@ ADR.
 | [0002](0002-compatibility-first-strangler-migration.md)     | Accepted | Compatibility-first strangler migration     |
 | [0003](0003-native-and-browser-storage-boundaries.md)       | Accepted | Native and browser storage boundaries       |
 | [0004](0004-unsafe-and-dependency-policy.md)                | Accepted | Unsafe-code and dependency policy           |
+| [0005](0005-narrow-wasm-linear-memory-boundary.md)          | Accepted | Narrow Wasm linear-memory boundary          |
 
 ## When another ADR is required
 

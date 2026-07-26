@@ -20,6 +20,17 @@
         { "code": "EINVALIDDOCID", "retryable": false },
         { "code": "EARRAYOFOBJECTS", "retryable": false },
         { "code": "EDECRYPTFAILED", "retryable": false },
-        { "code": "EACCES", "retryable": false }
+        { "code": "EACCES", "retryable": false },
+        { "code": "EQUERY_INPUT_SIZE", "retryable": false },
+        { "code": "EQUERY_INVALID", "retryable": false },
+        { "code": "EQUERY_EMPTY", "retryable": false },
+        { "code": "EQUERY_COUNT", "retryable": false },
+        { "code": "EQUERY_TERM_SIZE", "retryable": false },
+        { "code": "EINDEX_SNAPSHOT_SIZE", "retryable": false },
+        { "code": "EINDEX_KEY_SIZE", "retryable": false },
+        { "code": "EINDEX_SNAPSHOT_FORMAT", "retryable": false },
+        { "code": "EINDEX_SNAPSHOT_ORDER", "retryable": false },
+        { "code": "EQUERY_MATCH_COUNT", "retryable": false },
+        { "code": "EQUERY_OUTPUT_SIZE", "retryable": false }
     ]
 }

@@ -10,14 +10,18 @@ on:
             - 'VERSION'
             - 'api/**'
             - 'crates/**'
+            - 'fuzz/**'
             - 'deny.toml'
             - 'package.json'
             - 'rust-toolchain.toml'
+            - 'rust-miri-toolchain.toml'
             - 'rustfmt.toml'
             - 'scripts/build-browser.mjs'
             - 'scripts/run-rust.mjs'
+            - 'scripts/verify-rust-*.mjs'
             - 'src/browser/wasm/**'
-            - 'tests/fixtures/rust-format-v1.json'
+            - 'tests/browser/wasm-index.test.js'
+            - 'tests/fixtures/rust-*.json'
             - 'xtask/**'
     push:
         branches:
@@ -30,14 +34,18 @@ on:
             - 'VERSION'
             - 'api/**'
             - 'crates/**'
+            - 'fuzz/**'
             - 'deny.toml'
             - 'package.json'
             - 'rust-toolchain.toml'
+            - 'rust-miri-toolchain.toml'
             - 'rustfmt.toml'
             - 'scripts/build-browser.mjs'
             - 'scripts/run-rust.mjs'
+            - 'scripts/verify-rust-*.mjs'
             - 'src/browser/wasm/**'
-            - 'tests/fixtures/rust-format-v1.json'
+            - 'tests/browser/wasm-index.test.js'
+            - 'tests/fixtures/rust-*.json'
             - 'xtask/**'
 
 permissions:
@@ -72,7 +80,9 @@ jobs:
               run: bun run rust:verify
 
             - name: Verify versioned contracts
-              run: bun run contracts:verify
+              run: |
+                  bun run contracts:verify
+                  bun run query:verify
 
             - name: Check Rust formatting
               run: bun run rust:fmt
@@ -114,3 +124,22 @@ jobs:
 
             - name: Run Wasm integration and fallback tests
               run: bun test tests/browser/wasm-index.test.js --timeout 120000 --parallel=1
+              env:
+                  FYLO_REQUIRE_WASM: '1'
+
+    portable-miri:
+        name: Portable kernel under Miri
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Install pinned Miri toolchain
+              run: |
+                  rustup toolchain install nightly-2026-07-20 --profile minimal --component miri,rust-src
+                  cargo +nightly-2026-07-20 miri setup
+
+            - name: Run portable crates under Miri
+              run: cargo +nightly-2026-07-20 miri test -p fylo-format -p fylo-query --lib --tests

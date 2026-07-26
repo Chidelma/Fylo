@@ -19,6 +19,7 @@ const queryPageSource = await readFile('src/cli/query-page.js', 'utf8')
 const rootLeaseSource = await readFile('src/cli/root-lease.js', 'utf8')
 const storageSource = await readFile('src/storage/prefix-index.js', 'utf8')
 const transactionSource = await readFile('src/storage/transactions.js', 'utf8')
+const rustQuerySource = await readFile('crates/fylo-query/src/lib.rs', 'utf8')
 
 assert(operations.protocolVersion === MACHINE_PROTOCOL_VERSION, 'operation protocol version drift')
 assert(
@@ -57,6 +58,7 @@ for (const { code, retryable } of errors.errors) {
             protocolSource.includes(`'${code}'`) ||
             queryPageSource.includes(`'${code}'`) ||
             rootLeaseSource.includes(`'${code}'`) ||
+            rustQuerySource.includes(`"${code}"`) ||
             code === 'EINVALIDDOCID' ||
             code === 'EARRAYOFOBJECTS' ||
             code === 'EDECRYPTFAILED' ||

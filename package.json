@@ -13,6 +13,7 @@
         "build:web": "bun ./scripts/build-browser.mjs",
         "build:web:wasm": "bun ./scripts/build-browser.mjs --wasm",
         "contracts:verify": "bun ./scripts/verify-rust-contracts.mjs",
+        "query:verify": "bun ./scripts/verify-rust-query-fixture.mjs",
         "rust:check": "bun ./scripts/run-rust.mjs cargo check --workspace --all-targets",
         "rust:clippy": "bun ./scripts/run-rust.mjs cargo clippy --workspace --all-targets --all-features -- -D warnings",
         "rust:deny": "bun ./scripts/run-rust.mjs cargo deny check",
