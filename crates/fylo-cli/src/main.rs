@@ -94,6 +94,15 @@ fn run(arguments: &[String]) -> Result<String, String> {
             )
             .map_err(|error| error.to_string())
         }
+        "verify-index" => {
+            let collection = required_option(arguments, "--collection")?;
+            serde_json::to_string_pretty(
+                &engine
+                    .verify_index(collection)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        }
         "find" => {
             let collection = required_option(arguments, "--collection")?;
             let encoded = required_option(arguments, "--query")?;
@@ -199,8 +208,9 @@ fn usage() -> String {
      <path> --collection <name> --queries <json>\n  fylo-rust get-file --root <path> --collection \
      <name> --id <ttid>\n  fylo-rust get-deleted --root <path> --collection <name> --id <ttid>\n  \
      fylo-rust get-deleted-file --root <path> --collection <name> --id <ttid>\n  fylo-rust find \
-     --root <path> --collection <name> --query <json>\n  fylo-rust sql --root <path> --statement \
-     <select-sql>\n\nThis preview is strictly read-only."
+     --root <path> --collection <name> --query <json>\n  fylo-rust verify-index --root <path> \
+     --collection <name>\n  fylo-rust sql --root <path> --statement <select-sql>\n\nThis preview \
+     is strictly read-only."
         .into()
 }
 

@@ -180,6 +180,20 @@ try {
         JSON.stringify(ids) === JSON.stringify([id]),
         `Rust prefix scan drift for ${prefix}: ${JSON.stringify(ids)}`
     )
+    const indexVerification = await rustJson([
+        'verify-index',
+        '--root',
+        root,
+        '--collection',
+        'users'
+    ])
+    assert(indexVerification.referenceIntegrity === true, 'Rust index reference verification drift')
+    assert(indexVerification.liveDocuments === 2, 'Rust index live-document count drift')
+    assert(indexVerification.indexedDocuments === 2, 'Rust indexed-document count drift')
+    assert(
+        indexVerification.rebuildEquivalent === false,
+        'Rust preview must not overclaim full rebuild equivalence'
+    )
     const found = await rustJson([
         'find',
         '--root',

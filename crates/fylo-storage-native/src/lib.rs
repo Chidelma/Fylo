@@ -717,6 +717,77 @@ impl NativeCollection {
             )
         })
     }
+
+    /// Verify that every merged snapshot/WAL key is structurally valid and
+    /// references a live document or raw file.
+    ///
+    /// This is an integrity check, not yet full rebuild-equivalence proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for corrupt keys, orphaned identifiers, unsafe paths,
+    /// or storage failures.
+    pub fn verify_index_references(&self) -> Result<IndexVerification, NativeStorageError> {
+        let live: BTreeSet<String> = match self.kind {
+            CollectionKind::Document => self.document_ids()?.into_iter().collect(),
+            CollectionKind::File => self.raw_file_ids()?.into_iter().collect(),
+        };
+        let snapshot = self.index_snapshot()?;
+        let mut indexed = BTreeSet::new();
+        let mut key_count = 0_usize;
+        for key in snapshot
+            .as_bytes()
+            .split(|byte| *byte == b'\n')
+            .filter(|key| !key.is_empty())
+        {
+            key_count = key_count.checked_add(1).ok_or_else(|| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::FileTooLarge,
+                    "index key count overflow",
+                )
+            })?;
+            let key = std::str::from_utf8(key).map_err(|error| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptIndex,
+                    format!("index key is not valid UTF-8: {error}"),
+                )
+            })?;
+            let segments: Vec<&str> = key.split('/').collect();
+            if segments.len() < 4 {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptIndex,
+                    "index key has too few segments",
+                ));
+            }
+            let identifier = segments.last().copied().unwrap_or_default();
+            if identifier.contains('%') {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptIndex,
+                    "index document identifier must use canonical TTID bytes",
+                ));
+            }
+            validate_ttid_shape(identifier).map_err(|error| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptIndex,
+                    format!("index contains an invalid document identifier: {error}"),
+                )
+            })?;
+            if !live.contains(identifier) {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptIndex,
+                    format!("index contains an orphaned document identifier: {identifier}"),
+                ));
+            }
+            indexed.insert(identifier.to_owned());
+        }
+        Ok(IndexVerification {
+            key_count,
+            indexed_documents: indexed.len(),
+            live_documents: live.len(),
+            reference_integrity: true,
+            rebuild_equivalent: false,
+        })
+    }
 }
 
 /// Bounded stored bytes plus canonical native metadata.
@@ -763,6 +834,22 @@ pub struct NativeAccess {
     pub gid: Option<u32>,
     /// POSIX permission and special bits when available.
     pub mode: Option<u32>,
+}
+
+/// Read-only prefix-index reference verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexVerification {
+    /// Number of merged snapshot/WAL keys checked.
+    pub key_count: usize,
+    /// Unique live identifiers represented by at least one key.
+    pub indexed_documents: usize,
+    /// Total live records in the authoritative document tree.
+    pub live_documents: usize,
+    /// Always true when this report is returned.
+    pub reference_integrity: bool,
+    /// False until exact independent rebuild comparison is implemented.
+    pub rebuild_equivalent: bool,
 }
 
 /// Parsed collection generation state.
@@ -1489,6 +1576,35 @@ mod tests {
         assert_eq!(
             collection.index_snapshot().unwrap().as_bytes(),
             b"name/eq/Ada/4VRNF52JPCO\n"
+        );
+        assert_eq!(
+            collection.verify_index_references().unwrap(),
+            IndexVerification {
+                key_count: 1,
+                indexed_documents: 1,
+                live_documents: 1,
+                reference_integrity: true,
+                rebuild_equivalent: false,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_orphaned_index_references() {
+        let fixture = TestRoot::create();
+        fs::remove_file(
+            fixture
+                .0
+                .join(".collections/users/docs/4V/4VRNF52JPCO.json"),
+        )
+        .unwrap();
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("users")
+            .unwrap();
+        assert_eq!(
+            collection.verify_index_references().unwrap_err().code(),
+            NativeStorageErrorCode::CorruptIndex
         );
     }
 

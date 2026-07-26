@@ -18,6 +18,8 @@ cargo run -p fylo-cli --bin fylo-rust -- \
   scan-index --root /path/to/root --collection users \
   --queries '[{"prefix":"name/eq/Ada/"}]'
 cargo run -p fylo-cli --bin fylo-rust -- \
+  verify-index --root /path/to/root --collection users
+cargo run -p fylo-cli --bin fylo-rust -- \
   find --root /path/to/root --collection users \
   --query '{"$ops":[{"score":{"$gte":40}}],"$limit":10}'
 cargo run -p fylo-cli --bin fylo-rust -- \
@@ -41,8 +43,12 @@ It currently supports live and retained-deleted JSON documents and raw files,
 canonical/custom metadata, Unix xattrs and UID/GID/mode, the existing Windows
 ADS manifest representation, schema-driven encrypted-field reads, portable
 structured predicates, SQL SELECT projection/grouping, and prefix-index scans
-with WAL overlays. Native Windows race-hardening evidence, version history,
-rebuild verification, joins, and all mutations remain promotion blockers.
+with WAL overlays. `verify-index` checks merged key structure and rejects
+references to records absent from the authoritative tree; its
+`rebuildEquivalent: false` field deliberately records that exact independent
+rebuild comparison is not implemented yet. Native Windows race-hardening
+evidence, version history, full rebuild equivalence, joins, and all mutations
+remain promotion blockers.
 
 Encrypted reads use the same environment contract as JavaScript:
 

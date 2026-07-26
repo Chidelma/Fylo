@@ -13,8 +13,8 @@ use encryption::{EncryptionReader, reject_undeclared_ciphertext};
 use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, decode_ttid};
 use fylo_query::{QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery};
 use fylo_storage_native::{
-    CollectionKind, GenerationStatus, NativeAccess, NativeCollection, NativeRoot,
-    NativeStorageError, StoredRawFile,
+    CollectionKind, GenerationStatus, IndexVerification, NativeAccess, NativeCollection,
+    NativeRoot, NativeStorageError, StoredRawFile,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -233,6 +233,24 @@ impl ReadOnlyEngine {
                     })
                 })
                 .collect()
+        })
+    }
+
+    /// Verify merged snapshot/WAL key structure and live-record references.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for corrupt/orphaned keys, unsafe storage, or a
+    /// concurrent write generation.
+    pub fn verify_index(&self, collection: &str) -> Result<IndexVerification, EngineError> {
+        let collection = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        Self::read_stable(&collection, || {
+            collection
+                .verify_index_references()
+                .map_err(EngineError::storage)
         })
     }
 
