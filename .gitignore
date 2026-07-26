@@ -23,8 +23,7 @@ AGENTS.md
 *.md
 !README.md
 !ops/s3-backup.md
-!docs/operations/web-release.md
-!docs/operations/windows-ci.md
+!docs/**/*.md
 !examples/
 !examples/**/*.md
 !examples/db/
