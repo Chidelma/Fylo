@@ -11,6 +11,10 @@ cargo run -p fylo-cli --bin fylo-rust -- \
 cargo run -p fylo-cli --bin fylo-rust -- \
   get --root /path/to/root --collection users --id 4VRNF52JPCO
 cargo run -p fylo-cli --bin fylo-rust -- \
+  get-file --root /path/to/root --collection assets --id 4VRNF52JPCO
+cargo run -p fylo-cli --bin fylo-rust -- \
+  get-deleted --root /path/to/root --collection users --id 4VRNF52JPCO
+cargo run -p fylo-cli --bin fylo-rust -- \
   scan-index --root /path/to/root --collection users \
   --queries '[{"prefix":"name/eq/Ada/"}]'
 cargo run -p fylo-cli --bin fylo-rust -- \
@@ -31,13 +35,27 @@ The preview:
 - reads the collection generation before and after the operation;
 - retries only stable generations and fails if a writer remains active;
 - exposes only `version`, `inspect`, `get`, `scan-index`, `find`, and read-only
-  `sql`.
+  `sql`, plus `get-file`, `get-deleted`, and `get-deleted-file`.
 
-It currently supports JSON document reads, portable structured predicates,
-SQL SELECT projection/grouping, and prefix-index scans with WAL overlays. File
-collection payloads, custom xattrs, permissions, encryption, deleted
-documents, rebuilds, joins, and all mutations remain on the JavaScript engine.
-Those are promotion blockers, not implicit support.
+It currently supports live and retained-deleted JSON documents and raw files,
+canonical/custom metadata, Unix xattrs and UID/GID/mode, the existing Windows
+ADS manifest representation, schema-driven encrypted-field reads, portable
+structured predicates, SQL SELECT projection/grouping, and prefix-index scans
+with WAL overlays. Native Windows race-hardening evidence, version history,
+rebuild verification, joins, and all mutations remain promotion blockers.
+
+Encrypted reads use the same environment contract as JavaScript:
+
+```bash
+export FYLO_SCHEMA=/path/to/schemas
+export FYLO_ENCRYPTION_KEY='at-least-32-characters-of-secret-material'
+export FYLO_CIPHER_SALT='deployment-specific-random-salt'
+```
+
+The preview reads the schema manifest’s current `$encrypted` field list,
+derives the AES-256-GCM key with the existing PBKDF2 parameters, and fails
+closed if the schema/key is missing, the key is wrong, or an envelope is
+corrupt. Ciphertext is not included in its errors.
 
 Opening a root through this preview does not acquire a writer lock and does not
 recover interrupted transactions. A `writing` generation fails closed so the

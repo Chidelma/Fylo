@@ -113,7 +113,7 @@ The release evidence runner must refuse a stronger profile when:
 | ------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------- |
 | Existing JavaScript/Bun native engine | Unchanged from its current published matrix | The rewrite branch does not alter current support                 |
 | Rust portable crates                  | Experimental; local corpus passes           | Cross-platform retained evidence and broader fixtures are pending |
-| Rust native engine                    | Developer read-only preview; not a writer   | Document/index/query reads pass locally; Phase 4 is incomplete    |
+| Rust native engine                    | Developer read-only preview; not a writer   | Document/file/tombstone/encrypted reads pass locally; Phase 4 is incomplete |
 | Rust/Wasm production kernel           | Experimental acceleration path              | Compiled integration/fallback passes; browser matrix is pending   |
 | JavaScript browser fallback           | Unchanged from its current published matrix | Remains required during migration                                 |
 

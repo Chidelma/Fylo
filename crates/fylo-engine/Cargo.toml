@@ -8,11 +8,15 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+aes-gcm.workspace = true
 fylo-format = { version = "0.1.0", path = "../fylo-format" }
 fylo-query = { version = "0.1.0", path = "../fylo-query" }
 fylo-storage-native = { version = "0.1.0", path = "../fylo-storage-native" }
+pbkdf2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

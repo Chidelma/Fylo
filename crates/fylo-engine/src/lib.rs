@@ -4,9 +4,12 @@
 //! storage discovery with the portable format and query kernels and verifies a
 //! stable collection generation around every logical read.
 
+mod encryption;
+
 use std::fmt;
 use std::path::Path;
 
+use encryption::{EncryptionReader, reject_undeclared_ciphertext};
 use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, decode_ttid};
 use fylo_query::{QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery};
 use fylo_storage_native::{
@@ -19,9 +22,10 @@ use serde_json::{Map, Value};
 const MAX_STABLE_READ_ATTEMPTS: usize = 3;
 
 /// Read-only native FYLO engine.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ReadOnlyEngine {
     root: NativeRoot,
+    encryption: Option<EncryptionReader>,
 }
 
 impl ReadOnlyEngine {
@@ -33,6 +37,49 @@ impl ReadOnlyEngine {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EngineError> {
         Ok(Self {
             root: NativeRoot::open(path).map_err(EngineError::storage)?,
+            encryption: None,
+        })
+    }
+
+    /// Open a read-only engine with a schema root but without a decryption key.
+    ///
+    /// This is useful for proving fail-closed behavior: collections declaring
+    /// encrypted fields return `EENGINE_ENCRYPTION` until credentials are
+    /// supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either root cannot be opened safely.
+    pub fn open_with_schema(
+        path: impl AsRef<Path>,
+        schema_root: impl AsRef<Path>,
+    ) -> Result<Self, EngineError> {
+        Ok(Self {
+            root: NativeRoot::open(path).map_err(EngineError::storage)?,
+            encryption: Some(
+                EncryptionReader::open(schema_root, None).map_err(EngineError::encryption)?,
+            ),
+        })
+    }
+
+    /// Open a read-only engine with JavaScript-compatible field decryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe roots, short/invalid credentials, corrupt
+    /// schema metadata, or key derivation failures.
+    pub fn open_with_encryption(
+        path: impl AsRef<Path>,
+        schema_root: impl AsRef<Path>,
+        secret: &str,
+        salt: &str,
+    ) -> Result<Self, EngineError> {
+        Ok(Self {
+            root: NativeRoot::open(path).map_err(EngineError::storage)?,
+            encryption: Some(
+                EncryptionReader::open(schema_root, Some((secret, salt)))
+                    .map_err(EngineError::encryption)?,
+            ),
         })
     }
 
@@ -57,8 +104,11 @@ impl ReadOnlyEngine {
             let stored = collection
                 .read_document(identifier)
                 .map_err(EngineError::storage)?;
-            let document = Document::parse(&stored.bytes, DocumentLimits::default())
-                .map_err(EngineError::format)?;
+            let document = self.decode_document(
+                collection.name(),
+                Document::parse(&stored.bytes, DocumentLimits::default())
+                    .map_err(EngineError::format)?,
+            )?;
             let timestamps = decode_ttid(identifier).map_err(EngineError::format)?;
             Ok(ReadDocument {
                 metadata: CanonicalMetadata {
@@ -110,8 +160,11 @@ impl ReadOnlyEngine {
             let stored = collection
                 .read_deleted_document(identifier)
                 .map_err(EngineError::storage)?;
-            let document = Document::parse(&stored.bytes, DocumentLimits::default())
-                .map_err(EngineError::format)?;
+            let document = self.decode_document(
+                collection.name(),
+                Document::parse(&stored.bytes, DocumentLimits::default())
+                    .map_err(EngineError::format)?,
+            )?;
             let timestamps = decode_ttid(identifier).map_err(EngineError::format)?;
             Ok(ReadDeletedDocument {
                 id: identifier.to_owned(),
@@ -208,8 +261,11 @@ impl ReadOnlyEngine {
                 let stored = collection
                     .read_document(&identifier)
                     .map_err(EngineError::storage)?;
-                let document = Document::parse(&stored.bytes, DocumentLimits::default())
-                    .map_err(EngineError::format)?;
+                let document = self.decode_document(
+                    collection.name(),
+                    Document::parse(&stored.bytes, DocumentLimits::default())
+                        .map_err(EngineError::format)?,
+                )?;
                 let timestamps = decode_ttid(&identifier).map_err(EngineError::format)?;
                 if !query.matches(
                     document.fields(),
@@ -342,6 +398,24 @@ impl ReadOnlyEngine {
             EngineErrorCode::ConcurrentWrite,
             "collection changed during a read-only operation",
         ))
+    }
+
+    fn decode_document(
+        &self,
+        collection: &str,
+        document: Document,
+    ) -> Result<Document, EngineError> {
+        let fields = document.into_fields();
+        let fields = if let Some(encryption) = &self.encryption {
+            encryption
+                .decode_document(collection, fields)
+                .map_err(EngineError::encryption)?
+        } else {
+            reject_undeclared_ciphertext(collection, &fields).map_err(EngineError::encryption)?;
+            fields
+        };
+        Document::try_from_value(Value::Object(fields), DocumentLimits::default())
+            .map_err(EngineError::format)
     }
 }
 
@@ -591,6 +665,8 @@ pub enum EngineErrorCode {
     CorruptData,
     /// A writer prevented a stable generation read.
     ConcurrentWrite,
+    /// Encrypted data could not be safely decoded.
+    Encryption,
 }
 
 impl EngineErrorCode {
@@ -603,6 +679,7 @@ impl EngineErrorCode {
             Self::Query => "EENGINE_QUERY",
             Self::CorruptData => "EENGINE_CORRUPT",
             Self::ConcurrentWrite => "EENGINE_CONCURRENT_WRITE",
+            Self::Encryption => "EENGINE_ENCRYPTION",
         }
     }
 }
@@ -646,6 +723,10 @@ impl EngineError {
             message: error.to_string(),
             source: Some(Box::new(error)),
         }
+    }
+
+    fn encryption(message: impl Into<String>) -> Self {
+        Self::new(EngineErrorCode::Encryption, message)
     }
 
     /// Stable error code.

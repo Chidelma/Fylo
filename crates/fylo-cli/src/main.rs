@@ -1,6 +1,7 @@
 //! Read-only FYLO Rust preview CLI.
 
 use std::env;
+use std::path::Path;
 use std::process::ExitCode;
 
 use fylo_engine::ReadOnlyEngine;
@@ -45,7 +46,7 @@ fn run(arguments: &[String]) -> Result<String, String> {
         .map_err(|error| error.to_string());
     }
     let root = required_option(arguments, "--root")?;
-    let engine = ReadOnlyEngine::open(root).map_err(|error| error.to_string())?;
+    let engine = open_engine(root)?;
     match command {
         "inspect" => {
             let collection = required_option(arguments, "--collection")?;
@@ -117,6 +118,27 @@ fn run(arguments: &[String]) -> Result<String, String> {
             .map_err(|error| error.to_string())
         }
         _ => Err(usage()),
+    }
+}
+
+fn open_engine(root: &str) -> Result<ReadOnlyEngine, String> {
+    let Ok(schema_root) = env::var("FYLO_SCHEMA") else {
+        return ReadOnlyEngine::open(root).map_err(|error| error.to_string());
+    };
+    if !Path::new(&schema_root).is_dir() {
+        return ReadOnlyEngine::open(root).map_err(|error| error.to_string());
+    }
+    let credentials = env::var("FYLO_ENCRYPTION_KEY")
+        .ok()
+        .zip(env::var("FYLO_CIPHER_SALT").ok());
+    match credentials {
+        Some((secret, salt)) => {
+            ReadOnlyEngine::open_with_encryption(root, schema_root, &secret, &salt)
+                .map_err(|error| error.to_string())
+        }
+        None => {
+            ReadOnlyEngine::open_with_schema(root, schema_root).map_err(|error| error.to_string())
+        }
     }
 }
 

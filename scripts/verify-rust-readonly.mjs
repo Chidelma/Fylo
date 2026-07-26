@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,11 +7,33 @@ import Fylo from '../src/index.js'
 import { BrowserPrefixIndexCodec } from '../src/browser/core/prefix-index.js'
 
 const root = await mkdtemp(join(tmpdir(), 'fylo-rust-readonly-'))
+const schemaRoot = `${root}-schema`
+const previousEncryption = {
+    schema: process.env.FYLO_SCHEMA,
+    key: process.env.FYLO_ENCRYPTION_KEY,
+    salt: process.env.FYLO_CIPHER_SALT
+}
 try {
+    const encryptionKey = 'rust-readonly-interop-key-32-bytes-minimum'
+    const cipherSalt = 'rust-readonly-interop-salt'
+    await mkdir(join(schemaRoot, 'secrets', 'history'), { recursive: true })
+    await writeFile(
+        join(schemaRoot, 'secrets', 'manifest.json'),
+        JSON.stringify({ current: 'v1', versions: [{ v: 'v1' }] })
+    )
+    await writeFile(
+        join(schemaRoot, 'secrets', 'history', 'v1.schema.json'),
+        JSON.stringify({ $encrypted: ['secret', 'nested/verifier'] })
+    )
+    process.env.FYLO_SCHEMA = schemaRoot
+    process.env.FYLO_ENCRYPTION_KEY = encryptionKey
+    process.env.FYLO_CIPHER_SALT = cipherSalt
+
     const database = new Fylo(root, { versioning: { autoCommit: false } })
     console.error('Seeding JavaScript compatibility root...')
     await database.users.create()
     await database.assets.create({ kind: 'file' })
+    await database.secrets.create()
     const id = await database.users.put({ name: 'Ada', score: 42, role: 'admin' })
     const graceId = await database.users.put({ name: 'Grace', score: 50, role: 'editor' })
     const rawId = await database.assets
@@ -26,6 +48,11 @@ try {
         { key: '/fixtures/deleted.bin' }
     )
     await database.assets.delete(deletedRawId)
+    const encryptedId = await database.secrets.put({
+        kind: 'security-event',
+        secret: 'correct horse battery staple',
+        nested: { verifier: 42 }
+    })
     await database.users.rebuild()
     await database.assets.rebuild()
     await database.close()
@@ -105,6 +132,39 @@ try {
         'Rust deleted raw-file timestamp drift'
     )
 
+    const encrypted = await rustJson([
+        'get',
+        '--root',
+        root,
+        '--collection',
+        'secrets',
+        '--id',
+        String(encryptedId)
+    ])
+    assert(
+        encrypted.document.secret === 'correct horse battery staple',
+        'Rust encrypted string decoding drift'
+    )
+    assert(encrypted.document.nested.verifier === 42, 'Rust encrypted typed-value decoding drift')
+    const wrongKey = await rustFailure(
+        ['get', '--root', root, '--collection', 'secrets', '--id', String(encryptedId)],
+        { FYLO_ENCRYPTION_KEY: 'wrong-key-material-that-is-at-least-32-bytes' }
+    )
+    assert(wrongKey.includes('EENGINE_ENCRYPTION'), 'Rust wrong-key error-code drift')
+    assert(!wrongKey.includes('v2.'), 'Rust wrong-key error leaked ciphertext')
+    const missingKey = await rustFailure(
+        ['get', '--root', root, '--collection', 'secrets', '--id', String(encryptedId)],
+        { FYLO_ENCRYPTION_KEY: undefined }
+    )
+    assert(missingKey.includes('EENGINE_ENCRYPTION'), 'Rust missing-key error-code drift')
+    assert(!missingKey.includes('v2.'), 'Rust missing-key error leaked ciphertext')
+    const missingSchema = await rustFailure(
+        ['get', '--root', root, '--collection', 'secrets', '--id', String(encryptedId)],
+        { FYLO_SCHEMA: undefined }
+    )
+    assert(missingSchema.includes('EENGINE_ENCRYPTION'), 'Rust missing-schema error-code drift')
+    assert(!missingSchema.includes('v2.'), 'Rust missing-schema error leaked ciphertext')
+
     const [planned] = await BrowserPrefixIndexCodec.queryPrefixes('users', 'name', { $eq: 'Ada' })
     const prefix = BrowserPrefixIndexCodec.prefix('name', planned.kind, planned.valuePrefix)
     const ids = await rustJson([
@@ -150,11 +210,32 @@ try {
         `Verified Rust read-only interoperability for live/deleted documents and raw files (${id}, ${graceId}, ${rawId})`
     )
 } finally {
+    restoreEnvironment('FYLO_SCHEMA', previousEncryption.schema)
+    restoreEnvironment('FYLO_ENCRYPTION_KEY', previousEncryption.key)
+    restoreEnvironment('FYLO_CIPHER_SALT', previousEncryption.salt)
     await rm(root, { recursive: true, force: true })
+    await rm(schemaRoot, { recursive: true, force: true })
 }
 process.exit(0)
 
 async function rustJson(arguments_) {
+    const result = await rustResult(arguments_)
+    if (result.exitCode !== 0) throw new Error(`fylo-rust failed: ${result.stderr}`)
+    return JSON.parse(result.stdout)
+}
+
+async function rustFailure(arguments_, environment) {
+    const result = await rustResult(arguments_, environment)
+    if (result.exitCode === 0) throw new Error('fylo-rust unexpectedly accepted invalid encryption')
+    return result.stderr
+}
+
+async function rustResult(arguments_, overrides = {}) {
+    const environment = { ...process.env }
+    for (const [name, value] of Object.entries(overrides)) {
+        if (value === undefined) delete environment[name]
+        else environment[name] = value
+    }
     const child = Bun.spawn(
         [
             process.execPath,
@@ -173,7 +254,8 @@ async function rustJson(arguments_) {
         {
             cwd: fileURLToPath(new URL('../', import.meta.url)),
             stdout: 'pipe',
-            stderr: 'pipe'
+            stderr: 'pipe',
+            env: environment
         }
     )
     const [stdout, stderr, exitCode] = await Promise.all([
@@ -181,8 +263,7 @@ async function rustJson(arguments_) {
         new Response(child.stderr).text(),
         child.exited
     ])
-    if (exitCode !== 0) throw new Error(`fylo-rust failed: ${stderr}`)
-    return JSON.parse(stdout)
+    return { stdout, stderr, exitCode }
 }
 
 async function snapshot(rootPath) {
@@ -201,4 +282,9 @@ async function snapshot(rootPath) {
 
 function assert(value, message) {
     if (!value) throw new Error(message)
+}
+
+function restoreEnvironment(name, value) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
 }

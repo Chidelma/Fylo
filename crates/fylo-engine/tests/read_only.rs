@@ -96,6 +96,24 @@ fn refuses_to_read_an_in_progress_generation() {
     assert_eq!(error.code(), EngineErrorCode::ConcurrentWrite);
 }
 
+#[test]
+fn fails_closed_on_ciphertext_without_a_schema_root() {
+    let fixture = TestRoot::create();
+    fs::write(
+        fixture
+            .0
+            .join(".collections/users/docs/4V/4VRNF52JPCO.json"),
+        br#"{"secret":"v2.ciphertext-must-not-escape"}"#,
+    )
+    .unwrap();
+    let error = ReadOnlyEngine::open(&fixture.0)
+        .unwrap()
+        .get("users", "4VRNF52JPCO")
+        .unwrap_err();
+    assert_eq!(error.code(), EngineErrorCode::Encryption);
+    assert!(!error.to_string().contains("v2."));
+}
+
 fn snapshot_tree(root: &std::path::Path) -> Vec<(PathBuf, u64)> {
     fn walk(root: &std::path::Path, current: &std::path::Path, output: &mut Vec<(PathBuf, u64)>) {
         let mut entries: Vec<_> = fs::read_dir(current).unwrap().map(Result::unwrap).collect();
