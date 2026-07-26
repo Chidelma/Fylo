@@ -47,6 +47,31 @@ try {
         '--id',
         manifest.probes.file.id
     ])
+    const operations = (await readFile(join(fixture, manifest.operations), 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+    const deletedId = operations.find((entry) => entry.operation === 'delete document')?.input?.id
+    if (!deletedId) throw new Error('Golden root is missing the deleted-document operation')
+    await run([
+        './scripts/run-rust.mjs',
+        'cargo',
+        'run',
+        '--quiet',
+        '--locked',
+        '-p',
+        'fylo-cli',
+        '--bin',
+        'fylo-rust',
+        '--',
+        'get-deleted',
+        '--root',
+        join(fixture, 'root'),
+        '--collection',
+        'people',
+        '--id',
+        deletedId
+    ])
     console.log('Verified generated JavaScript golden root with the Rust read-only engine')
 } finally {
     await rm(temporary, { recursive: true, force: true })

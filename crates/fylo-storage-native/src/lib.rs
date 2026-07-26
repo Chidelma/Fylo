@@ -299,10 +299,29 @@ impl NativeCollection {
                 "document enumeration is not available for file collections",
             ));
         }
-        let docs = self.path.join("docs");
-        self.root.verify_path(&docs, ExpectedType::Directory)?;
+        self.document_ids_at(&self.path.join("docs"))
+    }
+
+    /// List validated retained tombstone identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-document collections or unsafe/corrupt
+    /// tombstone paths.
+    pub fn deleted_document_ids(&self) -> Result<Vec<String>, NativeStorageError> {
+        if self.kind != CollectionKind::Document {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::Unsupported,
+                "deleted-document enumeration is not available for file collections",
+            ));
+        }
+        self.document_ids_at(&self.path.join(".deleted"))
+    }
+
+    fn document_ids_at(&self, namespace: &Path) -> Result<Vec<String>, NativeStorageError> {
+        self.root.verify_path(namespace, ExpectedType::Directory)?;
         let mut ids = Vec::new();
-        let mut shards = read_dir_sorted(&docs)?;
+        let mut shards = read_dir_sorted(namespace)?;
         for shard in &mut shards {
             let shard_path = shard.path();
             let file_type = shard.file_type().map_err(NativeStorageError::io)?;
@@ -369,10 +388,29 @@ impl NativeCollection {
                 "raw-file enumeration is available only for file collections",
             ));
         }
-        let docs = self.path.join("docs");
-        self.root.verify_path(&docs, ExpectedType::Directory)?;
+        self.raw_file_ids_at(&self.path.join("docs"))
+    }
+
+    /// List validated retained raw-file tombstone identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-file collections or unsafe/corrupt tombstone
+    /// paths.
+    pub fn deleted_raw_file_ids(&self) -> Result<Vec<String>, NativeStorageError> {
+        if self.kind != CollectionKind::File {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::Unsupported,
+                "deleted raw-file enumeration is available only for file collections",
+            ));
+        }
+        self.raw_file_ids_at(&self.path.join(".deleted"))
+    }
+
+    fn raw_file_ids_at(&self, namespace: &Path) -> Result<Vec<String>, NativeStorageError> {
+        self.root.verify_path(namespace, ExpectedType::Directory)?;
         let mut ids = BTreeSet::new();
-        for shard in read_dir_sorted(&docs)? {
+        for shard in read_dir_sorted(namespace)? {
             let shard_path = shard.path();
             let file_type = shard.file_type().map_err(NativeStorageError::io)?;
             if file_type.is_symlink() || !file_type.is_dir() {
@@ -436,9 +474,36 @@ impl NativeCollection {
                 "JSON document reads are not available for file collections",
             ));
         }
-        let path = self
-            .path
-            .join("docs")
+        self.read_document_at(&self.path.join("docs"), identifier)
+    }
+
+    /// Read one retained soft-deleted JSON document. Its modification time is
+    /// the deletion timestamp established by the JavaScript engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid IDs, unsafe paths, oversized files, or I/O
+    /// failures.
+    pub fn read_deleted_document(
+        &self,
+        identifier: &str,
+    ) -> Result<StoredBytes, NativeStorageError> {
+        validate_ttid_shape(identifier)?;
+        if self.kind != CollectionKind::Document {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::Unsupported,
+                "deleted JSON document reads are not available for file collections",
+            ));
+        }
+        self.read_document_at(&self.path.join(".deleted"), identifier)
+    }
+
+    fn read_document_at(
+        &self,
+        namespace: &Path,
+        identifier: &str,
+    ) -> Result<StoredBytes, NativeStorageError> {
+        let path = namespace
             .join(&identifier[..2])
             .join(format!("{identifier}.json"));
         let metadata = self.root.verify_path(&path, ExpectedType::File)?;
@@ -469,7 +534,36 @@ impl NativeCollection {
                 "raw-file reads are available only for file collections",
             ));
         }
-        let path = self.find_raw_file_path(identifier)?;
+        self.read_raw_file_at(&self.path.join("docs"), identifier)
+    }
+
+    /// Read one retained soft-deleted raw file. Its modification time is the
+    /// deletion timestamp established by the JavaScript engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid IDs, duplicate files, corrupt metadata,
+    /// unsafe paths, oversized files, or I/O failures.
+    pub fn read_deleted_raw_file(
+        &self,
+        identifier: &str,
+    ) -> Result<StoredRawFile, NativeStorageError> {
+        validate_ttid_shape(identifier)?;
+        if self.kind != CollectionKind::File {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::Unsupported,
+                "deleted raw-file reads are available only for file collections",
+            ));
+        }
+        self.read_raw_file_at(&self.path.join(".deleted"), identifier)
+    }
+
+    fn read_raw_file_at(
+        &self,
+        namespace: &Path,
+        identifier: &str,
+    ) -> Result<StoredRawFile, NativeStorageError> {
+        let path = self.find_raw_file_path(namespace, identifier)?;
         let filename = path_utf8_name(&path, "raw-file")?;
         let extension = validate_raw_extension(filename, identifier)?.to_owned();
         let (file, metadata) = self.root.open_file(&path, MAX_RAW_FILE_BYTES)?;
@@ -502,8 +596,12 @@ impl NativeCollection {
         })
     }
 
-    fn find_raw_file_path(&self, identifier: &str) -> Result<PathBuf, NativeStorageError> {
-        let shard = self.path.join("docs").join(&identifier[..2]);
+    fn find_raw_file_path(
+        &self,
+        namespace: &Path,
+        identifier: &str,
+    ) -> Result<PathBuf, NativeStorageError> {
+        let shard = namespace.join(&identifier[..2]);
         if !path_exists_no_follow(&shard)? {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::NotFound,
@@ -1394,6 +1492,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reads_retained_document_tombstones() {
+        let fixture = TestRoot::create();
+        fs::create_dir_all(fixture.0.join(".collections/users/.deleted/4V")).unwrap();
+        fs::write(
+            fixture
+                .0
+                .join(".collections/users/.deleted/4V/4VRNF52JPCO.json"),
+            br#"{"name":"Deleted Ada"}"#,
+        )
+        .unwrap();
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("users")
+            .unwrap();
+        assert_eq!(collection.deleted_document_ids().unwrap(), ["4VRNF52JPCO"]);
+        assert_eq!(
+            collection
+                .read_deleted_document("4VRNF52JPCO")
+                .unwrap()
+                .bytes,
+            br#"{"name":"Deleted Ada"}"#
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn reads_raw_bytes_custom_metadata_and_native_access() {
@@ -1438,6 +1561,26 @@ mod tests {
             collection.read_raw_file("4VRNF52JPCO").unwrap_err().code(),
             NativeStorageErrorCode::CorruptMetadata
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_retained_raw_file_tombstones() {
+        let fixture = TestRoot::create();
+        let live = fixture.create_raw_file();
+        let deleted = fixture
+            .0
+            .join(".buckets/assets/.deleted/4V/4VRNF52JPCO.bin");
+        fs::create_dir_all(deleted.parent().unwrap()).unwrap();
+        fs::rename(live, &deleted).unwrap();
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("assets")
+            .unwrap();
+        assert_eq!(collection.deleted_raw_file_ids().unwrap(), ["4VRNF52JPCO"]);
+        let stored = collection.read_deleted_raw_file("4VRNF52JPCO").unwrap();
+        assert_eq!(stored.bytes, [0, 1, 2, 3, 255]);
+        assert_eq!(stored.key, "/fixtures/sample.bin");
     }
 
     #[cfg(unix)]

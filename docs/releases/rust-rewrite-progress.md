@@ -13,7 +13,7 @@ A local pass does not promote a platform or release tier.
 | 1 — Compatibility oracle    | Partial                                | Versioned machine/storage/error schemas; document, raw-file, metadata, permission, tombstone, index, predicate, SQL, and machine fixture generator/verifiers                    | Released-binary recorder; retained cross-platform roots for encryption, versions, interrupted transactions, and corruption errors            |
 | 2 — Portable kernel         | Implemented for current fixture corpus | Bounded format readers; TTID/metadata; index snapshot/WAL scans; structured predicates; SQL AST/planner; JS differential checks; fuzz target; Miri                             | Expand historical/malformed corpus, pagination/error cases, and retained fuzz evidence                                                       |
 | 3 — Browser Wasm            | Partial                                | ABI v1, compiled Wasm scan path, warm snapshot/WAL reuse, compaction/restart, JS fallback reason, self-hosting guidance                                                        | Real OPFS I/O split, Chromium/Firefox/WebKit matrix, memory-pressure/cancellation proof, payload/init budgets, accepted end-to-end benchmark |
-| 4 — Native read-only        | Partial                                | Canonical root, link rejection, bounded document/raw-file reads, canonical/custom metadata, Unix xattrs and UID/GID/mode, Windows ADS parser, generation stability, index+WAL scan, predicates, SQL SELECT, inspect/get/get-file/find/scan CLI, no-mutation differential test | Native Windows ADS race-hardening/evidence, encryption, deleted/versioned data, rebuild verification, full path/platform matrix, benchmark |
+| 4 — Native read-only        | Partial                                | Canonical root, link rejection, bounded live/tombstone document and raw-file reads, canonical/custom metadata, Unix xattrs and UID/GID/mode, Windows ADS parser, generation stability, index+WAL scan, predicates, SQL SELECT, inspect/get/get-file/get-deleted/find/scan CLI, no-mutation differential test | Native Windows ADS race-hardening/evidence, encryption, versioned data, rebuild verification, full path/platform matrix, benchmark |
 | 5 — Native writes           | Not started                            | SQL mutation plans parse but cannot execute                                                                                                                                    | Every transaction, failpoint, crash, recovery, permission, encryption, ownership, and cloned-root differential gate                          |
 | 6 — S3 backup/restore       | Not started                            | Existing JavaScript behavior remains the oracle                                                                                                                                | Manifest reader, streaming backup, verify, restore-to-empty-root, MinIO/provider qualification, hostile endpoint tests                       |
 | 7 — Machine/CLI replacement | Partial                                | Read-only preview CLI and version identity                                                                                                                                     | Bounded NDJSON server, full operation/error corpus, cancellation/signals/pressure, all language clients against exact compiled binaries      |
@@ -28,8 +28,9 @@ The following passed on macOS arm64:
 - `cargo fmt`, workspace Clippy, unit/integration/doc tests, and `cargo-deny`;
 - compiled Wasm ABI/integration/fallback tests;
 - Rust read-only interoperability against a JavaScript-created root with a
-  before/after no-mutation snapshot, including raw bytes, durable keys, typed
-  custom metadata, checksums, and native access metadata;
+  before/after no-mutation snapshot, including live/deleted documents and raw
+  files, durable keys, typed custom metadata, checksums, and native access
+  metadata;
 - Windows-target compilation of the read-only storage, engine, and CLI crates;
 - Miri for `fylo-format` and `fylo-query`.
 

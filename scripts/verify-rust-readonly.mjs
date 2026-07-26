@@ -19,6 +19,13 @@ try {
             key: '/fixtures/sample.bin'
         })
         .metadata({ source: 'rust-readonly', reviewed: true })
+    const deletedId = await database.users.put({ name: 'Linus', score: 1, role: 'retired' })
+    await database.users.delete(deletedId)
+    const deletedRawId = await database.assets.put(
+        new File([new Uint8Array([9, 8, 7])], 'deleted.bin'),
+        { key: '/fixtures/deleted.bin' }
+    )
+    await database.assets.delete(deletedRawId)
     await database.users.rebuild()
     await database.assets.rebuild()
     await database.close()
@@ -67,6 +74,36 @@ try {
         'assets'
     ])
     assert(fileInspection.fileCount === 1, 'Rust raw-file inspection count drift')
+    assert(fileInspection.deletedCount === 1, 'Rust raw-file tombstone count drift')
+
+    const deleted = await rustJson([
+        'get-deleted',
+        '--root',
+        root,
+        '--collection',
+        'users',
+        '--id',
+        String(deletedId)
+    ])
+    assert(deleted.id === deletedId, 'Rust deleted-document ID drift')
+    assert(deleted.document.role === 'retired', 'Rust deleted-document body drift')
+    assert(deleted.deletedAt >= deleted.createdAt, 'Rust deleted-document timestamp drift')
+
+    const deletedRaw = await rustJson([
+        'get-deleted-file',
+        '--root',
+        root,
+        '--collection',
+        'assets',
+        '--id',
+        String(deletedRawId)
+    ])
+    assert(deletedRaw.file.key === '/fixtures/deleted.bin', 'Rust deleted raw-file key drift')
+    assert(deletedRaw.bytesHex === '090807', 'Rust deleted raw-file bytes drift')
+    assert(
+        deletedRaw.deletedAt === deletedRaw.metadata.updatedAt,
+        'Rust deleted raw-file timestamp drift'
+    )
 
     const [planned] = await BrowserPrefixIndexCodec.queryPrefixes('users', 'name', { $eq: 'Ada' })
     const prefix = BrowserPrefixIndexCodec.prefix('name', planned.kind, planned.valuePrefix)
@@ -110,7 +147,7 @@ try {
         'Rust preview mutated root'
     )
     console.log(
-        `Verified Rust read-only interoperability for JavaScript documents ${id}, ${graceId}, and raw file ${rawId}`
+        `Verified Rust read-only interoperability for live/deleted documents and raw files (${id}, ${graceId}, ${rawId})`
     )
 } finally {
     await rm(root, { recursive: true, force: true })

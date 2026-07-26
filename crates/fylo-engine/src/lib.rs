@@ -11,7 +11,7 @@ use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, deco
 use fylo_query::{QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery};
 use fylo_storage_native::{
     CollectionKind, GenerationStatus, NativeAccess, NativeCollection, NativeRoot,
-    NativeStorageError,
+    NativeStorageError, StoredRawFile,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -87,29 +87,64 @@ impl ReadOnlyEngine {
             let stored = collection
                 .read_raw_file(identifier)
                 .map_err(EngineError::storage)?;
+            build_read_file(identifier, stored)
+        })
+    }
+
+    /// Read one retained soft-deleted JSON document.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for unsafe/corrupt storage, invalid identifiers,
+    /// or concurrent write generations.
+    pub fn get_deleted(
+        &self,
+        collection: &str,
+        identifier: &str,
+    ) -> Result<ReadDeletedDocument, EngineError> {
+        let collection = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        Self::read_stable(&collection, || {
+            let stored = collection
+                .read_deleted_document(identifier)
+                .map_err(EngineError::storage)?;
+            let document = Document::parse(&stored.bytes, DocumentLimits::default())
+                .map_err(EngineError::format)?;
             let timestamps = decode_ttid(identifier).map_err(EngineError::format)?;
-            let metadata = CanonicalMetadata {
+            Ok(ReadDeletedDocument {
                 id: identifier.to_owned(),
                 created_at: timestamps.created_at,
-                updated_at: stored.modified_millis,
-                mtime: stored.modified_millis,
-            };
-            Ok(ReadFile {
-                file: RawFileManifest {
-                    name: format!("{identifier}{}", stored.extension),
-                    key: stored.key,
-                    extension: stored.extension,
-                    content_type: stored.content_type,
-                    content_length: stored.bytes.len() as u64,
-                    etag: stored.checksum_sha256.clone(),
-                    checksum_sha256: stored.checksum_sha256,
-                    created_at: timestamps.created_at,
-                    last_modified: stored.modified_millis,
-                },
-                metadata,
-                custom_metadata: stored.custom_metadata.into_iter().collect(),
-                access: stored.access,
-                bytes: stored.bytes,
+                deleted_at: stored.modified_millis,
+                document,
+            })
+        })
+    }
+
+    /// Read one retained soft-deleted raw file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for unsafe/corrupt storage, invalid identifiers,
+    /// or concurrent write generations.
+    pub fn get_deleted_file(
+        &self,
+        collection: &str,
+        identifier: &str,
+    ) -> Result<ReadDeletedFile, EngineError> {
+        let collection = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        Self::read_stable(&collection, || {
+            let stored = collection
+                .read_deleted_raw_file(identifier)
+                .map_err(EngineError::storage)?;
+            let deleted_at = stored.modified_millis;
+            Ok(ReadDeletedFile {
+                deleted_at,
+                file: build_read_file(identifier, stored)?,
             })
         })
     }
@@ -245,18 +280,26 @@ impl ReadOnlyEngine {
             .map_err(EngineError::storage)?;
         Self::read_stable(&collection, || {
             let generation = collection.generation().map_err(EngineError::storage)?;
-            let (document_count, file_count) = match collection.kind() {
+            let (document_count, file_count, deleted_count) = match collection.kind() {
                 CollectionKind::Document => (
                     collection
                         .document_ids()
                         .map_err(EngineError::storage)?
                         .len(),
                     0,
+                    collection
+                        .deleted_document_ids()
+                        .map_err(EngineError::storage)?
+                        .len(),
                 ),
                 CollectionKind::File => (
                     0,
                     collection
                         .raw_file_ids()
+                        .map_err(EngineError::storage)?
+                        .len(),
+                    collection
+                        .deleted_raw_file_ids()
                         .map_err(EngineError::storage)?
                         .len(),
                 ),
@@ -273,6 +316,7 @@ impl ReadOnlyEngine {
                 state: generation.state,
                 document_count,
                 file_count,
+                deleted_count,
                 index_bytes,
                 read_only: true,
             })
@@ -299,6 +343,33 @@ impl ReadOnlyEngine {
             "collection changed during a read-only operation",
         ))
     }
+}
+
+fn build_read_file(identifier: &str, stored: StoredRawFile) -> Result<ReadFile, EngineError> {
+    let timestamps = decode_ttid(identifier).map_err(EngineError::format)?;
+    let metadata = CanonicalMetadata {
+        id: identifier.to_owned(),
+        created_at: timestamps.created_at,
+        updated_at: stored.modified_millis,
+        mtime: stored.modified_millis,
+    };
+    Ok(ReadFile {
+        file: RawFileManifest {
+            name: format!("{identifier}{}", stored.extension),
+            key: stored.key,
+            extension: stored.extension,
+            content_type: stored.content_type,
+            content_length: stored.bytes.len() as u64,
+            etag: stored.checksum_sha256.clone(),
+            checksum_sha256: stored.checksum_sha256,
+            created_at: timestamps.created_at,
+            last_modified: stored.modified_millis,
+        },
+        metadata,
+        custom_metadata: stored.custom_metadata.into_iter().collect(),
+        access: stored.access,
+        bytes: stored.bytes,
+    })
 }
 
 fn shape_select_results(records: Vec<ReadDocument>, ast: &Value) -> Value {
@@ -416,6 +487,20 @@ pub struct ReadDocument {
     pub document: Document,
 }
 
+/// Retained soft-deleted JSON document.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadDeletedDocument {
+    /// Original TTID.
+    pub id: String,
+    /// TTID creation timestamp.
+    pub created_at: u64,
+    /// Tombstone modification/deletion timestamp.
+    pub deleted_at: u64,
+    /// Stored JSON document.
+    pub document: Document,
+}
+
 /// Raw-file bytes plus all metadata exposed by the read-only engine.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -431,6 +516,17 @@ pub struct ReadFile {
     /// Unwrapped file bytes. Protocol adapters must choose a bounded encoding.
     #[serde(skip_serializing)]
     pub bytes: Vec<u8>,
+}
+
+/// Retained soft-deleted raw file.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadDeletedFile {
+    /// Tombstone modification/deletion timestamp.
+    pub deleted_at: u64,
+    /// Raw-file body and metadata.
+    #[serde(flatten)]
+    pub file: ReadFile,
 }
 
 /// Existing FYLO raw-file manifest representation.
@@ -474,6 +570,8 @@ pub struct CollectionInspection {
     pub document_count: usize,
     /// Validated live raw-file count.
     pub file_count: usize,
+    /// Validated retained tombstone count.
+    pub deleted_count: usize,
     /// Immutable index snapshot bytes, or zero when absent.
     pub index_bytes: usize,
     /// Always true for this preview engine.

@@ -66,19 +66,18 @@ fn run(arguments: &[String]) -> Result<String, String> {
             )
             .map_err(|error| error.to_string())
         }
-        "get-file" => {
+        "get-file" => get_file_output(&engine, arguments),
+        "get-deleted" => {
             let collection = required_option(arguments, "--collection")?;
             let identifier = required_option(arguments, "--id")?;
-            let file = engine
-                .get_file(collection, identifier)
-                .map_err(|error| error.to_string())?;
-            let mut output = serde_json::to_value(&file).map_err(|error| error.to_string())?;
-            output
-                .as_object_mut()
-                .expect("ReadFile serializes as an object")
-                .insert("bytesHex".into(), json!(hex(&file.bytes)));
-            serde_json::to_string_pretty(&output).map_err(|error| error.to_string())
+            serde_json::to_string_pretty(
+                &engine
+                    .get_deleted(collection, identifier)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
         }
+        "get-deleted-file" => get_deleted_file_output(&engine, arguments),
         "scan-index" => {
             let collection = required_option(arguments, "--collection")?;
             let encoded = required_option(arguments, "--queries")?;
@@ -121,6 +120,37 @@ fn run(arguments: &[String]) -> Result<String, String> {
     }
 }
 
+fn get_file_output(engine: &ReadOnlyEngine, arguments: &[String]) -> Result<String, String> {
+    let collection = required_option(arguments, "--collection")?;
+    let identifier = required_option(arguments, "--id")?;
+    let file = engine
+        .get_file(collection, identifier)
+        .map_err(|error| error.to_string())?;
+    let mut output = serde_json::to_value(&file).map_err(|error| error.to_string())?;
+    output
+        .as_object_mut()
+        .expect("ReadFile serializes as an object")
+        .insert("bytesHex".into(), json!(hex(&file.bytes)));
+    serde_json::to_string_pretty(&output).map_err(|error| error.to_string())
+}
+
+fn get_deleted_file_output(
+    engine: &ReadOnlyEngine,
+    arguments: &[String],
+) -> Result<String, String> {
+    let collection = required_option(arguments, "--collection")?;
+    let identifier = required_option(arguments, "--id")?;
+    let file = engine
+        .get_deleted_file(collection, identifier)
+        .map_err(|error| error.to_string())?;
+    let mut output = serde_json::to_value(&file).map_err(|error| error.to_string())?;
+    output
+        .as_object_mut()
+        .expect("ReadDeletedFile serializes as an object")
+        .insert("bytesHex".into(), json!(hex(&file.file.bytes)));
+    serde_json::to_string_pretty(&output).map_err(|error| error.to_string())
+}
+
 fn required_option<'a>(arguments: &'a [String], name: &str) -> Result<&'a str, String> {
     let Some(index) = arguments.iter().position(|argument| argument == name) else {
         return Err(format!("missing required option {name}\n{}", usage()));
@@ -145,8 +175,10 @@ fn usage() -> String {
     "Usage:\n  fylo-rust version\n  fylo-rust inspect --root <path> --collection <name>\n  \
      fylo-rust get --root <path> --collection <name> --id <ttid>\n  fylo-rust scan-index --root \
      <path> --collection <name> --queries <json>\n  fylo-rust get-file --root <path> --collection \
-     <name> --id <ttid>\n  fylo-rust find --root <path> --collection <name> --query <json>\n  \
-     fylo-rust sql --root <path> --statement <select-sql>\n\nThis preview is strictly read-only."
+     <name> --id <ttid>\n  fylo-rust get-deleted --root <path> --collection <name> --id <ttid>\n  \
+     fylo-rust get-deleted-file --root <path> --collection <name> --id <ttid>\n  fylo-rust find \
+     --root <path> --collection <name> --query <json>\n  fylo-rust sql --root <path> --statement \
+     <select-sql>\n\nThis preview is strictly read-only."
         .into()
 }
 

@@ -22,10 +22,16 @@ impl TestRoot {
             NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(path.join(".collections/users/docs/4V")).unwrap();
+        fs::create_dir_all(path.join(".collections/users/.deleted/4V")).unwrap();
         fs::create_dir_all(path.join(".collections/users/index")).unwrap();
         fs::write(
             path.join(".collections/users/docs/4V/4VRNF52JPCO.json"),
             br#"{"name":"Ada","score":42}"#,
+        )
+        .unwrap();
+        fs::write(
+            path.join(".collections/users/.deleted/4V/4VRNF52JPCO.json"),
+            br#"{"name":"Ada","score":41}"#,
         )
         .unwrap();
         fs::write(
@@ -62,7 +68,12 @@ fn gets_inspects_and_scans_without_mutating_the_root() {
             .unwrap(),
         ["4VRNF52JPCO"]
     );
-    assert_eq!(engine.inspect("users").unwrap().document_count, 1);
+    let inspection = engine.inspect("users").unwrap();
+    assert_eq!(inspection.document_count, 1);
+    assert_eq!(inspection.deleted_count, 1);
+    let deleted = engine.get_deleted("users", "4VRNF52JPCO").unwrap();
+    assert_eq!(deleted.document.fields()["score"], 41);
+    assert_eq!(deleted.id, "4VRNF52JPCO");
     assert_eq!(snapshot_tree(&fixture.0), before);
 }
 
