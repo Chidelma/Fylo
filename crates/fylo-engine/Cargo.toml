@@ -12,6 +12,7 @@ fylo-format = { version = "0.1.0", path = "../fylo-format" }
 fylo-query = { version = "0.1.0", path = "../fylo-query" }
 fylo-storage-native = { version = "0.1.0", path = "../fylo-storage-native" }
 serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

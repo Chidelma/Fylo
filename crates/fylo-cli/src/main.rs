@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use fylo_engine::ReadOnlyEngine;
 use fylo_format::DOCUMENT_FORMAT_V1;
-use fylo_query::{QUERY_FORMAT_V1, ScanQuery};
+use fylo_query::{QUERY_FORMAT_V1, QueryLimits, ScanQuery, StructuredQuery, prepare_sql};
 use serde_json::json;
 
 const VERSION: &str = include_str!("../../../VERSION");
@@ -45,16 +45,19 @@ fn run(arguments: &[String]) -> Result<String, String> {
         .map_err(|error| error.to_string());
     }
     let root = required_option(arguments, "--root")?;
-    let collection = required_option(arguments, "--collection")?;
     let engine = ReadOnlyEngine::open(root).map_err(|error| error.to_string())?;
     match command {
-        "inspect" => serde_json::to_string_pretty(
-            &engine
-                .inspect(collection)
-                .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string()),
+        "inspect" => {
+            let collection = required_option(arguments, "--collection")?;
+            serde_json::to_string_pretty(
+                &engine
+                    .inspect(collection)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        }
         "get" => {
+            let collection = required_option(arguments, "--collection")?;
             let identifier = required_option(arguments, "--id")?;
             serde_json::to_string_pretty(
                 &engine
@@ -64,6 +67,7 @@ fn run(arguments: &[String]) -> Result<String, String> {
             .map_err(|error| error.to_string())
         }
         "scan-index" => {
+            let collection = required_option(arguments, "--collection")?;
             let encoded = required_option(arguments, "--queries")?;
             if encoded.len() > 1024 * 1024 {
                 return Err("query JSON exceeds 1048576 bytes".into());
@@ -73,6 +77,29 @@ fn run(arguments: &[String]) -> Result<String, String> {
             serde_json::to_string_pretty(
                 &engine
                     .scan_index(collection, &queries)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        }
+        "find" => {
+            let collection = required_option(arguments, "--collection")?;
+            let encoded = required_option(arguments, "--query")?;
+            let query = StructuredQuery::parse(encoded.as_bytes(), QueryLimits::default())
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(
+                &engine
+                    .find(collection, &query)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        }
+        "sql" => {
+            let statement = required_option(arguments, "--statement")?;
+            let plan = prepare_sql(statement, QueryLimits::default())
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string_pretty(
+                &engine
+                    .select_sql(&plan)
                     .map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())
@@ -95,7 +122,9 @@ fn required_option<'a>(arguments: &'a [String], name: &str) -> Result<&'a str, S
 fn usage() -> String {
     "Usage:\n  fylo-rust version\n  fylo-rust inspect --root <path> --collection <name>\n  \
      fylo-rust get --root <path> --collection <name> --id <ttid>\n  fylo-rust scan-index --root \
-     <path> --collection <name> --queries <json>\n\nThis preview is strictly read-only."
+     <path> --collection <name> --queries <json>\n  fylo-rust find --root <path> --collection \
+     <name> --query <json>\n  fylo-rust sql --root <path> --statement <select-sql>\n\nThis \
+     preview is strictly read-only."
         .into()
 }
 

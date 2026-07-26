@@ -1,0 +1,158 @@
+{
+    "schemaVersion": 1,
+    "queryFormat": "fylo.query.v1",
+    "producer": "fylo-js",
+    "astCases": [
+        {
+            "sql": "SELECT * FROM users",
+            "expected": {
+                "$collection": "users",
+                "$onlyIds": false
+            }
+        },
+        {
+            "sql": "SELECT _id, name FROM users WHERE role = 'admin' AND score >= 90 OR active = true LIMIT 5",
+            "expected": {
+                "$collection": "users",
+                "$select": ["_id", "name"],
+                "$onlyIds": true,
+                "$ops": [
+                    {
+                        "role": { "$eq": "admin" },
+                        "score": { "$gte": 90 }
+                    },
+                    {
+                        "active": { "$eq": true }
+                    }
+                ],
+                "$limit": 5
+            }
+        },
+        {
+            "sql": "SELECT users.name FROM users LEFT JOIN teams ON team.id = id AND status != state GROUP BY team.id LIMIT 2",
+            "expected": {
+                "$leftCollection": "users",
+                "$rightCollection": "teams",
+                "$mode": "left",
+                "$on": {
+                    "team/id": { "$eq": "id" },
+                    "status": { "$ne": "state" }
+                },
+                "$select": ["users/name"],
+                "$groupby": "team/id",
+                "$limit": 2
+            }
+        },
+        {
+            "sql": "INSERT INTO users (name, active, note) VALUES ('O''Brien', true, NULL)",
+            "expected": {
+                "$collection": "users",
+                "$values": {
+                    "name": "O'Brien",
+                    "active": true,
+                    "note": null
+                }
+            }
+        },
+        {
+            "sql": "UPDATE users SET score = 92, active = false WHERE id = 7",
+            "expected": {
+                "$collection": "users",
+                "$set": {
+                    "score": 92,
+                    "active": false
+                },
+                "$where": {
+                    "$collection": "users",
+                    "$ops": [
+                        {
+                            "id": { "$eq": 7 }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "sql": "DELETE FROM users WHERE retired = true",
+            "expected": {
+                "$collection": "users",
+                "$ops": [
+                    {
+                        "retired": { "$eq": true }
+                    }
+                ]
+            }
+        },
+        {
+            "sql": "CREATE TABLE archive",
+            "expected": {
+                "$collection": "archive"
+            }
+        },
+        {
+            "sql": "DROP TABLE archive",
+            "expected": {
+                "$collection": "archive"
+            }
+        }
+    ],
+    "planCases": [
+        {
+            "sql": "EXPLAIN SELECT * FROM users WHERE role = 'admin'",
+            "expected": {
+                "sql": "SELECT * FROM users WHERE role = 'admin'",
+                "operation": "SELECT",
+                "collection": "users",
+                "ast": {
+                    "$collection": "users",
+                    "$onlyIds": false,
+                    "$ops": [
+                        {
+                            "role": { "$eq": "admin" }
+                        }
+                    ]
+                },
+                "explain": true,
+                "analyze": false,
+                "access": [
+                    {
+                        "kind": "prefix-index",
+                        "field": "role",
+                        "operators": ["$eq"]
+                    }
+                ]
+            }
+        },
+        {
+            "sql": "EXPLAIN ANALYZE UPDATE users SET active = true WHERE score >= 90",
+            "expected": {
+                "sql": "UPDATE users SET active = true WHERE score >= 90",
+                "operation": "UPDATE",
+                "collection": "users",
+                "ast": {
+                    "$collection": "users",
+                    "$set": {
+                        "active": true
+                    },
+                    "$where": {
+                        "$collection": "users",
+                        "$ops": [
+                            {
+                                "score": { "$gte": 90 }
+                            }
+                        ]
+                    }
+                },
+                "explain": true,
+                "analyze": true,
+                "access": [
+                    {
+                        "kind": "prefix-index",
+                        "field": "score",
+                        "operators": ["$gte"]
+                    }
+                ]
+            }
+        }
+    ]
+}

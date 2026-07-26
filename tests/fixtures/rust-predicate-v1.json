@@ -1,0 +1,79 @@
+{
+    "schemaVersion": 1,
+    "queryFormat": "fylo.structured-query.v1",
+    "producer": "fylo-js",
+    "cases": [
+        {
+            "name": "nested coercion range like and contains",
+            "document": {
+                "name": "Ada Lovelace",
+                "score": "42",
+                "active": true,
+                "tags": ["math", 7],
+                "profile": { "city": "London" }
+            },
+            "query": {
+                "$ops": [
+                    {
+                        "score": { "$gte": 40, "$lt": 50 },
+                        "active": { "$eq": 1 },
+                        "name": { "$like": "Ada%" },
+                        "tags": { "$contains": "math" },
+                        "profile.city": { "$eq": "London" }
+                    }
+                ],
+                "$created": { "$lte": 10 },
+                "$updated": { "$gt": 10 }
+            },
+            "timestamps": { "createdAt": 10, "updatedAt": 20 },
+            "expected": true
+        },
+        {
+            "name": "or of and operations",
+            "document": { "role": "editor", "enabled": true },
+            "query": {
+                "$ops": [
+                    { "role": { "$eq": "admin" }, "enabled": { "$eq": true } },
+                    { "role": { "$eq": "editor" }, "enabled": { "$eq": true } }
+                ]
+            },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": true
+        },
+        {
+            "name": "missing loosely equals null",
+            "document": {},
+            "query": { "$ops": [{ "missing": { "$eq": null } }] },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": true
+        },
+        {
+            "name": "utf16 underscore is one code unit",
+            "document": { "symbol": "😀" },
+            "query": { "$ops": [{ "symbol": { "$like": "_" } }] },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": false
+        },
+        {
+            "name": "utf16 surrogate pair takes two underscores",
+            "document": { "symbol": "😀" },
+            "query": { "$ops": [{ "symbol": { "$like": "__" } }] },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": true
+        },
+        {
+            "name": "timestamp rejection",
+            "document": { "name": "Ada" },
+            "query": { "$updated": { "$lt": 20 } },
+            "timestamps": { "createdAt": 10, "updatedAt": 20 },
+            "expected": false
+        },
+        {
+            "name": "null numeric coercion",
+            "document": { "score": null },
+            "query": { "$ops": [{ "score": { "$gte": 0, "$lte": 0 } }] },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": true
+        }
+    ]
+}

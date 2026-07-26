@@ -11,7 +11,8 @@ try {
     const database = new Fylo(root, { versioning: { autoCommit: false } })
     console.error('Seeding JavaScript compatibility root...')
     await database.users.create()
-    const id = await database.users.put({ name: 'Ada', score: 42 })
+    const id = await database.users.put({ name: 'Ada', score: 42, role: 'admin' })
+    const graceId = await database.users.put({ name: 'Grace', score: 50, role: 'editor' })
     await database.users.rebuild()
     await database.close()
 
@@ -31,7 +32,7 @@ try {
     assert(record.document.score === 42, 'Rust numeric value drift')
 
     const inspection = await rustJson(['inspect', '--root', root, '--collection', 'users'])
-    assert(inspection.documentCount === 1, 'Rust inspection count drift')
+    assert(inspection.documentCount === 2, 'Rust inspection count drift')
     assert(inspection.readOnly === true, 'Rust preview must report read-only')
 
     const [planned] = await BrowserPrefixIndexCodec.queryPrefixes('users', 'name', { $eq: 'Ada' })
@@ -49,11 +50,35 @@ try {
         JSON.stringify(ids) === JSON.stringify([id]),
         `Rust prefix scan drift for ${prefix}: ${JSON.stringify(ids)}`
     )
+    const found = await rustJson([
+        'find',
+        '--root',
+        root,
+        '--collection',
+        'users',
+        '--query',
+        JSON.stringify({ $ops: [{ role: { $eq: 'editor' } }] })
+    ])
+    assert(found.length === 1, 'Rust structured query count drift')
+    assert(found[0].metadata.id === graceId, 'Rust structured query result drift')
+    const selected = await rustJson([
+        'sql',
+        '--root',
+        root,
+        '--statement',
+        "SELECT name FROM users WHERE role = 'editor'"
+    ])
+    assert(
+        JSON.stringify(selected) === JSON.stringify({ [graceId]: { name: 'Grace' } }),
+        'Rust SQL SELECT result drift'
+    )
     assert(
         JSON.stringify(await snapshot(root)) === JSON.stringify(before),
         'Rust preview mutated root'
     )
-    console.log(`Verified Rust read-only interoperability for JavaScript document ${id}`)
+    console.log(
+        `Verified Rust read-only interoperability for JavaScript documents ${id} and ${graceId}`
+    )
 } finally {
     await rm(root, { recursive: true, force: true })
 }

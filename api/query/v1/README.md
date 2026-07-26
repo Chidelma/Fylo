@@ -14,3 +14,16 @@ codes from `api/errors/v1.json`.
 
 Unknown object fields are ignored in v1 input for compatibility with the
 JavaScript-to-Wasm host. Unknown operators fail parsing.
+
+`structured.schema.json` separately freezes the document predicate contract.
+`$ops` is an OR of operation objects; fields inside one operation are ANDed.
+The portable evaluator preserves JavaScript loose equality, numeric coercion,
+UTF-16 LIKE wildcards, array `$contains`, nested dot/slash paths, canonical
+creation/update ranges, stable input order, and the historical zero-limit
+behavior. Projection, grouping, joins, and deleted-document timestamps remain
+separate higher-layer contracts.
+
+`fylo-query::prepare_sql` parses and plans the existing FYLO SQL subset without
+executing mutations. Its compatibility AST and `EXPLAIN` access paths are
+checked against the JavaScript parser and planner using
+`tests/fixtures/rust-sql-v1.json`.

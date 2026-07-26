@@ -13,6 +13,12 @@ cargo run -p fylo-cli --bin fylo-rust -- \
 cargo run -p fylo-cli --bin fylo-rust -- \
   scan-index --root /path/to/root --collection users \
   --queries '[{"prefix":"name/eq/Ada/"}]'
+cargo run -p fylo-cli --bin fylo-rust -- \
+  find --root /path/to/root --collection users \
+  --query '{"$ops":[{"score":{"$gte":40}}],"$limit":10}'
+cargo run -p fylo-cli --bin fylo-rust -- \
+  sql --root /path/to/root \
+  --statement "SELECT name FROM users WHERE score >= 40 LIMIT 10"
 ```
 
 The preview:
@@ -24,13 +30,14 @@ The preview:
 - bounds every file and query read;
 - reads the collection generation before and after the operation;
 - retries only stable generations and fails if a writer remains active;
-- exposes only `version`, `inspect`, `get`, and `scan-index`.
+- exposes only `version`, `inspect`, `get`, `scan-index`, `find`, and read-only
+  `sql`.
 
-It currently supports JSON document reads and prefix-index scans. File
+It currently supports JSON document reads, portable structured predicates,
+SQL SELECT projection/grouping, and prefix-index scans with WAL overlays. File
 collection payloads, custom xattrs, permissions, encryption, deleted
-documents, WAL overlays, rebuilds, full structured queries, and all mutations
-remain on the JavaScript engine. Those are promotion blockers, not implicit
-support.
+documents, rebuilds, joins, and all mutations remain on the JavaScript engine.
+Those are promotion blockers, not implicit support.
 
 Opening a root through this preview does not acquire a writer lock and does not
 recover interrupted transactions. A `writing` generation fails closed so the

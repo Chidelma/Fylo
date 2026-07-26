@@ -1,0 +1,45 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://d31ma.github.io/Fylo/api/query/v1/structured.schema.json",
+    "title": "FYLO structured query v1",
+    "type": "object",
+    "properties": {
+        "$ops": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "$eq": true,
+                        "$ne": true,
+                        "$gt": true,
+                        "$gte": true,
+                        "$lt": true,
+                        "$lte": true,
+                        "$like": { "type": "string" },
+                        "$contains": true
+                    },
+                    "additionalProperties": true
+                }
+            }
+        },
+        "$created": { "$ref": "#/$defs/timestampRange" },
+        "$updated": { "$ref": "#/$defs/timestampRange" },
+        "$limit": { "type": "integer", "minimum": 0 }
+    },
+    "additionalProperties": true,
+    "$defs": {
+        "timestampRange": {
+            "type": "object",
+            "properties": {
+                "$gt": { "type": "integer", "minimum": 0 },
+                "$gte": { "type": "integer", "minimum": 0 },
+                "$lt": { "type": "integer", "minimum": 0 },
+                "$lte": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+        }
+    }
+}

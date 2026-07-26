@@ -1,11 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fylo_engine::{EngineErrorCode, ReadOnlyEngine};
 use fylo_query::ScanQuery;
 
 struct TestRoot(PathBuf);
+
+static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
 
 impl TestRoot {
     fn create() -> Self {
@@ -14,8 +17,9 @@ impl TestRoot {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "fylo-engine-read-only-{}-{nonce}",
-            std::process::id()
+            "fylo-engine-read-only-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(path.join(".collections/users/docs/4V")).unwrap();
         fs::create_dir_all(path.join(".collections/users/index")).unwrap();

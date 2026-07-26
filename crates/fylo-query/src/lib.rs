@@ -8,6 +8,11 @@ use std::collections::HashSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+mod sql;
+
+pub use sql::{AccessPath, SqlOperation, SqlPlan, prepare_sql};
 
 /// Current portable query contract.
 pub const QUERY_FORMAT_V1: &str = "fylo.query.v1";
@@ -288,6 +293,419 @@ pub fn parse_queries(bytes: &[u8], limits: QueryLimits) -> Result<Vec<ScanQuery>
     Ok(queries)
 }
 
+/// A validated FYLO structured document query.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructuredQuery {
+    operations: Vec<Map<String, Value>>,
+    created: Option<TimestampRange>,
+    updated: Option<TimestampRange>,
+    limit: Option<usize>,
+}
+
+impl StructuredQuery {
+    /// Parse a bounded structured query from JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable [`QueryError`] when the frame or supported query fields
+    /// are malformed.
+    pub fn parse(bytes: &[u8], limits: QueryLimits) -> Result<Self, QueryError> {
+        if bytes.len() > limits.max_input_bytes {
+            return Err(QueryError::new(
+                QueryErrorCode::InputTooLarge,
+                format!(
+                    "query input contains {} bytes; limit is {}",
+                    bytes.len(),
+                    limits.max_input_bytes
+                ),
+            ));
+        }
+        let value: Value = serde_json::from_slice(bytes)
+            .map_err(|error| QueryError::new(QueryErrorCode::InvalidQuery, error.to_string()))?;
+        Self::from_value(&value, limits)
+    }
+
+    /// Validate an already decoded structured query.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable [`QueryError`] when a supported field is malformed.
+    pub fn from_value(value: &Value, limits: QueryLimits) -> Result<Self, QueryError> {
+        let object = value.as_object().ok_or_else(|| {
+            QueryError::new(
+                QueryErrorCode::InvalidQuery,
+                "structured query must be a JSON object",
+            )
+        })?;
+        let operations = match object.get("$ops") {
+            None => Vec::new(),
+            Some(Value::Array(operations)) => {
+                if operations.len() > limits.max_queries {
+                    return Err(QueryError::new(
+                        QueryErrorCode::TooManyQueries,
+                        format!(
+                            "query contains {} operations; limit is {}",
+                            operations.len(),
+                            limits.max_queries
+                        ),
+                    ));
+                }
+                operations
+                    .iter()
+                    .map(|operation| {
+                        operation.as_object().cloned().ok_or_else(|| {
+                            QueryError::new(
+                                QueryErrorCode::InvalidQuery,
+                                "each $ops entry must be an object",
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            Some(_) => {
+                return Err(QueryError::new(
+                    QueryErrorCode::InvalidQuery,
+                    "$ops must be an array",
+                ));
+            }
+        };
+        for operation in &operations {
+            for (field, operand) in operation {
+                if field.len() > limits.max_term_bytes {
+                    return Err(QueryError::new(
+                        QueryErrorCode::TermTooLarge,
+                        "query field path exceeds the configured byte limit",
+                    ));
+                }
+                if let Value::Object(operators) = operand {
+                    for (operator, expected) in operators {
+                        if operator.len() > limits.max_term_bytes
+                            || serde_json::to_vec(expected)
+                                .is_ok_and(|encoded| encoded.len() > limits.max_term_bytes)
+                        {
+                            return Err(QueryError::new(
+                                QueryErrorCode::TermTooLarge,
+                                "query operand exceeds the configured byte limit",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let created = parse_timestamp_range(object.get("$created"))?;
+        let updated = parse_timestamp_range(object.get("$updated"))?;
+        let limit = match object.get("$limit") {
+            None => None,
+            Some(Value::Number(number)) => number
+                .as_u64()
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| {
+                    QueryError::new(
+                        QueryErrorCode::InvalidQuery,
+                        "$limit exceeds this platform's address space",
+                    )
+                })?,
+            Some(_) => {
+                return Err(QueryError::new(
+                    QueryErrorCode::InvalidQuery,
+                    "$limit must be a non-negative integer",
+                ));
+            }
+        };
+        if object.contains_key("$limit") && limit.is_none() {
+            return Err(QueryError::new(
+                QueryErrorCode::InvalidQuery,
+                "$limit must be a non-negative integer",
+            ));
+        }
+        Ok(Self {
+            operations,
+            created,
+            updated,
+            limit,
+        })
+    }
+
+    /// Test one document and its canonical timestamps.
+    #[must_use]
+    pub fn matches(&self, document: &Map<String, Value>, created_at: u64, updated_at: u64) -> bool {
+        if self
+            .created
+            .as_ref()
+            .is_some_and(|range| !range.matches(created_at))
+            || self
+                .updated
+                .as_ref()
+                .is_some_and(|range| !range.matches(updated_at))
+        {
+            return false;
+        }
+        if self.operations.is_empty() {
+            return true;
+        }
+        self.operations.iter().any(|operation| {
+            operation.iter().all(|(field, operand)| {
+                let Some(operators) = operand.as_object() else {
+                    return false;
+                };
+                matches_operand(value_at_path(document, field), operators)
+            })
+        })
+    }
+
+    /// Filter rows without changing their input order.
+    ///
+    /// A zero limit retains the JavaScript engine's historical “no limit”
+    /// behavior because JavaScript checks the option for truthiness.
+    #[must_use]
+    pub fn filter<'a>(&self, rows: impl IntoIterator<Item = QueryRow<'a>>) -> Vec<QueryRow<'a>> {
+        let mut output = Vec::new();
+        for row in rows {
+            if !self.matches(row.document, row.created_at, row.updated_at) {
+                continue;
+            }
+            output.push(row);
+            if self
+                .limit
+                .is_some_and(|limit| limit > 0 && output.len() >= limit)
+            {
+                break;
+            }
+        }
+        output
+    }
+
+    /// Configured result limit.
+    ///
+    /// Zero retains the JavaScript engine's historical “unlimited” behavior.
+    #[must_use]
+    pub const fn limit(&self) -> Option<usize> {
+        self.limit
+    }
+}
+
+/// Borrowed document row used by the portable predicate executor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QueryRow<'a> {
+    /// Opaque document ID.
+    pub id: &'a str,
+    /// Document object.
+    pub document: &'a Map<String, Value>,
+    /// Canonical creation time.
+    pub created_at: u64,
+    /// Canonical update time.
+    pub updated_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TimestampRange {
+    greater_than: Option<u64>,
+    greater_than_or_equal: Option<u64>,
+    less_than: Option<u64>,
+    less_than_or_equal: Option<u64>,
+}
+
+impl TimestampRange {
+    fn matches(&self, value: u64) -> bool {
+        self.greater_than.is_none_or(|expected| value > expected)
+            && self
+                .greater_than_or_equal
+                .is_none_or(|expected| value >= expected)
+            && self.less_than.is_none_or(|expected| value < expected)
+            && self
+                .less_than_or_equal
+                .is_none_or(|expected| value <= expected)
+    }
+}
+
+fn parse_timestamp_range(value: Option<&Value>) -> Result<Option<TimestampRange>, QueryError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let object = value.as_object().ok_or_else(|| {
+        QueryError::new(
+            QueryErrorCode::InvalidQuery,
+            "timestamp query must be an object",
+        )
+    })?;
+    let number = |name: &str| -> Result<Option<u64>, QueryError> {
+        match object.get(name) {
+            None => Ok(None),
+            Some(Value::Number(value)) => value.as_u64().map(Some).ok_or_else(|| {
+                QueryError::new(
+                    QueryErrorCode::InvalidQuery,
+                    "timestamp bounds must be non-negative integers",
+                )
+            }),
+            Some(_) => Err(QueryError::new(
+                QueryErrorCode::InvalidQuery,
+                "timestamp bounds must be non-negative integers",
+            )),
+        }
+    };
+    Ok(Some(TimestampRange {
+        greater_than: number("$gt")?,
+        greater_than_or_equal: number("$gte")?,
+        less_than: number("$lt")?,
+        less_than_or_equal: number("$lte")?,
+    }))
+}
+
+#[derive(Clone, Copy)]
+enum FieldValue<'a> {
+    Missing,
+    Present(&'a Value),
+}
+
+fn value_at_path<'a>(document: &'a Map<String, Value>, path: &str) -> FieldValue<'a> {
+    let mut current: Option<&'a Value> = None;
+    for (index, segment) in path
+        .split(['.', '/'])
+        .filter(|segment| !segment.is_empty())
+        .enumerate()
+    {
+        let object = if index == 0 {
+            document
+        } else {
+            let Some(Value::Object(object)) = current else {
+                return FieldValue::Missing;
+            };
+            object
+        };
+        current = object.get(segment);
+        if current.is_none() {
+            return FieldValue::Missing;
+        }
+    }
+    current.map_or(FieldValue::Missing, FieldValue::Present)
+}
+
+fn matches_operand(value: FieldValue<'_>, operators: &Map<String, Value>) -> bool {
+    for (operator, expected) in operators {
+        let matches = match operator.as_str() {
+            "$eq" => loose_equal(value, expected),
+            "$ne" => !loose_equal(value, expected),
+            "$gt" => numeric_compare(value, expected, |left, right| left > right),
+            "$gte" => numeric_compare(value, expected, |left, right| left >= right),
+            "$lt" => numeric_compare(value, expected, |left, right| left < right),
+            "$lte" => numeric_compare(value, expected, |left, right| left <= right),
+            "$like" => match (value, expected) {
+                (FieldValue::Present(Value::String(actual)), Value::String(pattern)) => {
+                    matches_like(actual, pattern)
+                }
+                _ => false,
+            },
+            "$contains" => match value {
+                FieldValue::Present(Value::Array(items)) => items
+                    .iter()
+                    .any(|item| loose_equal(FieldValue::Present(item), expected)),
+                _ => false,
+            },
+            _ => true,
+        };
+        if !matches {
+            return false;
+        }
+    }
+    true
+}
+
+fn loose_equal(actual: FieldValue<'_>, expected: &Value) -> bool {
+    match actual {
+        FieldValue::Missing | FieldValue::Present(Value::Null) => expected.is_null(),
+        FieldValue::Present(Value::String(left)) => match expected {
+            Value::String(right) => left == right,
+            Value::Number(_) | Value::Bool(_) => {
+                numeric_value(actual) == numeric_value(FieldValue::Present(expected))
+            }
+            _ => false,
+        },
+        FieldValue::Present(Value::Number(left)) => match expected {
+            Value::Number(right) => left.as_f64() == right.as_f64(),
+            Value::String(_) | Value::Bool(_) => {
+                numeric_value(actual) == numeric_value(FieldValue::Present(expected))
+            }
+            _ => false,
+        },
+        FieldValue::Present(Value::Bool(left)) => match expected {
+            Value::Bool(right) => left == right,
+            Value::String(_) | Value::Number(_) => {
+                numeric_value(actual) == numeric_value(FieldValue::Present(expected))
+            }
+            _ => false,
+        },
+        FieldValue::Present(Value::Array(_) | Value::Object(_)) => false,
+    }
+}
+
+fn numeric_compare(
+    actual: FieldValue<'_>,
+    expected: &Value,
+    compare: impl FnOnce(f64, f64) -> bool,
+) -> bool {
+    let Some(left) = numeric_value(actual) else {
+        return false;
+    };
+    let Some(right) = numeric_value(FieldValue::Present(expected)) else {
+        return false;
+    };
+    compare(left, right)
+}
+
+fn numeric_value(value: FieldValue<'_>) -> Option<f64> {
+    match value {
+        FieldValue::Present(Value::Null) => Some(0.0),
+        FieldValue::Present(Value::Bool(value)) => Some(u8::from(*value).into()),
+        FieldValue::Present(Value::Number(value)) => value.as_f64(),
+        FieldValue::Present(Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Some(0.0)
+            } else {
+                trimmed.parse().ok()
+            }
+        }
+        FieldValue::Present(Value::Array(values)) if values.is_empty() => Some(0.0),
+        FieldValue::Present(Value::Array(values)) if values.len() == 1 => {
+            numeric_value(FieldValue::Present(&values[0]))
+        }
+        FieldValue::Missing | FieldValue::Present(Value::Array(_) | Value::Object(_)) => None,
+    }
+}
+
+fn matches_like(value: &str, pattern: &str) -> bool {
+    let value: Vec<u16> = value.encode_utf16().collect();
+    let pattern: Vec<u16> = pattern.encode_utf16().collect();
+    let percent = u16::from(b'%');
+    let underscore = u16::from(b'_');
+    let mut value_index = 0;
+    let mut pattern_index = 0;
+    let mut wildcard_index = None;
+    let mut wildcard_value_index = 0;
+    while value_index < value.len() {
+        let token = pattern.get(pattern_index).copied();
+        if token.is_some_and(|token| token == underscore || token == value[value_index]) {
+            value_index += 1;
+            pattern_index += 1;
+        } else if token == Some(percent) {
+            wildcard_index = Some(pattern_index);
+            pattern_index += 1;
+            wildcard_value_index = value_index;
+        } else if let Some(wildcard) = wildcard_index {
+            pattern_index = wildcard + 1;
+            wildcard_value_index += 1;
+            value_index = wildcard_value_index;
+        } else {
+            return false;
+        }
+    }
+    while pattern.get(pattern_index) == Some(&percent) {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
+}
+
 fn validate_queries(queries: &[ScanQuery], limits: QueryLimits) -> Result<(), QueryError> {
     if queries.is_empty() {
         return Err(QueryError::new(
@@ -438,7 +856,7 @@ pub struct QueryError {
 }
 
 impl QueryError {
-    fn new(code: QueryErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: QueryErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -468,6 +886,8 @@ impl std::error::Error for QueryError {}
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn query(prefix: &str) -> ScanQuery {
@@ -560,5 +980,102 @@ mod tests {
                 assert_eq!(actual, expected, "count={document_count}, prefix={prefix}");
             }
         }
+    }
+
+    #[test]
+    fn structured_predicates_match_javascript_coercion_and_like_semantics() {
+        let document = json!({
+            "name": "Ada Lovelace",
+            "score": "42",
+            "active": true,
+            "tags": ["math", 7],
+            "profile": { "city": "London" }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let query = StructuredQuery::from_value(
+            &json!({
+                "$ops": [{
+                    "score": { "$gte": 40, "$lt": 50 },
+                    "active": { "$eq": 1 },
+                    "name": { "$like": "Ada%" },
+                    "tags": { "$contains": "math" },
+                    "profile.city": { "$eq": "London" }
+                }],
+                "$created": { "$lte": 10 },
+                "$updated": { "$gt": 10 }
+            }),
+            QueryLimits::default(),
+        )
+        .unwrap();
+        assert!(query.matches(&document, 10, 20));
+        assert!(!query.matches(&document, 11, 20));
+    }
+
+    #[test]
+    fn structured_operations_are_or_of_and_and_keep_stable_limit_order() {
+        let ada = json!({"name":"Ada","role":"admin"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let grace = json!({"name":"Grace","role":"editor"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let linus = json!({"name":"Linus","role":"reader"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let query = StructuredQuery::from_value(
+            &json!({
+                "$ops": [
+                    {"role":{"$eq":"admin"}},
+                    {"role":{"$eq":"editor"}}
+                ],
+                "$limit": 1
+            }),
+            QueryLimits::default(),
+        )
+        .unwrap();
+        let rows = [
+            QueryRow {
+                id: "ada",
+                document: &ada,
+                created_at: 1,
+                updated_at: 1,
+            },
+            QueryRow {
+                id: "grace",
+                document: &grace,
+                created_at: 1,
+                updated_at: 1,
+            },
+            QueryRow {
+                id: "linus",
+                document: &linus,
+                created_at: 1,
+                updated_at: 1,
+            },
+        ];
+        assert_eq!(
+            query
+                .filter(rows)
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            ["ada"]
+        );
+    }
+
+    #[test]
+    fn missing_fields_are_loosely_equal_to_null_like_javascript_undefined() {
+        let document = Map::new();
+        let query = StructuredQuery::from_value(
+            &json!({"$ops":[{"missing":{"$eq":null}}]}),
+            QueryLimits::default(),
+        )
+        .unwrap();
+        assert!(query.matches(&document, 0, 0));
     }
 }

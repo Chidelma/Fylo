@@ -8,11 +8,12 @@ use std::fmt;
 use std::path::Path;
 
 use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, decode_ttid};
-use fylo_query::{QueryError, QueryLimits, ScanQuery};
+use fylo_query::{QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery};
 use fylo_storage_native::{
     CollectionKind, GenerationStatus, NativeCollection, NativeRoot, NativeStorageError,
 };
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 const MAX_STABLE_READ_ATTEMPTS: usize = 3;
 
@@ -104,6 +105,90 @@ impl ReadOnlyEngine {
         })
     }
 
+    /// Execute a validated structured query over live JSON documents.
+    ///
+    /// Candidate planning remains a separate optimization; this bounded
+    /// read-only path evaluates portable predicates in deterministic TTID
+    /// order and preserves the existing zero-limit behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for unsafe/corrupt storage, document format
+    /// failures, or a concurrent write generation.
+    pub fn find(
+        &self,
+        collection: &str,
+        query: &StructuredQuery,
+    ) -> Result<Vec<ReadDocument>, EngineError> {
+        let collection = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        Self::read_stable(&collection, || {
+            let mut records = Vec::new();
+            for identifier in collection.document_ids().map_err(EngineError::storage)? {
+                let stored = collection
+                    .read_document(&identifier)
+                    .map_err(EngineError::storage)?;
+                let document = Document::parse(&stored.bytes, DocumentLimits::default())
+                    .map_err(EngineError::format)?;
+                let timestamps = decode_ttid(&identifier).map_err(EngineError::format)?;
+                if !query.matches(
+                    document.fields(),
+                    timestamps.created_at,
+                    stored.modified_millis,
+                ) {
+                    continue;
+                }
+                records.push(ReadDocument {
+                    metadata: CanonicalMetadata {
+                        id: identifier,
+                        created_at: timestamps.created_at,
+                        updated_at: stored.modified_millis,
+                        mtime: stored.modified_millis,
+                    },
+                    document,
+                });
+                if query
+                    .limit()
+                    .is_some_and(|limit| limit > 0 && records.len() >= limit)
+                {
+                    break;
+                }
+            }
+            Ok(records)
+        })
+    }
+
+    /// Execute a prepared read-only SQL `SELECT` plan.
+    ///
+    /// Projection, only-ID shaping, grouping, predicates, ordering, and limit
+    /// behavior match the current JavaScript engine. Joins and mutations are
+    /// deliberately rejected by this read-only preview.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for non-SELECT plans, joins, malformed query
+    /// ASTs, unsafe storage, or unstable collection generations.
+    pub fn select_sql(&self, plan: &SqlPlan) -> Result<Value, EngineError> {
+        if plan.operation != SqlOperation::Select {
+            return Err(EngineError::new(
+                EngineErrorCode::Query,
+                "read-only SQL execution accepts SELECT statements only",
+            ));
+        }
+        if plan.ast.get("$leftCollection").is_some() {
+            return Err(EngineError::new(
+                EngineErrorCode::Query,
+                "read-only SQL joins are not implemented",
+            ));
+        }
+        let query = StructuredQuery::from_value(&plan.ast, QueryLimits::default())
+            .map_err(EngineError::query)?;
+        let records = self.find(&plan.collection, &query)?;
+        Ok(shape_select_results(records, &plan.ast))
+    }
+
     /// Inspect one collection without changing any files.
     ///
     /// # Errors
@@ -161,6 +246,111 @@ impl ReadOnlyEngine {
             EngineErrorCode::ConcurrentWrite,
             "collection changed during a read-only operation",
         ))
+    }
+}
+
+fn shape_select_results(records: Vec<ReadDocument>, ast: &Value) -> Value {
+    let selection = ast
+        .get("$select")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let only_ids = ast
+        .get("$onlyIds")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let group_by = ast.get("$groupby").and_then(Value::as_str);
+    if let Some(group_by) = group_by {
+        return shape_grouped_results(records, &selection, group_by, only_ids);
+    }
+    if only_ids {
+        return Value::Array(
+            records
+                .into_iter()
+                .map(|record| Value::String(record.metadata.id))
+                .collect(),
+        );
+    }
+    Value::Object(
+        records
+            .into_iter()
+            .map(|record| {
+                (
+                    record.metadata.id,
+                    Value::Object(project(record.document.into_fields(), &selection)),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn shape_grouped_results(
+    records: Vec<ReadDocument>,
+    selection: &[&str],
+    group_by: &str,
+    only_ids: bool,
+) -> Value {
+    let mut groups = Map::new();
+    for record in records {
+        let mut fields = project(record.document.into_fields(), selection);
+        let Some(group_value) = fields.get(group_by).filter(|value| js_truthy(value)) else {
+            continue;
+        };
+        let group = js_string(group_value);
+        fields.remove(group_by);
+        let members = groups
+            .entry(group)
+            .or_insert_with(|| Value::Object(Map::new()));
+        members
+            .as_object_mut()
+            .expect("group entries are created as objects")
+            .insert(record.metadata.id, Value::Object(fields));
+    }
+    if !only_ids {
+        return Value::Object(groups);
+    }
+    Value::Object(
+        groups
+            .into_iter()
+            .map(|(group, members)| {
+                let identifiers = members
+                    .as_object()
+                    .expect("group entries are objects")
+                    .keys()
+                    .cloned()
+                    .map(Value::String)
+                    .collect();
+                (group, Value::Array(identifiers))
+            })
+            .collect(),
+    )
+}
+
+fn project(mut fields: Map<String, Value>, selection: &[&str]) -> Map<String, Value> {
+    if !selection.is_empty() {
+        fields.retain(|field, _| selection.contains(&field.as_str()));
+    }
+    fields
+}
+
+fn js_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+fn js_string(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        Value::Array(values) => values.iter().map(js_string).collect::<Vec<_>>().join(","),
+        Value::Object(_) => "[object Object]".into(),
     }
 }
 
