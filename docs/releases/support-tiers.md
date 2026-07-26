@@ -109,15 +109,17 @@ The release evidence runner must refuse a stronger profile when:
 
 ## Initial Rust rewrite status
 
-| Surface                               | Status at branch creation                   | Reason                                                   |
-| ------------------------------------- | ------------------------------------------- | -------------------------------------------------------- |
-| Existing JavaScript/Bun native engine | Unchanged from its current published matrix | The rewrite branch does not alter current support        |
-| Rust portable crates                  | Experimental, not yet implemented           | Architecture decisions only                              |
-| Rust native engine                    | Unsupported, not yet implemented            | No artifact or evidence                                  |
-| Rust/Wasm production kernel           | Experimental                                | PoC evidence exists; production integration gates do not |
-| JavaScript browser fallback           | Unchanged from its current published matrix | Remains required during migration                        |
+| Surface                               | Current rewrite status                      | Reason                                                            |
+| ------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------- |
+| Existing JavaScript/Bun native engine | Unchanged from its current published matrix | The rewrite branch does not alter current support                 |
+| Rust portable crates                  | Experimental; local corpus passes           | Cross-platform retained evidence and broader fixtures are pending |
+| Rust native engine                    | Developer read-only preview; not a writer   | Document/index/query reads pass locally; Phase 4 is incomplete    |
+| Rust/Wasm production kernel           | Experimental acceleration path              | Compiled integration/fallback passes; browser matrix is pending   |
+| JavaScript browser fallback           | Unchanged from its current published matrix | Remains required during migration                                 |
 
-No accepted ADR promotes a Rust surface by itself.
+No accepted ADR or local test promotes a Rust surface by itself. Current
+implementation and evidence gaps are tracked in
+[`rust-rewrite-progress.md`](rust-rewrite-progress.md).
 
 ## Platform claim format
 
