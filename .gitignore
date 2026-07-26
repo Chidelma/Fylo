@@ -1,6 +1,7 @@
 node_modules
 dist
 dist-bin
+target/
 .env
 db
 docker-compose.yml

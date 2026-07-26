@@ -1,0 +1,109 @@
+name: Rust engine
+
+on:
+    pull_request:
+        branches: [main]
+        paths:
+            - '.github/workflows/rust.yml'
+            - 'Cargo.lock'
+            - 'Cargo.toml'
+            - 'VERSION'
+            - 'crates/**'
+            - 'deny.toml'
+            - 'package.json'
+            - 'rust-toolchain.toml'
+            - 'rustfmt.toml'
+            - 'scripts/build-browser.mjs'
+            - 'scripts/run-rust.mjs'
+            - 'src/browser/wasm/**'
+            - 'xtask/**'
+    push:
+        branches:
+            - main
+            - codex/rust-rewrite
+        paths:
+            - '.github/workflows/rust.yml'
+            - 'Cargo.lock'
+            - 'Cargo.toml'
+            - 'VERSION'
+            - 'crates/**'
+            - 'deny.toml'
+            - 'package.json'
+            - 'rust-toolchain.toml'
+            - 'rustfmt.toml'
+            - 'scripts/build-browser.mjs'
+            - 'scripts/run-rust.mjs'
+            - 'src/browser/wasm/**'
+            - 'xtask/**'
+
+permissions:
+    contents: read
+
+concurrency:
+    group: rust-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    quality:
+        name: Format, lint, test, and dependency policy
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Set up Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install JavaScript dependencies
+              run: bun install --frozen-lockfile
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
+            - name: Verify workspace identity
+              run: bun run rust:verify
+
+            - name: Check Rust formatting
+              run: bun run rust:fmt
+
+            - name: Run Clippy
+              run: bun run rust:clippy
+
+            - name: Run Rust tests
+              run: bun run rust:test
+
+            - name: Install cargo-deny
+              run: bun ./scripts/run-rust.mjs cargo install cargo-deny --version 0.19.4 --locked
+
+            - name: Check dependency policy
+              run: bun run rust:deny
+
+    wasm:
+        name: Wasm target and browser fallback
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Set up Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install dependencies
+              run: bun install --frozen-lockfile
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
+            - name: Build browser client with Wasm
+              run: bun run build:web:wasm
+
+            - name: Run Wasm integration and fallback tests
+              run: bun test tests/browser/wasm-index.test.js --timeout 120000 --parallel=1

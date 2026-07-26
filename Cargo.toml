@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/fylo-format",
+    "src/browser/wasm",
+    "xtask",
+]
+default-members = [
+    "crates/fylo-format",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+repository = "https://github.com/d31ma/Fylo"
+
+[workspace.dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+strip = true

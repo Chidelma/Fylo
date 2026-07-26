@@ -37,7 +37,7 @@ if (withWasm) {
     await buildWasm()
     await cp(
         new URL(
-            '../src/browser/wasm/target/wasm32-unknown-unknown/release/fylo_browser_index.wasm',
+            '../target/wasm32-unknown-unknown/release/fylo_browser_index.wasm',
             import.meta.url
         ),
         new URL('../dist-web/fylo-index.wasm', import.meta.url)
