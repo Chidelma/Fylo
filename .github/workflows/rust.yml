@@ -96,7 +96,9 @@ jobs:
               run: bun run rust:test
 
             - name: Verify JavaScript-to-Rust read-only interoperability
-              run: bun run rust:interop:readonly
+              run: |
+                  bun run rust:interop:readonly
+                  bun run golden:smoke
 
             - name: Install cargo-deny
               run: bun ./scripts/run-rust.mjs cargo install cargo-deny --version 0.19.4 --locked

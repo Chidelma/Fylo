@@ -1,0 +1,91 @@
+import { readFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+
+import Fylo from '../src/index.js'
+import { assertEqual, hashRoot } from './rust-golden-root-lib.mjs'
+
+const input = option('--input')
+if (!input) throw new Error('Usage: verify-rust-golden-root.mjs --input <fixture-directory>')
+
+const directory = resolve(input)
+const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
+if (manifest.format !== 'fylo.rust-golden-root.v1') {
+    throw new Error(`Unsupported golden-root manifest: ${manifest.format}`)
+}
+const operationFrames = (await readFile(join(directory, manifest.operations), 'utf8'))
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+if (operationFrames.length < 7) throw new Error('Golden-root operation log is incomplete')
+
+const root = join(directory, manifest.root.path)
+const tree = await hashRoot(root)
+assertEqual(tree.digest, manifest.root.digest, 'root digest')
+assertEqual(tree.entries.length, manifest.root.entries, 'root entry count')
+
+const database = new Fylo(root, { versioning: { autoCommit: false } })
+try {
+    const document = manifest.probes.document
+    assertEqual(
+        await database[document.collection].get(document.id).once(),
+        document.value,
+        'document probe'
+    )
+    assertEqual(
+        await database[document.collection].get(document.id).metadata(),
+        document.metadata,
+        'document metadata probe'
+    )
+
+    const protectedDocument = manifest.probes.protectedDocument
+    const protectedGet = protectedDocument.access
+        ? database[protectedDocument.collection]
+              .get(protectedDocument.id)
+              .as({ uid: protectedDocument.access.uid })
+        : database[protectedDocument.collection].get(protectedDocument.id).once()
+    assertEqual(await protectedGet, protectedDocument.value, 'protected document probe')
+
+    const query = manifest.probes.query
+    assertEqual(
+        await collect(database[query.collection].find(query.query)),
+        query.value,
+        'query probe'
+    )
+    const deleted = manifest.probes.deleted
+    assertEqual(
+        await collect(database[deleted.collection].find.deleted(deleted.query)),
+        deleted.value,
+        'deleted-document probe'
+    )
+
+    const file = manifest.probes.file
+    assertEqual(await database[file.collection].get(file.id).once(), file.value, 'file probe')
+    assertEqual(
+        await database[file.collection].get(file.id).metadata(),
+        file.metadata,
+        'file metadata probe'
+    )
+    assertEqual(
+        Buffer.from(await database[file.collection].get(file.id).bytes()).toString('base64'),
+        file.bytesBase64,
+        'file bytes probe'
+    )
+} finally {
+    await database.close()
+}
+
+console.log(
+    `Verified ${manifest.format} from FYLO ${manifest.producer.version} with ${operationFrames.length} operations`
+)
+
+async function collect(cursor) {
+    const values = []
+    for await (const value of cursor.collect()) values.push(value)
+    return values
+}
+
+function option(name) {
+    const index = process.argv.indexOf(name)
+    return index === -1 ? null : process.argv[index + 1]
+}
