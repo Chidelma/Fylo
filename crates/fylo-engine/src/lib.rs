@@ -10,7 +10,8 @@ use std::path::Path;
 use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, decode_ttid};
 use fylo_query::{QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery};
 use fylo_storage_native::{
-    CollectionKind, GenerationStatus, NativeCollection, NativeRoot, NativeStorageError,
+    CollectionKind, GenerationStatus, NativeAccess, NativeCollection, NativeRoot,
+    NativeStorageError,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -67,6 +68,48 @@ impl ReadOnlyEngine {
                     mtime: stored.modified_millis,
                 },
                 document,
+            })
+        })
+    }
+
+    /// Read one unwrapped raw file with canonical, custom, and native metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for unsafe storage, missing/corrupt xattrs,
+    /// invalid identifiers, oversized files, or concurrent write generations.
+    pub fn get_file(&self, collection: &str, identifier: &str) -> Result<ReadFile, EngineError> {
+        let collection = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        Self::read_stable(&collection, || {
+            let stored = collection
+                .read_raw_file(identifier)
+                .map_err(EngineError::storage)?;
+            let timestamps = decode_ttid(identifier).map_err(EngineError::format)?;
+            let metadata = CanonicalMetadata {
+                id: identifier.to_owned(),
+                created_at: timestamps.created_at,
+                updated_at: stored.modified_millis,
+                mtime: stored.modified_millis,
+            };
+            Ok(ReadFile {
+                file: RawFileManifest {
+                    name: format!("{identifier}{}", stored.extension),
+                    key: stored.key,
+                    extension: stored.extension,
+                    content_type: stored.content_type,
+                    content_length: stored.bytes.len() as u64,
+                    etag: stored.checksum_sha256.clone(),
+                    checksum_sha256: stored.checksum_sha256,
+                    created_at: timestamps.created_at,
+                    last_modified: stored.modified_millis,
+                },
+                metadata,
+                custom_metadata: stored.custom_metadata.into_iter().collect(),
+                access: stored.access,
+                bytes: stored.bytes,
             })
         })
     }
@@ -202,13 +245,21 @@ impl ReadOnlyEngine {
             .map_err(EngineError::storage)?;
         Self::read_stable(&collection, || {
             let generation = collection.generation().map_err(EngineError::storage)?;
-            let document_count = if collection.kind() == CollectionKind::Document {
-                collection
-                    .document_ids()
-                    .map_err(EngineError::storage)?
-                    .len()
-            } else {
-                0
+            let (document_count, file_count) = match collection.kind() {
+                CollectionKind::Document => (
+                    collection
+                        .document_ids()
+                        .map_err(EngineError::storage)?
+                        .len(),
+                    0,
+                ),
+                CollectionKind::File => (
+                    0,
+                    collection
+                        .raw_file_ids()
+                        .map_err(EngineError::storage)?
+                        .len(),
+                ),
             };
             let index_bytes = collection
                 .index_snapshot()
@@ -221,6 +272,7 @@ impl ReadOnlyEngine {
                 generation: generation.generation,
                 state: generation.state,
                 document_count,
+                file_count,
                 index_bytes,
                 read_only: true,
             })
@@ -364,6 +416,48 @@ pub struct ReadDocument {
     pub document: Document,
 }
 
+/// Raw-file bytes plus all metadata exposed by the read-only engine.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadFile {
+    /// Canonical TTID and filesystem timestamps.
+    pub metadata: CanonicalMetadata,
+    /// Existing FYLO raw-file manifest fields.
+    pub file: RawFileManifest,
+    /// Developer-defined xattr/ADS metadata.
+    pub custom_metadata: Map<String, Value>,
+    /// Native owner, group, and permission mode.
+    pub access: NativeAccess,
+    /// Unwrapped file bytes. Protocol adapters must choose a bounded encoding.
+    #[serde(skip_serializing)]
+    pub bytes: Vec<u8>,
+}
+
+/// Existing FYLO raw-file manifest representation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawFileManifest {
+    /// TTID filename.
+    pub name: String,
+    /// Durable logical object key.
+    pub key: String,
+    /// Safe final extension.
+    pub extension: String,
+    /// Inferred content type.
+    pub content_type: String,
+    /// Unwrapped byte length.
+    pub content_length: u64,
+    /// Entity tag, equal to the cached/recomputed SHA-256.
+    pub etag: String,
+    /// SHA-256 checksum.
+    #[serde(rename = "checksumSHA256")]
+    pub checksum_sha256: String,
+    /// TTID creation time in Unix milliseconds.
+    pub created_at: u64,
+    /// Filesystem modification time in Unix milliseconds.
+    pub last_modified: u64,
+}
+
 /// Read-only collection inspection result.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -378,6 +472,8 @@ pub struct CollectionInspection {
     pub state: GenerationStatus,
     /// Validated live JSON document count.
     pub document_count: usize,
+    /// Validated live raw-file count.
+    pub file_count: usize,
     /// Immutable index snapshot bytes, or zero when absent.
     pub index_bytes: usize,
     /// Always true for this preview engine.

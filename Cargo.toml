@@ -28,6 +28,8 @@ repository = "https://github.com/d31ma/Fylo"
 [workspace.dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+xattr = "1.6.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,6 +26,26 @@ try {
         join(fixture, 'root'),
         '--collection',
         'people'
+    ])
+    const manifest = JSON.parse(await readFile(join(fixture, 'manifest.json'), 'utf8'))
+    await run([
+        './scripts/run-rust.mjs',
+        'cargo',
+        'run',
+        '--quiet',
+        '--locked',
+        '-p',
+        'fylo-cli',
+        '--bin',
+        'fylo-rust',
+        '--',
+        'get-file',
+        '--root',
+        join(fixture, 'root'),
+        '--collection',
+        manifest.probes.file.collection,
+        '--id',
+        manifest.probes.file.id
     ])
     console.log('Verified generated JavaScript golden root with the Rust read-only engine')
 } finally {

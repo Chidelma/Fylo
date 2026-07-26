@@ -12,6 +12,10 @@ fylo-format = { version = "0.1.0", path = "../fylo-format" }
 fylo-query = { version = "0.1.0", path = "../fylo-query" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+xattr.workspace = true
 
 [lints]
 workspace = true

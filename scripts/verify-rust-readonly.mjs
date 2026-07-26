@@ -11,9 +11,16 @@ try {
     const database = new Fylo(root, { versioning: { autoCommit: false } })
     console.error('Seeding JavaScript compatibility root...')
     await database.users.create()
+    await database.assets.create({ kind: 'file' })
     const id = await database.users.put({ name: 'Ada', score: 42, role: 'admin' })
     const graceId = await database.users.put({ name: 'Grace', score: 50, role: 'editor' })
+    const rawId = await database.assets
+        .put(new File([new Uint8Array([0, 1, 2, 3, 255])], 'sample.bin'), {
+            key: '/fixtures/sample.bin'
+        })
+        .metadata({ source: 'rust-readonly', reviewed: true })
     await database.users.rebuild()
+    await database.assets.rebuild()
     await database.close()
 
     const before = await snapshot(root)
@@ -34,6 +41,32 @@ try {
     const inspection = await rustJson(['inspect', '--root', root, '--collection', 'users'])
     assert(inspection.documentCount === 2, 'Rust inspection count drift')
     assert(inspection.readOnly === true, 'Rust preview must report read-only')
+
+    const raw = await rustJson([
+        'get-file',
+        '--root',
+        root,
+        '--collection',
+        'assets',
+        '--id',
+        String(rawId)
+    ])
+    assert(raw.metadata.id === rawId, 'Rust raw-file canonical ID drift')
+    assert(raw.file.key === '/fixtures/sample.bin', 'Rust raw-file key drift')
+    assert(raw.file.extension === '.bin', 'Rust raw-file extension drift')
+    assert(raw.file.contentLength === 5, 'Rust raw-file length drift')
+    assert(raw.bytesHex === '00010203ff', 'Rust raw-file bytes drift')
+    assert(raw.customMetadata.source === 'rust-readonly', 'Rust raw-file metadata drift')
+    assert(raw.customMetadata.reviewed === true, 'Rust typed raw-file metadata drift')
+    assert(raw.file.etag === raw.file.checksumSHA256, 'Rust raw-file checksum/etag drift')
+    const fileInspection = await rustJson([
+        'inspect',
+        '--root',
+        root,
+        '--collection',
+        'assets'
+    ])
+    assert(fileInspection.fileCount === 1, 'Rust raw-file inspection count drift')
 
     const [planned] = await BrowserPrefixIndexCodec.queryPrefixes('users', 'name', { $eq: 'Ada' })
     const prefix = BrowserPrefixIndexCodec.prefix('name', planned.kind, planned.valuePrefix)
@@ -77,7 +110,7 @@ try {
         'Rust preview mutated root'
     )
     console.log(
-        `Verified Rust read-only interoperability for JavaScript documents ${id} and ${graceId}`
+        `Verified Rust read-only interoperability for JavaScript documents ${id}, ${graceId}, and raw file ${rawId}`
     )
 } finally {
     await rm(root, { recursive: true, force: true })

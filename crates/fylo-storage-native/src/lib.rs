@@ -4,7 +4,7 @@
 //! acquires a writer lock. It rejects linked components below the canonical
 //! root and bounds every metadata, document, and index read.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, Metadata};
 use std::io::{Read, Take};
@@ -13,6 +13,8 @@ use std::path::{Component, Path, PathBuf};
 use fylo_format::decode_ttid;
 use fylo_query::{IndexSnapshot, QueryLimits};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// Maximum collection descriptor bytes.
 pub const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
@@ -20,8 +22,18 @@ pub const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 pub const MAX_GENERATION_BYTES: u64 = 16 * 1024;
 /// Maximum document bytes read by the native preview.
 pub const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum raw-file bytes returned by one native preview read.
+pub const MAX_RAW_FILE_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum prefix-index WAL bytes merged by one read.
 pub const MAX_INDEX_WAL_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum developer metadata value accepted from one xattr/ADS entry.
+pub const MAX_META_VALUE_BYTES: usize = 60 * 1024;
+/// Maximum aggregate FYLO metadata accepted from one raw file.
+pub const MAX_FILE_METADATA_BYTES: usize = 1024 * 1024;
+
+const KEY_XATTR: &str = "user.fylo.key";
+const CHECKSUM_XATTR: &str = "user.fylo.checksum";
+const META_XATTR_PREFIX: &str = "user.fylo.meta.";
 
 const RESERVED_COLLECTIONS: &[&str] = &[
     "sql",
@@ -164,6 +176,15 @@ impl NativeRoot {
     }
 
     fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, NativeStorageError> {
+        let (file, _) = self.open_file(path, max_bytes)?;
+        read_bounded(file.take(max_bytes.saturating_add(1)), max_bytes)
+    }
+
+    fn open_file(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+    ) -> Result<(File, Metadata), NativeStorageError> {
         let before = self.verify_path(path, ExpectedType::File)?;
         if before.len() > max_bytes {
             return Err(NativeStorageError::new(
@@ -183,7 +204,7 @@ impl NativeRoot {
                 "storage path changed while it was being opened",
             ));
         }
-        read_bounded(file.take(max_bytes.saturating_add(1)), max_bytes)
+        Ok((file, opened))
     }
 }
 
@@ -335,6 +356,72 @@ impl NativeCollection {
         Ok(ids)
     }
 
+    /// List validated live raw-file identifiers in lexical path order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-file collections, linked or malformed
+    /// entries, duplicate identifiers, or filesystem failures.
+    pub fn raw_file_ids(&self) -> Result<Vec<String>, NativeStorageError> {
+        if self.kind != CollectionKind::File {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::Unsupported,
+                "raw-file enumeration is available only for file collections",
+            ));
+        }
+        let docs = self.path.join("docs");
+        self.root.verify_path(&docs, ExpectedType::Directory)?;
+        let mut ids = BTreeSet::new();
+        for shard in read_dir_sorted(&docs)? {
+            let shard_path = shard.path();
+            let file_type = shard.file_type().map_err(NativeStorageError::io)?;
+            if file_type.is_symlink() || !file_type.is_dir() {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::UnsafePath,
+                    format!(
+                        "raw-file shard is not a regular directory: {}",
+                        shard_path.display()
+                    ),
+                ));
+            }
+            self.root
+                .verify_path(&shard_path, ExpectedType::Directory)?;
+            let shard_name = path_utf8_name(&shard_path, "raw-file shard")?;
+            for entry in read_dir_sorted(&shard_path)? {
+                let path = entry.path();
+                let file_type = entry.file_type().map_err(NativeStorageError::io)?;
+                if file_type.is_symlink() || !file_type.is_file() {
+                    return Err(NativeStorageError::new(
+                        NativeStorageErrorCode::UnsafePath,
+                        format!("raw-file entry is not a regular file: {}", path.display()),
+                    ));
+                }
+                let filename = path_utf8_name(&path, "raw-file")?;
+                if is_scratch_file(filename) {
+                    continue;
+                }
+                let Some(identifier) = raw_file_identifier(filename) else {
+                    continue;
+                };
+                validate_ttid_shape(identifier)?;
+                validate_raw_extension(filename, identifier)?;
+                if !identifier.starts_with(shard_name) {
+                    return Err(NativeStorageError::new(
+                        NativeStorageErrorCode::InvalidDocumentId,
+                        "raw-file identifier does not match its shard",
+                    ));
+                }
+                if !ids.insert(identifier.to_owned()) {
+                    return Err(NativeStorageError::new(
+                        NativeStorageErrorCode::CorruptMetadata,
+                        format!("multiple raw files found for document ID: {identifier}"),
+                    ));
+                }
+            }
+        }
+        Ok(ids.into_iter().collect())
+    }
+
     /// Read one document body and native file metadata.
     ///
     /// # Errors
@@ -361,6 +448,99 @@ impl NativeCollection {
             modified_millis: modified_millis(&metadata)?,
             path,
         })
+    }
+
+    /// Read one raw file with its durable object key, custom metadata,
+    /// checksum, and native ownership/mode metadata.
+    ///
+    /// The data and xattrs are read from the same verified open file on Unix.
+    /// Windows reads the existing `fylo.xattrs` ADS representation; native
+    /// Windows race-hardening remains qualification-gated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid IDs, duplicate files, missing durable
+    /// keys, corrupt metadata, unsafe paths, oversized files, or I/O failures.
+    pub fn read_raw_file(&self, identifier: &str) -> Result<StoredRawFile, NativeStorageError> {
+        validate_ttid_shape(identifier)?;
+        if self.kind != CollectionKind::File {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::Unsupported,
+                "raw-file reads are available only for file collections",
+            ));
+        }
+        let path = self.find_raw_file_path(identifier)?;
+        let filename = path_utf8_name(&path, "raw-file")?;
+        let extension = validate_raw_extension(filename, identifier)?.to_owned();
+        let (file, metadata) = self.root.open_file(&path, MAX_RAW_FILE_BYTES)?;
+        let attributes = read_fylo_attributes(&file, &path)?;
+        let key = required_utf8_attribute(&attributes, KEY_XATTR, identifier)?;
+        validate_raw_key(&key)?;
+        let custom_metadata = decode_custom_metadata(&attributes)?;
+        let bytes = read_bounded(
+            file.take(MAX_RAW_FILE_BYTES.saturating_add(1)),
+            MAX_RAW_FILE_BYTES,
+        )?;
+        let computed_checksum = sha256_hex(&bytes);
+        let modified_millis = modified_millis(&metadata)?;
+        let checksum_sha256 = cached_checksum(
+            attributes.get(CHECKSUM_XATTR),
+            metadata.len(),
+            modified_millis,
+        )
+        .unwrap_or(computed_checksum);
+        Ok(StoredRawFile {
+            bytes,
+            key,
+            extension: extension.clone(),
+            content_type: raw_file_content_type(&extension).to_owned(),
+            checksum_sha256,
+            custom_metadata,
+            modified_millis,
+            access: native_access(&metadata),
+            path,
+        })
+    }
+
+    fn find_raw_file_path(&self, identifier: &str) -> Result<PathBuf, NativeStorageError> {
+        let shard = self.path.join("docs").join(&identifier[..2]);
+        if !path_exists_no_follow(&shard)? {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::NotFound,
+                format!("raw file not found: {identifier}"),
+            ));
+        }
+        self.root.verify_path(&shard, ExpectedType::Directory)?;
+        let mut match_path = None;
+        for entry in read_dir_sorted(&shard)? {
+            let path = entry.path();
+            let filename = path_utf8_name(&path, "raw-file")?;
+            if raw_file_identifier(filename) != Some(identifier) {
+                continue;
+            }
+            let file_type = entry.file_type().map_err(NativeStorageError::io)?;
+            if file_type.is_symlink() || !file_type.is_file() {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::UnsafePath,
+                    format!("raw file is not a regular, non-link file: {identifier}"),
+                ));
+            }
+            validate_raw_extension(filename, identifier)?;
+            if match_path.replace(path).is_some() {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    format!("multiple raw files found for document ID: {identifier}"),
+                ));
+            }
+        }
+        let path = match_path.ok_or_else(|| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::NotFound,
+                format!("raw file not found: {identifier}"),
+            )
+        })?;
+        self.root.verify_path(&path, ExpectedType::File)?;
+        Ok(path)
     }
 
     /// Read and validate the prefix index with its complete WAL overlay.
@@ -452,6 +632,41 @@ pub struct StoredBytes {
     pub path: PathBuf,
 }
 
+/// Raw-file bytes and metadata bound to one verified native file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredRawFile {
+    /// Unwrapped file bytes.
+    pub bytes: Vec<u8>,
+    /// Durable logical object key from FYLO metadata.
+    pub key: String,
+    /// Safe final filename extension, including the leading dot.
+    pub extension: String,
+    /// Content type inferred using the existing FYLO extension table.
+    pub content_type: String,
+    /// SHA-256 checksum of the returned bytes.
+    pub checksum_sha256: String,
+    /// Developer-defined JSON metadata.
+    pub custom_metadata: BTreeMap<String, Value>,
+    /// Filesystem modification time in Unix milliseconds.
+    pub modified_millis: u64,
+    /// Native owner, group, and mode where the platform exposes them.
+    pub access: NativeAccess,
+    /// Verified native path.
+    pub path: PathBuf,
+}
+
+/// Native file access metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeAccess {
+    /// POSIX owner ID when available.
+    pub uid: Option<u32>,
+    /// POSIX group ID when available.
+    pub gid: Option<u32>,
+    /// POSIX permission and special bits when available.
+    pub mode: Option<u32>,
+}
+
 /// Parsed collection generation state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -522,6 +737,8 @@ pub enum NativeStorageErrorCode {
     InvalidCollection,
     /// Document ID syntax was invalid.
     InvalidDocumentId,
+    /// Requested record was not found.
+    NotFound,
     /// The preview does not support the requested collection/operation.
     Unsupported,
 }
@@ -539,6 +756,7 @@ impl NativeStorageErrorCode {
             Self::CorruptIndex => "ENATIVE_INDEX",
             Self::InvalidCollection => "ENATIVE_COLLECTION",
             Self::InvalidDocumentId => "EINVALIDDOCID",
+            Self::NotFound => "ENATIVE_NOT_FOUND",
             Self::Unsupported => "ENATIVE_UNSUPPORTED",
         }
     }
@@ -587,6 +805,401 @@ impl std::error::Error for NativeStorageError {
         self.source
             .as_ref()
             .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+}
+
+#[cfg(unix)]
+fn read_fylo_attributes(
+    file: &File,
+    _path: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
+    use xattr::FileExt;
+
+    let mut attributes = BTreeMap::new();
+    let mut aggregate_bytes = 0_usize;
+    for name in file.list_xattr().map_err(NativeStorageError::io)? {
+        let name = name.to_str().ok_or_else(|| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "raw-file xattr name is not valid UTF-8",
+            )
+        })?;
+        if name != KEY_XATTR && name != CHECKSUM_XATTR && !name.starts_with(META_XATTR_PREFIX) {
+            continue;
+        }
+        let Some(value) = file.get_xattr(name).map_err(NativeStorageError::io)? else {
+            continue;
+        };
+        if value.len() > MAX_META_VALUE_BYTES && name.starts_with(META_XATTR_PREFIX) {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                format!("raw-file metadata attribute {name} exceeds 60 KiB"),
+            ));
+        }
+        aggregate_bytes = aggregate_bytes
+            .checked_add(name.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or_else(|| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::FileTooLarge,
+                    "raw-file metadata aggregate size overflow",
+                )
+            })?;
+        if aggregate_bytes > MAX_FILE_METADATA_BYTES {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "raw-file FYLO metadata exceeds 1 MiB",
+            ));
+        }
+        attributes.insert(name.to_owned(), value);
+    }
+    Ok(attributes)
+}
+
+#[cfg(windows)]
+fn read_fylo_attributes(
+    _file: &File,
+    path: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
+    use std::ffi::OsString;
+
+    const MAX_WINDOWS_ADS_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+    let mut stream = OsString::from(path.as_os_str());
+    stream.push(":fylo.xattrs");
+    let stream = PathBuf::from(stream);
+    let metadata = match fs::metadata(&stream) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(NativeStorageError::io(error)),
+    };
+    if metadata.len() > MAX_WINDOWS_ADS_MANIFEST_BYTES {
+        return Err(NativeStorageError::new(
+            NativeStorageErrorCode::FileTooLarge,
+            "Windows FYLO ADS manifest exceeds 16 MiB",
+        ));
+    }
+    let encoded: BTreeMap<String, String> = serde_json::from_slice(
+        &fs::read(stream).map_err(NativeStorageError::io)?,
+    )
+    .map_err(|error| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            format!("Windows FYLO ADS manifest is corrupt: {error}"),
+        )
+    })?;
+    encoded
+        .into_iter()
+        .filter(|(name, _)| {
+            name == KEY_XATTR || name == CHECKSUM_XATTR || name.starts_with(META_XATTR_PREFIX)
+        })
+        .map(|(name, value)| {
+            decode_base64(&value)
+                .map(|value| (name, value))
+                .map_err(|message| {
+                    NativeStorageError::new(NativeStorageErrorCode::CorruptMetadata, message)
+                })
+        })
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_fylo_attributes(
+    _file: &File,
+    _path: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
+    Err(NativeStorageError::new(
+        NativeStorageErrorCode::Unsupported,
+        "FYLO native metadata is unavailable on this platform",
+    ))
+}
+
+fn required_utf8_attribute(
+    attributes: &BTreeMap<String, Vec<u8>>,
+    name: &str,
+    identifier: &str,
+) -> Result<String, NativeStorageError> {
+    let value = attributes.get(name).ok_or_else(|| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            format!("raw file system metadata is missing: {identifier}"),
+        )
+    })?;
+    String::from_utf8(value.clone()).map_err(|error| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            format!("raw-file attribute {name} is not valid UTF-8: {error}"),
+        )
+    })
+}
+
+fn decode_custom_metadata(
+    attributes: &BTreeMap<String, Vec<u8>>,
+) -> Result<BTreeMap<String, Value>, NativeStorageError> {
+    attributes
+        .iter()
+        .filter_map(|(name, value)| {
+            name.strip_prefix(META_XATTR_PREFIX)
+                .map(|field| (field, value))
+        })
+        .map(|(field, encoded)| {
+            if field.is_empty() || field.len() > 64 {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    "raw-file custom metadata name is invalid",
+                ));
+            }
+            let value = match serde_json::from_slice(encoded) {
+                Ok(value) => value,
+                Err(_) => Value::String(String::from_utf8(encoded.clone()).map_err(|error| {
+                    NativeStorageError::new(
+                        NativeStorageErrorCode::CorruptMetadata,
+                        format!("raw-file metadata {field} is not valid UTF-8: {error}"),
+                    )
+                })?),
+            };
+            Ok((field.to_owned(), value))
+        })
+        .collect()
+}
+
+fn cached_checksum(value: Option<&Vec<u8>>, size: u64, modified_millis: u64) -> Option<String> {
+    let encoded = std::str::from_utf8(value?).ok()?;
+    let mut parts = encoded.split(':');
+    let checksum = parts.next()?;
+    let cached_size = parts.next()?.parse::<u64>().ok()?;
+    let cached_mtime = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_none()
+        && checksum.len() == 64
+        && checksum
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && cached_size == size
+        && cached_mtime == modified_millis
+    {
+        Some(checksum.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    encoded
+}
+
+fn path_utf8_name<'a>(path: &'a Path, description: &str) -> Result<&'a str, NativeStorageError> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("{description} filename is not valid UTF-8"),
+            )
+        })
+}
+
+fn raw_file_identifier(filename: &str) -> Option<&str> {
+    let identifier = filename.split_once('.').map_or(filename, |(id, _)| id);
+    (!identifier.is_empty()
+        && identifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
+    .then_some(identifier)
+}
+
+fn validate_raw_extension<'a>(
+    filename: &'a str,
+    identifier: &str,
+) -> Result<&'a str, NativeStorageError> {
+    let extension = filename.strip_prefix(identifier).ok_or_else(|| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            "raw-file filename does not begin with its identifier",
+        )
+    })?;
+    let valid = extension.len() >= 2
+        && extension.len() <= 17
+        && extension.starts_with('.')
+        && extension[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    if !valid {
+        return Err(NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            "raw-file extension is invalid",
+        ));
+    }
+    Ok(extension)
+}
+
+fn validate_raw_key(key: &str) -> Result<(), NativeStorageError> {
+    let valid_shape = key.starts_with('/')
+        && key.len() <= 1024
+        && !key
+            .chars()
+            .any(|character| character <= '\u{1f}' || character == '\u{7f}' || character == '\\');
+    if !valid_shape {
+        return Err(NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            "raw-file durable key is invalid",
+        ));
+    }
+    for segment in key.split('/').filter(|segment| !segment.is_empty()) {
+        let decoded = percent_decode(segment)?;
+        if decoded == "." || decoded == ".." {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "raw-file durable key contains a traversal segment",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn percent_decode(segment: &str) -> Result<String, NativeStorageError> {
+    let source = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(source.len());
+    let mut index = 0;
+    while index < source.len() {
+        if source[index] != b'%' {
+            decoded.push(source[index]);
+            index += 1;
+            continue;
+        }
+        if index + 2 >= source.len() {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "raw-file durable key contains invalid percent encoding",
+            ));
+        }
+        let high = hex_value(source[index + 1]);
+        let low = hex_value(source[index + 2]);
+        let (Some(high), Some(low)) = (high, low) else {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "raw-file durable key contains invalid percent encoding",
+            ));
+        };
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+    String::from_utf8(decoded).map_err(|error| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            format!("raw-file durable key contains invalid UTF-8 encoding: {error}"),
+        )
+    })
+}
+
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn raw_file_content_type(extension: &str) -> &'static str {
+    match extension {
+        ".avif" => "image/avif",
+        ".bmp" => "image/bmp",
+        ".csv" => "text/csv",
+        ".gif" => "image/gif",
+        ".gz" => "application/gzip",
+        ".html" => "text/html",
+        ".jpeg" | ".jpg" => "image/jpeg",
+        ".json" => "application/json",
+        ".md" => "text/markdown",
+        ".mov" => "video/quicktime",
+        ".mp3" => "audio/mpeg",
+        ".mp4" => "video/mp4",
+        ".pdf" => "application/pdf",
+        ".png" => "image/png",
+        ".svg" => "image/svg+xml",
+        ".tar" => "application/x-tar",
+        ".txt" => "text/plain",
+        ".wav" => "audio/wav",
+        ".webm" => "video/webm",
+        ".webp" => "image/webp",
+        ".xml" => "application/xml",
+        ".zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
+#[cfg(unix)]
+fn native_access(metadata: &Metadata) -> NativeAccess {
+    use std::os::unix::fs::MetadataExt;
+    NativeAccess {
+        uid: Some(metadata.uid()),
+        gid: Some(metadata.gid()),
+        mode: Some(metadata.mode() & 0o7777),
+    }
+}
+
+#[cfg(not(unix))]
+fn native_access(_metadata: &Metadata) -> NativeAccess {
+    NativeAccess {
+        uid: None,
+        gid: None,
+        mode: None,
+    }
+}
+
+#[cfg(windows)]
+fn decode_base64(encoded: &str) -> Result<Vec<u8>, &'static str> {
+    if encoded.len() % 4 != 0 {
+        return Err("Windows FYLO ADS manifest contains invalid base64");
+    }
+    let mut output = Vec::with_capacity(encoded.len() / 4 * 3);
+    let quartets = encoded.as_bytes().chunks_exact(4);
+    let quartet_count = quartets.len();
+    for (index, quartet) in quartets.enumerate() {
+        let is_last = index + 1 == quartet_count;
+        if !is_last && quartet.contains(&b'=') {
+            return Err("Windows FYLO ADS manifest contains invalid base64 padding");
+        }
+        let a = base64_value(quartet[0])?;
+        let b = base64_value(quartet[1])?;
+        let c = if quartet[2] == b'=' {
+            0
+        } else {
+            base64_value(quartet[2])?
+        };
+        let d = if quartet[3] == b'=' {
+            0
+        } else {
+            base64_value(quartet[3])?
+        };
+        if quartet[0] == b'=' || quartet[1] == b'=' || (quartet[2] == b'=' && quartet[3] != b'=') {
+            return Err("Windows FYLO ADS manifest contains invalid base64 padding");
+        }
+        output.push((a << 2) | (b >> 4));
+        if quartet[2] != b'=' {
+            output.push((b << 4) | (c >> 2));
+        }
+        if quartet[3] != b'=' {
+            output.push((c << 6) | d);
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(windows)]
+fn base64_value(byte: u8) -> Result<u8, &'static str> {
+    match byte {
+        b'A'..=b'Z' => Ok(byte - b'A'),
+        b'a'..=b'z' => Ok(byte - b'a' + 26),
+        b'0'..=b'9' => Ok(byte - b'0' + 52),
+        b'+' => Ok(62),
+        b'/' => Ok(63),
+        _ => Err("Windows FYLO ADS manifest contains invalid base64"),
     }
 }
 
@@ -642,7 +1255,10 @@ fn read_dir_sorted(path: &Path) -> Result<Vec<fs::DirEntry>, NativeStorageError>
     Ok(entries)
 }
 
-fn read_bounded(mut reader: Take<File>, max_bytes: u64) -> Result<Vec<u8>, NativeStorageError> {
+fn read_bounded<R: Read>(
+    mut reader: Take<R>,
+    max_bytes: u64,
+) -> Result<Vec<u8>, NativeStorageError> {
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
@@ -731,6 +1347,28 @@ mod tests {
             fs::write(path.join(".collections/users/index/keys.wal"), b"").unwrap();
             Self(path)
         }
+
+        #[cfg(unix)]
+        fn create_raw_file(&self) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::create_dir_all(self.0.join(".fylo-catalog/collections")).unwrap();
+            fs::write(
+                self.0.join(".fylo-catalog/collections/assets.json"),
+                br#"{"kind":"file"}"#,
+            )
+            .unwrap();
+            fs::create_dir_all(self.0.join(".buckets/assets/docs/4V")).unwrap();
+            fs::create_dir_all(self.0.join(".buckets/assets/index")).unwrap();
+            fs::write(self.0.join(".buckets/assets/index/keys.snapshot"), b"").unwrap();
+            let path = self.0.join(".buckets/assets/docs/4V/4VRNF52JPCO.bin");
+            fs::write(&path, [0, 1, 2, 3, 255]).unwrap();
+            xattr::set(&path, KEY_XATTR, b"/fixtures/sample.bin").unwrap();
+            xattr::set(&path, "user.fylo.meta.source", br#""rust-native-test""#).unwrap();
+            xattr::set(&path, "user.fylo.meta.reviewed", b"true").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+            path
+        }
     }
 
     impl Drop for TestRoot {
@@ -753,6 +1391,52 @@ mod tests {
         assert_eq!(
             collection.index_snapshot().unwrap().as_bytes(),
             b"name/eq/Ada/4VRNF52JPCO\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_raw_bytes_custom_metadata_and_native_access() {
+        let fixture = TestRoot::create();
+        let expected_path = fixture.create_raw_file();
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("assets")
+            .unwrap();
+        assert_eq!(collection.raw_file_ids().unwrap(), ["4VRNF52JPCO"]);
+        let stored = collection.read_raw_file("4VRNF52JPCO").unwrap();
+        assert_eq!(stored.path, fs::canonicalize(expected_path).unwrap());
+        assert_eq!(stored.bytes, [0, 1, 2, 3, 255]);
+        assert_eq!(stored.key, "/fixtures/sample.bin");
+        assert_eq!(stored.extension, ".bin");
+        assert_eq!(stored.content_type, "application/octet-stream");
+        assert_eq!(
+            stored.custom_metadata.get("source"),
+            Some(&Value::String("rust-native-test".into()))
+        );
+        assert_eq!(
+            stored.custom_metadata.get("reviewed"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(stored.access.mode, Some(0o640));
+        assert_eq!(stored.checksum_sha256.len(), 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_duplicate_raw_file_identifiers() {
+        let fixture = TestRoot::create();
+        fixture.create_raw_file();
+        let duplicate = fixture.0.join(".buckets/assets/docs/4V/4VRNF52JPCO.txt");
+        fs::write(&duplicate, b"duplicate").unwrap();
+        xattr::set(&duplicate, KEY_XATTR, b"/duplicate.txt").unwrap();
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("assets")
+            .unwrap();
+        assert_eq!(
+            collection.read_raw_file("4VRNF52JPCO").unwrap_err().code(),
+            NativeStorageErrorCode::CorruptMetadata
         );
     }
 

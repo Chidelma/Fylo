@@ -66,6 +66,19 @@ fn run(arguments: &[String]) -> Result<String, String> {
             )
             .map_err(|error| error.to_string())
         }
+        "get-file" => {
+            let collection = required_option(arguments, "--collection")?;
+            let identifier = required_option(arguments, "--id")?;
+            let file = engine
+                .get_file(collection, identifier)
+                .map_err(|error| error.to_string())?;
+            let mut output = serde_json::to_value(&file).map_err(|error| error.to_string())?;
+            output
+                .as_object_mut()
+                .expect("ReadFile serializes as an object")
+                .insert("bytesHex".into(), json!(hex(&file.bytes)));
+            serde_json::to_string_pretty(&output).map_err(|error| error.to_string())
+        }
         "scan-index" => {
             let collection = required_option(arguments, "--collection")?;
             let encoded = required_option(arguments, "--queries")?;
@@ -119,12 +132,21 @@ fn required_option<'a>(arguments: &'a [String], name: &str) -> Result<&'a str, S
         .ok_or_else(|| format!("missing value for {name}\n{}", usage()))
 }
 
+fn hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    output
+}
+
 fn usage() -> String {
     "Usage:\n  fylo-rust version\n  fylo-rust inspect --root <path> --collection <name>\n  \
      fylo-rust get --root <path> --collection <name> --id <ttid>\n  fylo-rust scan-index --root \
-     <path> --collection <name> --queries <json>\n  fylo-rust find --root <path> --collection \
-     <name> --query <json>\n  fylo-rust sql --root <path> --statement <select-sql>\n\nThis \
-     preview is strictly read-only."
+     <path> --collection <name> --queries <json>\n  fylo-rust get-file --root <path> --collection \
+     <name> --id <ttid>\n  fylo-rust find --root <path> --collection <name> --query <json>\n  \
+     fylo-rust sql --root <path> --statement <select-sql>\n\nThis preview is strictly read-only."
         .into()
 }
 
