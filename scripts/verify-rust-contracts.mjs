@@ -20,6 +20,10 @@ const rootLeaseSource = await readFile('src/cli/root-lease.js', 'utf8')
 const storageSource = await readFile('src/storage/prefix-index.js', 'utf8')
 const transactionSource = await readFile('src/storage/transactions.js', 'utf8')
 const rustQuerySource = await readFile('crates/fylo-query/src/lib.rs', 'utf8')
+const rustFormatSource = await readFile('crates/fylo-format/src/lib.rs', 'utf8')
+const rustStorageSource = await readFile('crates/fylo-storage-native/src/lib.rs', 'utf8')
+const rustEngineSource = await readFile('crates/fylo-engine/src/lib.rs', 'utf8')
+const wasmHostSource = await readFile('src/browser/wasm/index-scanner.js', 'utf8')
 
 assert(operations.protocolVersion === MACHINE_PROTOCOL_VERSION, 'operation protocol version drift')
 assert(
@@ -59,6 +63,10 @@ for (const { code, retryable } of errors.errors) {
             queryPageSource.includes(`'${code}'`) ||
             rootLeaseSource.includes(`'${code}'`) ||
             rustQuerySource.includes(`"${code}"`) ||
+            rustFormatSource.includes(`"${code}"`) ||
+            rustStorageSource.includes(`"${code}"`) ||
+            rustEngineSource.includes(`"${code}"`) ||
+            wasmHostSource.includes(`'${code}'`) ||
             code === 'EINVALIDDOCID' ||
             code === 'EARRAYOFOBJECTS' ||
             code === 'EDECRYPTFAILED' ||

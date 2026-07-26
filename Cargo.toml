@@ -2,13 +2,19 @@
 resolver = "3"
 members = [
     "crates/fylo-format",
+    "crates/fylo-engine",
     "crates/fylo-query",
+    "crates/fylo-storage-native",
+    "crates/fylo-cli",
     "src/browser/wasm",
     "xtask",
 ]
 default-members = [
     "crates/fylo-format",
+    "crates/fylo-engine",
     "crates/fylo-query",
+    "crates/fylo-storage-native",
+    "crates/fylo-cli",
     "xtask",
 ]
 

@@ -84,6 +84,7 @@ fn stable_error_code_strings_are_complete() {
         FormatErrorCode::DocumentTooDeep,
         FormatErrorCode::TooManyNodes,
         FormatErrorCode::Encode,
+        FormatErrorCode::InvalidDocumentId,
     ];
     for code in codes {
         assert!(code.as_str().starts_with('E'));

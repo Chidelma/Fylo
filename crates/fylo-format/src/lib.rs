@@ -20,6 +20,10 @@ pub const DEFAULT_MAX_DOCUMENT_DEPTH: usize = 64;
 /// Default maximum number of values visited while validating a document.
 pub const DEFAULT_MAX_DOCUMENT_NODES: usize = 1_000_000;
 
+const TTID_PRECISION: u64 = 10_000;
+const TTID_MIN_TIMESTAMP_MS: u64 = 1_577_836_800_000;
+const TTID_MAX_TIMESTAMP_MS: u64 = 7_258_118_400_000;
+
 /// Limits applied before a document can enter query or storage code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DocumentLimits {
@@ -128,6 +132,84 @@ pub struct CanonicalMetadata {
     pub mtime: u64,
 }
 
+/// Timestamps encoded in a FYLO TTID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtidTimestamps {
+    /// Initial creation timestamp.
+    pub created_at: u64,
+    /// Optional latest update timestamp encoded in the identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
+    /// Optional deletion timestamp encoded in the identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<u64>,
+}
+
+/// Validate and decode a FYLO time-ordered identifier.
+///
+/// # Errors
+///
+/// Returns [`FormatErrorCode::InvalidDocumentId`] when the syntax, lifecycle
+/// placeholders, arithmetic, or timestamp range is invalid.
+pub fn decode_ttid(identifier: &str) -> Result<TtidTimestamps, FormatError> {
+    if identifier.is_empty() || identifier.len() > 36 {
+        return Err(invalid_ttid("identifier length is outside FYLO bounds"));
+    }
+    let segments: Vec<&str> = identifier.split('-').collect();
+    if segments.is_empty() || segments.len() > 3 {
+        return Err(invalid_ttid("identifier has an invalid lifecycle shape"));
+    }
+    for segment in &segments {
+        if segment.is_empty()
+            || segment.len() > 11
+            || !segment.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err(invalid_ttid("identifier contains an invalid segment"));
+        }
+    }
+    if segments[0].eq_ignore_ascii_case("x") {
+        return Err(invalid_ttid("creation timestamp cannot be a placeholder"));
+    }
+    let created_at = decode_ttid_segment(segments[0])?;
+    let updated_at = match segments.get(1) {
+        Some(segment) if segment.eq_ignore_ascii_case("x") => None,
+        Some(segment) => Some(decode_ttid_segment(segment)?),
+        None => None,
+    };
+    let deleted_at = match segments.get(2) {
+        Some(segment) if segment.eq_ignore_ascii_case("x") => {
+            return Err(invalid_ttid("deletion timestamp cannot be a placeholder"));
+        }
+        Some(segment) => Some(decode_ttid_segment(segment)?),
+        None => None,
+    };
+    Ok(TtidTimestamps {
+        created_at,
+        updated_at,
+        deleted_at,
+    })
+}
+
+fn decode_ttid_segment(segment: &str) -> Result<u64, FormatError> {
+    let encoded = u64::from_str_radix(segment, 36)
+        .map_err(|_| invalid_ttid("identifier timestamp is not valid base-36"))?;
+    let milliseconds = encoded
+        .checked_add(TTID_PRECISION / 2)
+        .ok_or_else(|| invalid_ttid("identifier timestamp overflows"))?
+        / TTID_PRECISION;
+    if !(TTID_MIN_TIMESTAMP_MS..=TTID_MAX_TIMESTAMP_MS).contains(&milliseconds) {
+        return Err(invalid_ttid(
+            "identifier timestamp is outside the supported range",
+        ));
+    }
+    Ok(milliseconds)
+}
+
+fn invalid_ttid(message: &str) -> FormatError {
+    FormatError::new(FormatErrorCode::InvalidDocumentId, message)
+}
+
 impl CanonicalMetadata {
     /// Merge custom metadata with canonical storage metadata.
     ///
@@ -168,6 +250,9 @@ pub enum FormatErrorCode {
     /// A validated value could not be encoded.
     #[serde(rename = "EFORMAT_ENCODE")]
     Encode,
+    /// A FYLO document identifier was invalid.
+    #[serde(rename = "EINVALIDDOCID")]
+    InvalidDocumentId,
 }
 
 impl FormatErrorCode {
@@ -182,6 +267,7 @@ impl FormatErrorCode {
             Self::DocumentTooDeep => "EFORMAT_DEPTH",
             Self::TooManyNodes => "EFORMAT_NODES",
             Self::Encode => "EFORMAT_ENCODE",
+            Self::InvalidDocumentId => "EINVALIDDOCID",
         }
     }
 }
@@ -391,5 +477,28 @@ mod tests {
             .unwrap()
             .clone()
         );
+    }
+
+    #[test]
+    fn decodes_ttid_lifecycle_timestamps() {
+        let timestamps = decode_ttid("4VRNF52JPCO").unwrap();
+        assert_eq!(timestamps.created_at, 1_785_099_771_859);
+        assert_eq!(timestamps.updated_at, None);
+        assert_eq!(timestamps.deleted_at, None);
+
+        let deleted = decode_ttid("4VRNF52JPCO-X-4VRNF52JQHC").unwrap();
+        assert_eq!(deleted.created_at, timestamps.created_at);
+        assert_eq!(deleted.updated_at, None);
+        assert!(deleted.deleted_at.is_some());
+    }
+
+    #[test]
+    fn rejects_invalid_ttid_paths_and_ranges() {
+        for identifier in ["", "../escape", "ABC", "4VRNF52JPCO-X-X", "4VRNF52JPCO-"] {
+            assert_eq!(
+                decode_ttid(identifier).unwrap_err().code(),
+                FormatErrorCode::InvalidDocumentId
+            );
+        }
     }
 }

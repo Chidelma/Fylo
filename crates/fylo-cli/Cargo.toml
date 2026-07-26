@@ -1,0 +1,21 @@
+[package]
+name = "fylo-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "fylo-rust"
+path = "src/main.rs"
+
+[dependencies]
+fylo-engine = { version = "0.1.0", path = "../fylo-engine" }
+fylo-format = { version = "0.1.0", path = "../fylo-format" }
+fylo-query = { version = "0.1.0", path = "../fylo-query" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

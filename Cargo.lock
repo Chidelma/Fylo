@@ -16,6 +16,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fylo-cli"
+version = "0.1.0"
+dependencies = [
+ "fylo-engine",
+ "fylo-format",
+ "fylo-query",
+ "serde_json",
+]
+
+[[package]]
+name = "fylo-engine"
+version = "0.1.0"
+dependencies = [
+ "fylo-format",
+ "fylo-query",
+ "fylo-storage-native",
+ "serde",
+]
+
+[[package]]
 name = "fylo-format"
 version = "0.1.0"
 dependencies = [
@@ -27,6 +47,16 @@ dependencies = [
 name = "fylo-query"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fylo-storage-native"
+version = "0.1.0"
+dependencies = [
+ "fylo-format",
+ "fylo-query",
  "serde",
  "serde_json",
 ]

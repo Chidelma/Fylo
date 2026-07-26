@@ -18,6 +18,7 @@
         "rust:clippy": "bun ./scripts/run-rust.mjs cargo clippy --workspace --all-targets --all-features -- -D warnings",
         "rust:deny": "bun ./scripts/run-rust.mjs cargo deny check",
         "rust:fmt": "bun ./scripts/run-rust.mjs cargo fmt --all --check",
+        "rust:interop:readonly": "bun ./scripts/verify-rust-readonly.mjs",
         "rust:test": "bun ./scripts/run-rust.mjs cargo test --workspace --all-features",
         "rust:verify": "bun ./scripts/run-rust.mjs cargo run -p xtask -- verify-workspace",
         "test": "bun --env-file=tests/.env.test test tests/integration tests/collection tests/browser --timeout 120000",

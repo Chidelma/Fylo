@@ -98,6 +98,20 @@ describe('browser Wasm index integration', () => {
         ).toThrow('Unsupported FYLO Wasm index ABI 2; expected 1')
     })
 
+    test('rejects an invalid snapshot with a stable fallback reason', async () => {
+        const wasmUrl = new URL('../../dist-web/fylo-index.wasm', import.meta.url)
+        if (!existsSync(wasmUrl)) return
+        const module = await WebAssembly.compile(readFileSync(wasmUrl))
+        const scanner = new WasmIndexScanner(await WebAssembly.instantiate(module, {}))
+        try {
+            expect(() => scanner.loadSnapshot(new TextEncoder().encode('z/doc\na/doc\n'))).toThrow(
+                '[EWASM_SNAPSHOT]'
+            )
+        } finally {
+            scanner.close()
+        }
+    })
+
     test('propagates the worker build token to the default Wasm URL', async () => {
         const token = 'v=release-test'
         const module = await import(`../../src/browser/wasm/index-scanner.js?${token}`)
