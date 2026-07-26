@@ -1,0 +1,25 @@
+{
+    "version": 1,
+    "errors": [
+        { "code": "EBADREQUEST", "retryable": false },
+        { "code": "EUNSUPPORTEDOP", "retryable": false },
+        { "code": "EUNKNOWN", "retryable": false },
+        { "code": "EFRAME_REQUEST_TOO_LARGE", "retryable": false },
+        { "code": "EFRAME_RESPONSE_TOO_LARGE", "retryable": false },
+        { "code": "EFRAME_TRUNCATED", "retryable": false },
+        { "code": "EFRAME_UTF8", "retryable": false },
+        { "code": "EFRAME_JSON", "retryable": false },
+        { "code": "EFRAME_DUPLICATE_KEY", "retryable": false },
+        { "code": "EINVALIDCURSOR", "retryable": false },
+        { "code": "EQUERYITEMTOOLARGE", "retryable": false },
+        { "code": "EQUERYSNAPSHOTTOOLARGE", "retryable": false },
+        { "code": "EQUERYLOOPREQUIRED", "retryable": false },
+        { "code": "EROOTLOCKED", "retryable": true },
+        { "code": "EROOTLEASELOST", "retryable": false },
+        { "code": "EBACKUPNOTCONFIGURED", "retryable": false },
+        { "code": "EINVALIDDOCID", "retryable": false },
+        { "code": "EARRAYOFOBJECTS", "retryable": false },
+        { "code": "EDECRYPTFAILED", "retryable": false },
+        { "code": "EACCES", "retryable": false }
+    ]
+}

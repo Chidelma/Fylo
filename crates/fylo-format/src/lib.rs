@@ -251,7 +251,7 @@ fn validate_value(
             check_depth(depth, limits)?;
             for item in items {
                 visit_node(visited, limits)?;
-                if item.is_object() {
+                if item.is_object() || item.is_array() {
                     return Err(FormatError::new(
                         FormatErrorCode::ArrayOfObjects,
                         format!(
@@ -260,43 +260,11 @@ fn validate_value(
                         ),
                     ));
                 }
-                if let Value::Array(nested) = item {
-                    validate_array(nested, depth + 1, visited, limits, path)?;
-                }
             }
             Ok(())
         }
         _ => Ok(()),
     }
-}
-
-fn validate_array(
-    items: &[Value],
-    depth: usize,
-    visited: &mut usize,
-    limits: DocumentLimits,
-    path: &str,
-) -> Result<(), FormatError> {
-    check_depth(depth, limits)?;
-    for item in items {
-        visit_node(visited, limits)?;
-        match item {
-            Value::Object(_) => {
-                return Err(FormatError::new(
-                    FormatErrorCode::ArrayOfObjects,
-                    format!(
-                        "cannot index an array of objects at \"{path}\": store objects in their \
-                         own collection and reference them by key"
-                    ),
-                ));
-            }
-            Value::Array(nested) => {
-                validate_array(nested, depth + 1, visited, limits, path)?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 fn check_depth(depth: usize, limits: DocumentLimits) -> Result<(), FormatError> {
@@ -349,6 +317,13 @@ mod tests {
         let error = Document::parse(source, DocumentLimits::default()).unwrap_err();
         assert_eq!(error.code(), FormatErrorCode::ArrayOfObjects);
         assert!(error.message().contains("profile/members"));
+    }
+
+    #[test]
+    fn rejects_nested_arrays_like_the_javascript_engine() {
+        let error =
+            Document::parse(br#"{"matrix":[[1,2],[3,4]]}"#, DocumentLimits::default()).unwrap_err();
+        assert_eq!(error.code(), FormatErrorCode::ArrayOfObjects);
     }
 
     #[test]

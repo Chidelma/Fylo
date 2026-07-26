@@ -1,0 +1,27 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://fylo.del.ma/api/storage/v1/transaction.schema.json",
+    "title": "FYLO collection transaction v1",
+    "type": "object",
+    "required": [
+        "format",
+        "id",
+        "collection",
+        "operation",
+        "phase",
+        "generationBefore",
+        "eventOffset",
+        "captures"
+    ],
+    "properties": {
+        "format": { "const": "fylo.collection-transaction.v1" },
+        "id": { "type": "string", "minLength": 1 },
+        "collection": { "type": "string", "minLength": 1 },
+        "operation": { "type": "string", "minLength": 1 },
+        "phase": { "enum": ["active", "committed"] },
+        "generationBefore": { "type": "integer", "minimum": 0 },
+        "eventOffset": { "type": "integer", "minimum": 0 },
+        "captures": { "type": "array", "maxItems": 10000 }
+    },
+    "additionalProperties": false
+}
