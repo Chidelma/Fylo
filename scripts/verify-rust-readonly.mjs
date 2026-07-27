@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 
 import Fylo from '../src/index.js'
 import { BrowserPrefixIndexCodec } from '../src/browser/core/prefix-index.js'
+import { VersionRepository } from '../src/versioning/repository.js'
 
 const root = await mkdtemp(join(tmpdir(), 'fylo-rust-readonly-'))
 const schemaRoot = `${root}-schema`
@@ -56,9 +57,15 @@ try {
     await database.users.rebuild()
     await database.assets.rebuild()
     await database.close()
+    const versionCommit = await new VersionRepository(root).commit('Rust read-only fixture')
 
     const before = await snapshot(root)
     console.error('Reading JavaScript root with fylo-rust...')
+    const history = await rustJson(['log', '--root', root, '--limit', '10'])
+    assert(history.enabled === true, 'Rust version-history enablement drift')
+    assert(history.branch === 'main', 'Rust version-history branch drift')
+    assert(history.head === versionCommit.id, 'Rust version-history head drift')
+    assert(history.commits[0].message === 'Rust read-only fixture', 'Rust commit-message drift')
     const record = await rustJson([
         'get',
         '--root',

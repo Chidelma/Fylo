@@ -2,6 +2,7 @@ import { mkdir, readFile, statfs, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import Fylo from '../src/index.js'
+import { VersionRepository } from '../src/versioning/repository.js'
 import { hashRoot } from './rust-golden-root-lib.mjs'
 
 const output = option('--output')
@@ -112,6 +113,14 @@ try {
         }
     }
     await database.close()
+    const versionCommit = await new VersionRepository(root).commit(
+        'Rust compatibility golden baseline'
+    )
+    operations.push({
+        operation: 'commit-version',
+        id: versionCommit.id,
+        message: versionCommit.message
+    })
 
     const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
     const filesystem = await statfs(root)

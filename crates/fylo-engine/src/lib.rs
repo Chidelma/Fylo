@@ -14,7 +14,7 @@ use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, deco
 use fylo_query::{QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery};
 use fylo_storage_native::{
     CollectionKind, GenerationStatus, IndexVerification, NativeAccess, NativeCollection,
-    NativeRoot, NativeStorageError, StoredRawFile,
+    NativeRoot, NativeStorageError, RepositoryHistory, StoredRawFile,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -87,6 +87,18 @@ impl ReadOnlyEngine {
     #[must_use]
     pub fn root_path(&self) -> &Path {
         self.root.path()
+    }
+
+    /// Read the active repository's first-parent commit history.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for corrupt/unsafe repository metadata or an
+    /// invalid limit.
+    pub fn history(&self, limit: usize) -> Result<RepositoryHistory, EngineError> {
+        self.root
+            .version_history(limit)
+            .map_err(EngineError::storage)
     }
 
     /// Read and validate one JSON document with canonical metadata.

@@ -30,6 +30,8 @@ pub const MAX_INDEX_WAL_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_META_VALUE_BYTES: usize = 60 * 1024;
 /// Maximum aggregate FYLO metadata accepted from one raw file.
 pub const MAX_FILE_METADATA_BYTES: usize = 1024 * 1024;
+/// Maximum version-control ref or commit-manifest bytes.
+pub const MAX_VERSION_METADATA_BYTES: u64 = 1024 * 1024;
 
 const KEY_XATTR: &str = "user.fylo.key";
 const CHECKSUM_XATTR: &str = "user.fylo.checksum";
@@ -120,6 +122,112 @@ impl NativeRoot {
             path,
             kind: descriptor.kind,
             namespace: namespace.to_owned(),
+        })
+    }
+
+    /// Read the active branch's first-parent commit history without
+    /// materializing or modifying any version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for corrupt refs/manifests, unsafe paths, cycles,
+    /// invalid identifiers, or an excessive limit.
+    pub fn version_history(&self, limit: usize) -> Result<RepositoryHistory, NativeStorageError> {
+        if limit == 0 || limit > 1000 {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "version history limit must be between 1 and 1000",
+            ));
+        }
+        let head_path = self.canonical.join(".fylo-vcs").join("HEAD");
+        if !path_exists_no_follow(&head_path)? {
+            return Ok(RepositoryHistory {
+                enabled: false,
+                branch: None,
+                head: None,
+                commits: Vec::new(),
+            });
+        }
+        let head = String::from_utf8(self.read_file(&head_path, 4096)?).map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO repository HEAD is not valid UTF-8: {error}"),
+            )
+        })?;
+        let branch = head
+            .trim()
+            .strip_prefix("ref: refs/heads/")
+            .ok_or_else(|| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    "FYLO repository HEAD is corrupt",
+                )
+            })?;
+        validate_branch_name(branch)?;
+        let reference_path = self
+            .canonical
+            .join(".fylo-vcs")
+            .join("refs")
+            .join("heads")
+            .join(format!("{branch}.json"));
+        let reference: BranchReference =
+            serde_json::from_slice(&self.read_file(&reference_path, MAX_VERSION_METADATA_BYTES)?)
+                .map_err(|error| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    format!("FYLO branch ref is corrupt: {error}"),
+                )
+            })?;
+        if reference.name != branch {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "FYLO branch ref name does not match HEAD",
+            ));
+        }
+        if let Some(head) = &reference.head {
+            validate_ttid_shape(head).map_err(|error| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    format!("FYLO branch head is invalid: {error}"),
+                )
+            })?;
+        }
+        let mut next = reference.head.clone();
+        let mut seen = BTreeSet::new();
+        let mut commits = Vec::new();
+        while let Some(identifier) = next {
+            if commits.len() >= limit {
+                break;
+            }
+            if !seen.insert(identifier.clone()) {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    "FYLO commit history contains a cycle",
+                ));
+            }
+            let path = self
+                .canonical
+                .join(".fylo-vcs")
+                .join("commits")
+                .join(&identifier)
+                .join("manifest.json");
+            let commit: VersionCommit =
+                serde_json::from_slice(&self.read_file(&path, MAX_VERSION_METADATA_BYTES)?)
+                    .map_err(|error| {
+                        NativeStorageError::new(
+                            NativeStorageErrorCode::CorruptMetadata,
+                            format!("FYLO commit manifest is corrupt: {error}"),
+                        )
+                    })?;
+            commit.validate(&identifier)?;
+            next = commit.parents.first().cloned();
+            commits.push(commit);
+        }
+        Ok(RepositoryHistory {
+            enabled: true,
+            branch: Some(branch.to_owned()),
+            head: reference.head,
+            commits,
         })
     }
 
@@ -221,6 +329,12 @@ pub enum CollectionKind {
 #[derive(Deserialize)]
 struct CollectionDescriptor {
     kind: CollectionKind,
+}
+
+#[derive(Deserialize)]
+struct BranchReference {
+    name: String,
+    head: Option<String>,
 }
 
 /// Read-only handle for one collection.
@@ -852,6 +966,72 @@ pub struct IndexVerification {
     pub rebuild_equivalent: bool,
 }
 
+/// Active first-parent FYLO repository history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryHistory {
+    /// Whether `.fylo-vcs/HEAD` exists.
+    pub enabled: bool,
+    /// Active branch when versioning is initialized.
+    pub branch: Option<String>,
+    /// Active branch head commit.
+    pub head: Option<String>,
+    /// Newest-to-oldest first-parent commits, bounded by the requested limit.
+    pub commits: Vec<VersionCommit>,
+}
+
+/// Validated immutable FYLO commit manifest.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionCommit {
+    /// Commit TTID.
+    pub id: String,
+    /// Branch that originally produced the commit.
+    pub branch: String,
+    /// Parent commit TTIDs.
+    pub parents: Vec<String>,
+    /// Operator/developer commit message.
+    pub message: String,
+    /// ISO timestamp emitted by the JavaScript engine.
+    pub created_at: String,
+    /// Repository-relative immutable commit directory.
+    pub root: String,
+}
+
+impl VersionCommit {
+    fn validate(&self, expected_identifier: &str) -> Result<(), NativeStorageError> {
+        if self.id != expected_identifier {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "FYLO commit manifest ID does not match its directory",
+            ));
+        }
+        validate_ttid_shape(&self.id).map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO commit manifest ID is invalid: {error}"),
+            )
+        })?;
+        validate_branch_name(&self.branch)?;
+        if self.parents.len() > 2
+            || self
+                .parents
+                .iter()
+                .any(|parent| parent == &self.id || validate_ttid_shape(parent).is_err())
+            || self.message.trim().is_empty()
+            || self.message.len() > 64 * 1024
+            || self.created_at.is_empty()
+            || self.root != format!(".fylo-vcs/commits/{}", self.id)
+        {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "FYLO commit manifest has an invalid schema",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Parsed collection generation state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1405,6 +1585,26 @@ fn validate_collection_name(name: &str) -> Result<(), NativeStorageError> {
     Ok(())
 }
 
+fn validate_branch_name(name: &str) -> Result<(), NativeStorageError> {
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'.' | b'_' | b'/' | b'-'))
+        })
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.ends_with('/')
+        && !name.as_bytes().ends_with(b".lock");
+    if valid {
+        Ok(())
+    } else {
+        Err(NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            "FYLO branch name is invalid",
+        ))
+    }
+}
+
 fn validate_ttid_shape(identifier: &str) -> Result<(), NativeStorageError> {
     let valid = !identifier.is_empty()
         && identifier.len() <= 36
@@ -1585,6 +1785,57 @@ mod tests {
                 live_documents: 1,
                 reference_integrity: true,
                 rebuild_equivalent: false,
+            }
+        );
+    }
+
+    #[test]
+    fn reads_bounded_first_parent_version_history() {
+        let fixture = TestRoot::create();
+        let commit = "4VRNF52JPCO";
+        fs::create_dir_all(fixture.0.join(".fylo-vcs/refs/heads")).unwrap();
+        fs::create_dir_all(fixture.0.join(".fylo-vcs/commits").join(commit)).unwrap();
+        fs::write(fixture.0.join(".fylo-vcs/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(
+            fixture.0.join(".fylo-vcs/refs/heads/main.json"),
+            format!(r#"{{"name":"main","head":"{commit}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            fixture
+                .0
+                .join(".fylo-vcs/commits")
+                .join(commit)
+                .join("manifest.json"),
+            format!(
+                r#"{{"id":"{commit}","branch":"main","parents":[],"message":"baseline","createdAt":"2026-07-26T00:00:00.000Z","root":".fylo-vcs/commits/{commit}"}}"#
+            ),
+        )
+        .unwrap();
+        let history = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .version_history(50)
+            .unwrap();
+        assert!(history.enabled);
+        assert_eq!(history.branch.as_deref(), Some("main"));
+        assert_eq!(history.head.as_deref(), Some(commit));
+        assert_eq!(history.commits.len(), 1);
+        assert_eq!(history.commits[0].message, "baseline");
+    }
+
+    #[test]
+    fn reports_unversioned_roots_without_mutation() {
+        let fixture = TestRoot::create();
+        assert_eq!(
+            NativeRoot::open(&fixture.0)
+                .unwrap()
+                .version_history(50)
+                .unwrap(),
+            RepositoryHistory {
+                enabled: false,
+                branch: None,
+                head: None,
+                commits: Vec::new(),
             }
         );
     }

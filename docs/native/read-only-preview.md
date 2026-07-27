@@ -9,6 +9,8 @@ cargo run -p fylo-cli --bin fylo-rust -- version
 cargo run -p fylo-cli --bin fylo-rust -- \
   inspect --root /path/to/root --collection users
 cargo run -p fylo-cli --bin fylo-rust -- \
+  log --root /path/to/root --limit 50
+cargo run -p fylo-cli --bin fylo-rust -- \
   get --root /path/to/root --collection users --id 4VRNF52JPCO
 cargo run -p fylo-cli --bin fylo-rust -- \
   get-file --root /path/to/root --collection assets --id 4VRNF52JPCO
@@ -46,9 +48,11 @@ structured predicates, SQL SELECT projection/grouping, and prefix-index scans
 with WAL overlays. `verify-index` checks merged key structure and rejects
 references to records absent from the authoritative tree; its
 `rebuildEquivalent: false` field deliberately records that exact independent
-rebuild comparison is not implemented yet. Native Windows race-hardening
-evidence, version history, full rebuild equivalence, joins, and all mutations
-remain promotion blockers.
+rebuild comparison is not implemented yet. `log` validates and reads the
+active branch’s bounded first-parent commit manifests without materializing a
+version; historical content/tree verification is still pending. Native Windows
+race-hardening evidence, historical content verification, full rebuild
+equivalence, joins, and all mutations remain promotion blockers.
 
 Encrypted reads use the same environment contract as JavaScript:
 
