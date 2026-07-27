@@ -49,15 +49,8 @@ fn run(arguments: &[String]) -> Result<String, String> {
     let engine = open_engine(root)?;
     match command {
         "log" => history_output(&engine, arguments),
-        "inspect" => {
-            let collection = required_option(arguments, "--collection")?;
-            serde_json::to_string_pretty(
-                &engine
-                    .inspect(collection)
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())
-        }
+        "verify-history" => version_verification_output(&engine, arguments),
+        "inspect" => inspect_output(&engine, arguments),
         "get" => {
             let collection = required_option(arguments, "--collection")?;
             let identifier = required_option(arguments, "--id")?;
@@ -131,12 +124,42 @@ fn run(arguments: &[String]) -> Result<String, String> {
     }
 }
 
+fn inspect_output(engine: &ReadOnlyEngine, arguments: &[String]) -> Result<String, String> {
+    let collection = required_option(arguments, "--collection")?;
+    serde_json::to_string_pretty(
+        &engine
+            .inspect(collection)
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn history_output(engine: &ReadOnlyEngine, arguments: &[String]) -> Result<String, String> {
-    let limit = optional_option(arguments, "--limit")
-        .map_or(Ok(50_usize), str::parse)
-        .map_err(|error| format!("invalid --limit: {error}"))?;
+    let limit = history_limit(arguments)?;
     serde_json::to_string_pretty(&engine.history(limit).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())
+}
+
+fn version_verification_output(
+    engine: &ReadOnlyEngine,
+    arguments: &[String],
+) -> Result<String, String> {
+    let limit = history_limit(arguments)?;
+    serde_json::to_string_pretty(
+        &engine
+            .verify_history(limit)
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn history_limit(arguments: &[String]) -> Result<usize, String> {
+    if !arguments.iter().any(|argument| argument == "--limit") {
+        return Ok(50);
+    }
+    required_option(arguments, "--limit")?
+        .parse()
+        .map_err(|error| format!("invalid --limit: {error}"))
 }
 
 fn open_engine(root: &str) -> Result<ReadOnlyEngine, String> {
@@ -202,14 +225,6 @@ fn required_option<'a>(arguments: &'a [String], name: &str) -> Result<&'a str, S
         .ok_or_else(|| format!("missing value for {name}\n{}", usage()))
 }
 
-fn optional_option<'a>(arguments: &'a [String], name: &str) -> Option<&'a str> {
-    let index = arguments.iter().position(|argument| argument == name)?;
-    arguments
-        .get(index + 1)
-        .map(String::as_str)
-        .filter(|value| !value.is_empty() && !value.starts_with("--"))
-}
-
 fn hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -222,6 +237,7 @@ fn hex(bytes: &[u8]) -> String {
 fn usage() -> String {
     "Usage:\n  fylo-rust version\n  fylo-rust inspect --root <path> --collection <name>\n  \
      fylo-rust log --root <path> [--limit <1-1000>]\n  \
+     fylo-rust verify-history --root <path> [--limit <1-1000>]\n  \
      fylo-rust get --root <path> --collection <name> --id <ttid>\n  fylo-rust scan-index --root \
      <path> --collection <name> --queries <json>\n  fylo-rust get-file --root <path> --collection \
      <name> --id <ttid>\n  fylo-rust get-deleted --root <path> --collection <name> --id <ttid>\n  \

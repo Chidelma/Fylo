@@ -14,7 +14,7 @@ use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, deco
 use fylo_query::{QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery};
 use fylo_storage_native::{
     CollectionKind, GenerationStatus, IndexVerification, NativeAccess, NativeCollection,
-    NativeRoot, NativeStorageError, RepositoryHistory, StoredRawFile,
+    NativeRoot, NativeStorageError, RepositoryHistory, StoredRawFile, VersionVerification,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -98,6 +98,18 @@ impl ReadOnlyEngine {
     pub fn history(&self, limit: usize) -> Result<RepositoryHistory, EngineError> {
         self.root
             .version_history(limit)
+            .map_err(EngineError::storage)
+    }
+
+    /// Verify active first-parent historical tree and blob integrity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for corrupt/unsafe repository content or an
+    /// exhausted verification bound.
+    pub fn verify_history(&self, limit: usize) -> Result<VersionVerification, EngineError> {
+        self.root
+            .verify_version_history(limit)
             .map_err(EngineError::storage)
     }
 

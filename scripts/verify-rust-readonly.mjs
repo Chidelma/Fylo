@@ -66,6 +66,18 @@ try {
     assert(history.branch === 'main', 'Rust version-history branch drift')
     assert(history.head === versionCommit.id, 'Rust version-history head drift')
     assert(history.commits[0].message === 'Rust read-only fixture', 'Rust commit-message drift')
+    assert(history.truncated === false, 'Rust version-history truncation drift')
+    const versionVerification = await rustJson([
+        'verify-history',
+        '--root',
+        root,
+        '--limit',
+        '10'
+    ])
+    assert(versionVerification.contentIntegrity === true, 'Rust version-object integrity drift')
+    assert(versionVerification.historyComplete === true, 'Rust version-history coverage drift')
+    assert(versionVerification.commitsVerified === 1, 'Rust verified commit count drift')
+    assert(versionVerification.blobObjects > 0, 'Rust version blob traversal drift')
     const record = await rustJson([
         'get',
         '--root',

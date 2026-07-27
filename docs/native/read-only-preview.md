@@ -11,6 +11,8 @@ cargo run -p fylo-cli --bin fylo-rust -- \
 cargo run -p fylo-cli --bin fylo-rust -- \
   log --root /path/to/root --limit 50
 cargo run -p fylo-cli --bin fylo-rust -- \
+  verify-history --root /path/to/root --limit 50
+cargo run -p fylo-cli --bin fylo-rust -- \
   get --root /path/to/root --collection users --id 4VRNF52JPCO
 cargo run -p fylo-cli --bin fylo-rust -- \
   get-file --root /path/to/root --collection assets --id 4VRNF52JPCO
@@ -50,9 +52,16 @@ references to records absent from the authoritative tree; its
 `rebuildEquivalent: false` field deliberately records that exact independent
 rebuild comparison is not implemented yet. `log` validates and reads the
 active branch’s bounded first-parent commit manifests without materializing a
-version; historical content/tree verification is still pending. Native Windows
-race-hardening evidence, historical content verification, full rebuild
-equivalence, joins, and all mutations remain promotion blockers.
+version. `verify-history` additionally hashes and structurally validates every
+unique content-addressed tree and blob reachable from that bounded first-parent
+slice. It reports whether the limit covered the whole first-parent chain and
+never materializes historical data. Full reachable-DAG qualification, native
+Windows race-hardening evidence, full rebuild equivalence, joins, and all
+mutations remain promotion blockers.
+
+Historical object verification is deliberately bounded to 1,000,000 unique
+objects, 16 GiB aggregate bytes, 16 MiB per tree node, and 256 MiB per blob in
+this preview.
 
 Encrypted reads use the same environment contract as JavaScript:
 

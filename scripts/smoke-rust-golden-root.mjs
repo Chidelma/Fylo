@@ -55,6 +55,23 @@ try {
         '--bin',
         'fylo-rust',
         '--',
+        'verify-history',
+        '--root',
+        join(fixture, 'root'),
+        '--limit',
+        '10'
+    ])
+    await run([
+        './scripts/run-rust.mjs',
+        'cargo',
+        'run',
+        '--quiet',
+        '--locked',
+        '-p',
+        'fylo-cli',
+        '--bin',
+        'fylo-rust',
+        '--',
         'verify-index',
         '--root',
         join(fixture, 'root'),

@@ -32,6 +32,14 @@ pub const MAX_META_VALUE_BYTES: usize = 60 * 1024;
 pub const MAX_FILE_METADATA_BYTES: usize = 1024 * 1024;
 /// Maximum version-control ref or commit-manifest bytes.
 pub const MAX_VERSION_METADATA_BYTES: u64 = 1024 * 1024;
+/// Maximum bytes accepted for one content-addressed version tree node.
+pub const MAX_VERSION_TREE_BYTES: u64 = 16 * 1024 * 1024;
+/// Maximum bytes hashed for one content-addressed historical blob.
+pub const MAX_VERSION_BLOB_BYTES: u64 = MAX_RAW_FILE_BYTES;
+/// Maximum unique version objects traversed by one verification.
+pub const MAX_VERSION_OBJECTS: usize = 1_000_000;
+/// Maximum aggregate version-object bytes traversed by one verification.
+pub const MAX_VERSION_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 const KEY_XATTR: &str = "user.fylo.key";
 const CHECKSUM_XATTR: &str = "user.fylo.checksum";
@@ -146,6 +154,7 @@ impl NativeRoot {
                 branch: None,
                 head: None,
                 commits: Vec::new(),
+                truncated: false,
             });
         }
         let head = String::from_utf8(self.read_file(&head_path, 4096)?).map_err(|error| {
@@ -195,10 +204,10 @@ impl NativeRoot {
         let mut next = reference.head.clone();
         let mut seen = BTreeSet::new();
         let mut commits = Vec::new();
-        while let Some(identifier) = next {
-            if commits.len() >= limit {
+        while commits.len() < limit {
+            let Some(identifier) = next.take() else {
                 break;
-            }
+            };
             if !seen.insert(identifier.clone()) {
                 return Err(NativeStorageError::new(
                     NativeStorageErrorCode::CorruptMetadata,
@@ -228,7 +237,178 @@ impl NativeRoot {
             branch: Some(branch.to_owned()),
             head: reference.head,
             commits,
+            truncated: next.is_some(),
         })
+    }
+
+    /// Verify the content-addressed trees and blobs referenced by the active
+    /// branch's bounded first-parent history.
+    ///
+    /// Objects are hashed through verified file descriptors and tree nodes are
+    /// schema-, ordering-, type-, and path-validated. No historical version is
+    /// materialized and no repository state is modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for corrupt manifests, tree pointers, objects, unsafe
+    /// paths, excessive limits, object-count exhaustion, or byte-budget
+    /// exhaustion.
+    pub fn verify_version_history(
+        &self,
+        limit: usize,
+    ) -> Result<VersionVerification, NativeStorageError> {
+        let history = self.version_history(limit)?;
+        let mut state = VersionVerificationState::default();
+        for commit in &history.commits {
+            let tree_path = self
+                .canonical
+                .join(".fylo-vcs")
+                .join("commits")
+                .join(&commit.id)
+                .join("tree.json");
+            let pointer: VersionTreePointer =
+                serde_json::from_slice(&self.read_file(&tree_path, MAX_VERSION_METADATA_BYTES)?)
+                    .map_err(|error| {
+                        NativeStorageError::new(
+                            NativeStorageErrorCode::CorruptMetadata,
+                            format!("FYLO commit tree pointer is corrupt: {error}"),
+                        )
+                    })?;
+            if let Some(root) = pointer.root {
+                self.verify_version_tree_node(
+                    root.as_str(),
+                    VersionTreeLevel::Collection,
+                    None,
+                    &mut state,
+                )?;
+            }
+        }
+        let tree_objects = state
+            .objects
+            .values()
+            .filter(|kind| matches!(kind, VersionObjectKind::Tree(_)))
+            .count();
+        let blob_objects = state.objects.len().saturating_sub(tree_objects);
+        Ok(VersionVerification {
+            enabled: history.enabled,
+            branch: history.branch,
+            head: history.head,
+            commits_verified: history.commits.len(),
+            history_complete: !history.truncated,
+            tree_objects,
+            blob_objects,
+            verified_bytes: state.verified_bytes,
+            content_integrity: true,
+        })
+    }
+
+    fn verify_version_tree_node(
+        &self,
+        hash: &str,
+        level: VersionTreeLevel,
+        expected_shard: Option<&str>,
+        state: &mut VersionVerificationState,
+    ) -> Result<(), NativeStorageError> {
+        if !state.register(hash, VersionObjectKind::Tree(level))? {
+            return Ok(());
+        }
+        let bytes = self.read_version_object(hash, MAX_VERSION_TREE_BYTES)?;
+        state.record_bytes(bytes.len() as u64)?;
+        let node: VersionTreeNode = serde_json::from_slice(&bytes).map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO version tree object is corrupt: {error}"),
+            )
+        })?;
+        if node.entries.is_empty()
+            || node
+                .entries
+                .windows(2)
+                .any(|pair| pair[0].name >= pair[1].name)
+        {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "FYLO version tree entries are empty, duplicated, or unsorted",
+            ));
+        }
+        for entry in node.entries {
+            entry.validate(level, expected_shard)?;
+            if level == VersionTreeLevel::Blob {
+                if state.register(&entry.hash, VersionObjectKind::Blob)? {
+                    let bytes = self.verify_version_object(&entry.hash, MAX_VERSION_BLOB_BYTES)?;
+                    state.record_bytes(bytes)?;
+                }
+            } else {
+                let child_shard = if level == VersionTreeLevel::Shard {
+                    Some(entry.name.as_str())
+                } else {
+                    expected_shard
+                };
+                self.verify_version_tree_node(&entry.hash, level.next(), child_shard, state)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_version_object(
+        &self,
+        hash: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, NativeStorageError> {
+        let path = self.version_object_path(hash)?;
+        let bytes = self.read_file(&path, max_bytes)?;
+        if sha256_hex(&bytes) != hash {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO version object {hash} failed content-hash verification"),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn verify_version_object(&self, hash: &str, max_bytes: u64) -> Result<u64, NativeStorageError> {
+        let path = self.version_object_path(hash)?;
+        let (mut file, metadata) = self.open_file(&path, max_bytes)?;
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let read = file.read(&mut buffer).map_err(NativeStorageError::io)?;
+            if read == 0 {
+                break;
+            }
+            total = total.checked_add(read as u64).ok_or_else(|| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::FileTooLarge,
+                    "FYLO version object byte count overflow",
+                )
+            })?;
+            if total > max_bytes {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::FileTooLarge,
+                    "FYLO version object exceeds the verification byte limit",
+                ));
+            }
+            digest.update(&buffer[..read]);
+        }
+        let actual = hex_bytes(&digest.finalize());
+        if actual != hash || total != metadata.len() {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO version object {hash} failed content-hash verification"),
+            ));
+        }
+        Ok(total)
+    }
+
+    fn version_object_path(&self, hash: &str) -> Result<PathBuf, NativeStorageError> {
+        validate_version_hash(hash)?;
+        Ok(self
+            .canonical
+            .join(".fylo-vcs")
+            .join("objects")
+            .join(&hash[..2])
+            .join(&hash[2..]))
     }
 
     fn verify_path(
@@ -335,6 +515,147 @@ struct CollectionDescriptor {
 struct BranchReference {
     name: String,
     head: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionTreePointer {
+    root: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionTreeNode {
+    entries: Vec<VersionTreeEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VersionTreeEntry {
+    name: String,
+    #[serde(rename = "type")]
+    kind: VersionTreeEntryKind,
+    hash: String,
+}
+
+impl VersionTreeEntry {
+    fn validate(
+        &self,
+        level: VersionTreeLevel,
+        expected_shard: Option<&str>,
+    ) -> Result<(), NativeStorageError> {
+        validate_version_hash(&self.hash)?;
+        let valid_name = !self.name.is_empty()
+            && self.name.len() <= 255
+            && !self.name.contains(['/', '\\'])
+            && self.name != "."
+            && self.name != "..";
+        let valid_kind = match level {
+            VersionTreeLevel::Blob => self.kind == VersionTreeEntryKind::Blob,
+            _ => self.kind == VersionTreeEntryKind::Tree,
+        };
+        let valid_level = match level {
+            VersionTreeLevel::Collection => validate_collection_name(&self.name).is_ok(),
+            VersionTreeLevel::Namespace => {
+                matches!(self.name.as_str(), "docs" | ".deleted" | ".metadata")
+            }
+            VersionTreeLevel::Shard => {
+                self.name.len() == 2 && self.name.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            }
+            VersionTreeLevel::Blob => raw_file_identifier(&self.name).is_some_and(|identifier| {
+                validate_ttid_shape(identifier).is_ok()
+                    && expected_shard.is_some_and(|shard| identifier.starts_with(shard))
+            }),
+        };
+        if valid_name && valid_kind && valid_level {
+            Ok(())
+        } else {
+            Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "FYLO version tree entry has an invalid schema",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum VersionTreeEntryKind {
+    Tree,
+    Blob,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum VersionTreeLevel {
+    Collection,
+    Namespace,
+    Shard,
+    Blob,
+}
+
+impl VersionTreeLevel {
+    const fn next(self) -> Self {
+        match self {
+            Self::Collection => Self::Namespace,
+            Self::Namespace => Self::Shard,
+            Self::Shard | Self::Blob => Self::Blob,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VersionObjectKind {
+    Tree(VersionTreeLevel),
+    Blob,
+}
+
+#[derive(Default)]
+struct VersionVerificationState {
+    objects: BTreeMap<String, VersionObjectKind>,
+    verified_bytes: u64,
+}
+
+impl VersionVerificationState {
+    fn register(
+        &mut self,
+        hash: &str,
+        kind: VersionObjectKind,
+    ) -> Result<bool, NativeStorageError> {
+        validate_version_hash(hash)?;
+        if let Some(existing) = self.objects.get(hash) {
+            if *existing == kind {
+                return Ok(false);
+            }
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "FYLO version object is referenced with conflicting types",
+            ));
+        }
+        if self.objects.len() >= MAX_VERSION_OBJECTS {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "FYLO version verification exceeds the object-count limit",
+            ));
+        }
+        self.objects.insert(hash.to_owned(), kind);
+        Ok(true)
+    }
+
+    fn record_bytes(&mut self, bytes: u64) -> Result<(), NativeStorageError> {
+        self.verified_bytes = self.verified_bytes.checked_add(bytes).ok_or_else(|| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "FYLO version verification byte count overflow",
+            )
+        })?;
+        if self.verified_bytes > MAX_VERSION_TOTAL_BYTES {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "FYLO version verification exceeds the aggregate byte limit",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Read-only handle for one collection.
@@ -978,6 +1299,32 @@ pub struct RepositoryHistory {
     pub head: Option<String>,
     /// Newest-to-oldest first-parent commits, bounded by the requested limit.
     pub commits: Vec<VersionCommit>,
+    /// Whether an older first-parent commit exists beyond the requested limit.
+    pub truncated: bool,
+}
+
+/// Bounded content-integrity report for active first-parent history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionVerification {
+    /// Whether versioning is initialized.
+    pub enabled: bool,
+    /// Active branch when versioning is initialized.
+    pub branch: Option<String>,
+    /// Active branch head commit.
+    pub head: Option<String>,
+    /// Number of first-parent commits whose trees were traversed.
+    pub commits_verified: usize,
+    /// Whether the requested bound covered the complete first-parent chain.
+    pub history_complete: bool,
+    /// Number of unique content-addressed tree objects verified.
+    pub tree_objects: usize,
+    /// Number of unique content-addressed document/file/metadata blobs verified.
+    pub blob_objects: usize,
+    /// Aggregate bytes hashed across unique objects.
+    pub verified_bytes: u64,
+    /// True only when all reported objects passed schema and hash verification.
+    pub content_integrity: bool,
 }
 
 /// Validated immutable FYLO commit manifest.
@@ -1349,8 +1696,12 @@ fn cached_checksum(value: Option<&Vec<u8>>, size: u64, modified_millis: u64) -> 
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    hex_bytes(&digest)
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         use std::fmt::Write;
         write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
     }
@@ -1605,6 +1956,21 @@ fn validate_branch_name(name: &str) -> Result<(), NativeStorageError> {
     }
 }
 
+fn validate_version_hash(hash: &str) -> Result<(), NativeStorageError> {
+    if hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            "FYLO version object hash is invalid",
+        ))
+    }
+}
+
 fn validate_ttid_shape(identifier: &str) -> Result<(), NativeStorageError> {
     let valid = !identifier.is_empty()
         && identifier.len() <= 36
@@ -1733,6 +2099,18 @@ mod tests {
             Self(path)
         }
 
+        fn write_version_object(&self, bytes: &[u8]) -> String {
+            let hash = sha256_hex(bytes);
+            let path = self
+                .0
+                .join(".fylo-vcs/objects")
+                .join(&hash[..2])
+                .join(&hash[2..]);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+            hash
+        }
+
         #[cfg(unix)]
         fn create_raw_file(&self) -> PathBuf {
             use std::os::unix::fs::PermissionsExt;
@@ -1824,6 +2202,80 @@ mod tests {
     }
 
     #[test]
+    fn verifies_content_addressed_version_tree_and_blob_hashes() {
+        let fixture = TestRoot::create();
+        let commit = "4VRNF52JPCO";
+        fs::create_dir_all(fixture.0.join(".fylo-vcs/refs/heads")).unwrap();
+        fs::create_dir_all(fixture.0.join(".fylo-vcs/commits").join(commit)).unwrap();
+        fs::write(fixture.0.join(".fylo-vcs/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(
+            fixture.0.join(".fylo-vcs/refs/heads/main.json"),
+            format!(r#"{{"name":"main","head":"{commit}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            fixture
+                .0
+                .join(".fylo-vcs/commits")
+                .join(commit)
+                .join("manifest.json"),
+            format!(
+                r#"{{"id":"{commit}","branch":"main","parents":[],"message":"baseline","createdAt":"2026-07-26T00:00:00.000Z","root":".fylo-vcs/commits/{commit}"}}"#
+            ),
+        )
+        .unwrap();
+
+        let blob = fixture.write_version_object(br#"{"name":"Ada"}"#);
+        let bucket = fixture.write_version_object(
+            format!(r#"{{"entries":[{{"name":"{commit}.json","type":"blob","hash":"{blob}"}}]}}"#)
+                .as_bytes(),
+        );
+        let namespace = fixture.write_version_object(
+            format!(r#"{{"entries":[{{"name":"4V","type":"tree","hash":"{bucket}"}}]}}"#)
+                .as_bytes(),
+        );
+        let collection = fixture.write_version_object(
+            format!(r#"{{"entries":[{{"name":"docs","type":"tree","hash":"{namespace}"}}]}}"#)
+                .as_bytes(),
+        );
+        let root = fixture.write_version_object(
+            format!(r#"{{"entries":[{{"name":"users","type":"tree","hash":"{collection}"}}]}}"#)
+                .as_bytes(),
+        );
+        fs::write(
+            fixture
+                .0
+                .join(".fylo-vcs/commits")
+                .join(commit)
+                .join("tree.json"),
+            format!(r#"{{"root":"{root}"}}"#),
+        )
+        .unwrap();
+
+        let native = NativeRoot::open(&fixture.0).unwrap();
+        let report = native.verify_version_history(50).unwrap();
+        assert!(report.content_integrity);
+        assert!(report.history_complete);
+        assert_eq!(report.commits_verified, 1);
+        assert_eq!(report.tree_objects, 4);
+        assert_eq!(report.blob_objects, 1);
+
+        fs::write(
+            fixture
+                .0
+                .join(".fylo-vcs/objects")
+                .join(&blob[..2])
+                .join(&blob[2..]),
+            b"corrupt",
+        )
+        .unwrap();
+        assert_eq!(
+            native.verify_version_history(50).unwrap_err().code(),
+            NativeStorageErrorCode::CorruptMetadata
+        );
+    }
+
+    #[test]
     fn reports_unversioned_roots_without_mutation() {
         let fixture = TestRoot::create();
         assert_eq!(
@@ -1836,6 +2288,7 @@ mod tests {
                 branch: None,
                 head: None,
                 commits: Vec::new(),
+                truncated: false,
             }
         );
     }
