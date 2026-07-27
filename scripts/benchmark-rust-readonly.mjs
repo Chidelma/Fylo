@@ -10,6 +10,10 @@ const workspace = await mkdtemp(join(tmpdir(), 'fylo-readonly-benchmark-'))
 const root = join(workspace, 'root')
 const collection = 'documents'
 const query = { $ops: [{ group: { $eq: 7 } }] }
+const thresholds = {
+    maximumRustPeakRssBytes: 512 * 1024 * 1024,
+    maximumP95RustToCurrentRatio: 10
+}
 
 try {
     await mkdir(root, { recursive: true })
@@ -18,9 +22,8 @@ try {
     await writer[collection].create()
     const targetId = await writer[collection].put(documentAt(0))
     if (parameters.documents > 1) {
-        const remaining = Array.from(
-            { length: parameters.documents - 1 },
-            (_, index) => documentAt(index + 1)
+        const remaining = Array.from({ length: parameters.documents - 1 }, (_, index) =>
+            documentAt(index + 1)
         )
         await writer[collection].put.batch(remaining)
     }
@@ -52,7 +55,7 @@ try {
         'release',
         platform() === 'win32' ? 'fylo-readonly-bench.exe' : 'fylo-readonly-bench'
     )
-    const rustEngine = await jsonCommand([
+    const rustResult = await jsonCommand([
         executable,
         '--root',
         root,
@@ -67,6 +70,12 @@ try {
         '--warmup',
         String(parameters.warmup)
     ])
+    const rustEngine = rustResult.output
+    rustEngine.process.observedPeakRssBytes = rustResult.observedPeakRssBytes
+    rustEngine.process.peakRssBytes = Math.max(
+        rustEngine.process.peakRssBytes ?? 0,
+        rustResult.observedPeakRssBytes
+    )
     const after = await hashRoot(root)
     if (after.digest !== before.digest) {
         throw new Error(
@@ -76,8 +85,10 @@ try {
     const matchingDocuments = Math.floor((parameters.documents + 2) / 10)
     validateResults(currentEngine, rustEngine, parameters.documents, matchingDocuments)
 
+    const operationComparison = comparison(currentEngine.operations, rustEngine.operations)
+    const gates = evaluateGates(operationComparison, rustEngine.process.peakRssBytes)
     const report = {
-        format: 'fylo.read-only-benchmark.v1',
+        format: 'fylo.read-only-benchmark.v2',
         generatedAt: new Date().toISOString(),
         environment: {
             os: platform(),
@@ -95,7 +106,8 @@ try {
             matchingDocuments,
             rootDigestAlgorithm: before.algorithm,
             rootDigest: before.digest,
-            rootEntries: before.entries.length
+            rootEntries: before.entries.length,
+            rootBytes: before.entries.reduce((total, entry) => total + entry.size, 0)
         },
         parameters: {
             iterations: parameters.iterations,
@@ -105,11 +117,18 @@ try {
         noMutationVerified: true,
         currentEngine,
         rustEngine,
-        comparison: comparison(currentEngine.operations, rustEngine.operations)
+        comparison: operationComparison,
+        thresholds,
+        gates
     }
     await mkdir(dirname(parameters.output), { recursive: true })
     await writeFile(parameters.output, `${JSON.stringify(report, null, 2)}\n`)
-    console.log(JSON.stringify({ output: parameters.output, comparison: report.comparison }, null, 2))
+    console.log(
+        JSON.stringify({ output: parameters.output, comparison: report.comparison }, null, 2)
+    )
+    if (!gates.passed) {
+        throw new Error(`read-only benchmark gates failed: ${gates.failures.join('; ')}`)
+    }
 } finally {
     await rm(workspace, { recursive: true, force: true })
 }
@@ -124,6 +143,7 @@ function documentAt(index) {
 }
 
 async function benchmarkJavaScript(root, collection, targetId, query, parameters) {
+    const startedRssBytes = process.memoryUsage().rss
     const database = new Fylo(root, { versioning: { autoCommit: false } })
     try {
         const get = await measure(parameters, async () => {
@@ -147,6 +167,7 @@ async function benchmarkJavaScript(root, collection, targetId, query, parameters
             unit: 'nanoseconds',
             operations: { get, find, inspect },
             process: {
+                startedRssBytes,
                 currentRssBytes: process.memoryUsage().rss
             }
         }
@@ -194,6 +215,26 @@ function comparison(current, rust) {
     return output
 }
 
+function evaluateGates(operationComparison, peakRssBytes) {
+    const failures = []
+    if (!Number.isSafeInteger(peakRssBytes) || peakRssBytes <= 0) {
+        failures.push('cross-platform Rust peak RSS was not observed')
+    } else if (peakRssBytes > thresholds.maximumRustPeakRssBytes) {
+        failures.push(`Rust peak RSS ${peakRssBytes} exceeds ${thresholds.maximumRustPeakRssBytes}`)
+    }
+    for (const [operation, result] of Object.entries(operationComparison)) {
+        if (
+            result.p95RustToCurrentRatio === null ||
+            result.p95RustToCurrentRatio > thresholds.maximumP95RustToCurrentRatio
+        ) {
+            failures.push(
+                `${operation} p95 Rust/current ratio ${result.p95RustToCurrentRatio} exceeds ${thresholds.maximumP95RustToCurrentRatio}`
+            )
+        }
+    }
+    return { passed: failures.length === 0, failures }
+}
+
 function validateResults(current, rust, documents, matchingDocuments) {
     const checks = [
         ['current get', current.operations.get.lastResult, 1],
@@ -236,17 +277,57 @@ async function jsonCommand(commandArguments) {
         stdout: 'pipe',
         stderr: 'pipe'
     })
-    const [stdout, stderr, exitCode] = await Promise.all([
+    let sampling = true
+    const samples = sampleProcessRss(subprocess.pid, () => sampling)
+    const [stdout, stderr, exitCode, observedPeakRssBytes] = await Promise.all([
         new Response(subprocess.stdout).text(),
         new Response(subprocess.stderr).text(),
-        subprocess.exited
+        subprocess.exited.then((code) => {
+            sampling = false
+            return code
+        }),
+        samples
     ])
     if (exitCode !== 0) {
         throw new Error(
             `command failed (${exitCode}): ${stderr.trim() || commandArguments.join(' ')}`
         )
     }
-    return JSON.parse(stdout)
+    return { output: JSON.parse(stdout), observedPeakRssBytes }
+}
+
+async function sampleProcessRss(pid, shouldContinue) {
+    let peak = 0
+    do {
+        peak = Math.max(peak, await processRssBytes(pid))
+        if (shouldContinue()) await Bun.sleep(5)
+    } while (shouldContinue())
+    return peak
+}
+
+async function processRssBytes(pid) {
+    const commandArguments =
+        platform() === 'win32'
+            ? [
+                  'powershell.exe',
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-Command',
+                  `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).WorkingSet64`
+              ]
+            : ['ps', '-o', 'rss=', '-p', String(pid)]
+    const subprocess = Bun.spawn(commandArguments, {
+        stdout: 'pipe',
+        stderr: 'ignore'
+    })
+    const [stdout, exitCode] = await Promise.all([
+        new Response(subprocess.stdout).text(),
+        subprocess.exited
+    ])
+    if (exitCode !== 0) return 0
+    const value = Number(stdout.trim())
+    if (!Number.isFinite(value) || value <= 0) return 0
+    return platform() === 'win32' ? Math.round(value) : Math.round(value * 1024)
 }
 
 function parseArguments(commandArguments) {

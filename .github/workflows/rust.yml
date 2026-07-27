@@ -261,12 +261,13 @@ jobs:
                   --output target/benchmarks/read-only-${{ runner.os }}.json
 
             - name: Retain read-only benchmark evidence
+              if: always()
               uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
               with:
                   name: rust-read-only-benchmark-${{ runner.os }}
                   path: target/benchmarks/read-only-${{ runner.os }}.json
                   if-no-files-found: error
-                  retention-days: 30
+                  retention-days: 90
 
     released-oracle:
         name: Released oracle (${{ matrix.target }})
