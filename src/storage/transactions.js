@@ -149,13 +149,19 @@ function assertExactKeys(value, expected, label) {
 
 /** @param {string} root @param {string} relative @param {string} label */
 function containedPath(root, relative, label) {
+    // A manifest is portable data, so a capture path is compared in its
+    // separator-independent form. `path.normalize` rewrites '/' to '\\' on
+    // Windows, which would reject a forward-slash manifest there and make a
+    // root unreadable on the platform that did not write it. Traversal,
+    // absolute paths, NUL bytes, and oversize values are still refused.
+    const portable = typeof relative === 'string' ? relative.replaceAll('\\', '/') : relative
     if (
         typeof relative !== 'string' ||
         relative.length === 0 ||
         Buffer.byteLength(relative) > MAX_PATH_BYTES ||
         relative.includes('\0') ||
         path.isAbsolute(relative) ||
-        path.normalize(relative) !== relative
+        path.posix.normalize(portable) !== portable
     ) {
         throw new Error(`${label} is not a safe relative path`)
     }
@@ -224,6 +230,136 @@ async function validateRecoveryManifest(transaction, collection, id, collectionR
         ],
         'Transaction manifest'
     )
+    assertManifestScalars(transaction, collection, id)
+
+    const transactionRoot = containedPath(journalRoot, id, 'Transaction id')
+    await assertNoSymlinkComponents(journalRoot, transactionRoot, 'Transaction journal path')
+    const seen = new Set()
+    let capturePathBytes = 0
+    let manifestXattrBytes = 0
+    for (const capture of transaction.captures) {
+        capturePathBytes = await validateCaptureTarget(capture, {
+            collectionRoot,
+            seen,
+            capturePathBytes
+        })
+        if (!capture.present) continue
+        await assertCaptureBackupFile(capture, transactionRoot)
+        assertCaptureMetadataBounds(capture)
+        manifestXattrBytes = validateCaptureXattrs(capture, manifestXattrBytes)
+    }
+    return transaction
+}
+
+/**
+ * Validates a capture's shape and its target path, enforcing containment,
+ * uniqueness, and the aggregate path-length bound.
+ * @param {any} capture
+ * @param {{ collectionRoot: string, seen: Set<string>, capturePathBytes: number }} context
+ * @returns {Promise<number>} the running capture-path byte total
+ */
+async function validateCaptureTarget(capture, context) {
+    if (!capture || typeof capture !== 'object' || Array.isArray(capture)) {
+        throw new Error('Transaction capture must be an object')
+    }
+    if (typeof capture.present !== 'boolean') {
+        throw new Error('Transaction capture has an invalid present flag')
+    }
+    assertExactKeys(
+        capture,
+        capture.present
+            ? ['path', 'present', 'backup', 'mode', 'mtimeMs', 'xattrs']
+            : ['path', 'present'],
+        'Transaction capture'
+    )
+    const target = containedPath(context.collectionRoot, capture.path, 'Transaction capture path')
+    const capturePathBytes = context.capturePathBytes + Buffer.byteLength(capture.path)
+    if (capturePathBytes > MAX_CAPTURE_PATH_TOTAL_BYTES) {
+        throw new Error('Transaction capture paths exceed the safe aggregate bound')
+    }
+    if (context.seen.has(target)) {
+        throw new Error('Transaction manifest contains duplicate captures')
+    }
+    context.seen.add(target)
+    await assertNoSymlinkComponents(context.collectionRoot, target, 'Transaction capture path')
+    return capturePathBytes
+}
+
+/**
+ * The backup for a present capture must exist inside the journal as a regular
+ * file, never a symlink that could redirect a restore outside the root.
+ * @param {Record<string, any>} capture
+ * @param {string} transactionRoot
+ */
+async function assertCaptureBackupFile(capture, transactionRoot) {
+    const backup = containedPath(transactionRoot, capture.backup, 'Transaction backup path')
+    await assertNoSymlinkComponents(transactionRoot, backup, 'Transaction backup path')
+    let backupMetadata
+    try {
+        backupMetadata = await lstat(backup)
+    } catch (error) {
+        if (hasCode(error, 'ENOENT')) throw new Error('Transaction backup is missing')
+        throw error
+    }
+    if (!backupMetadata.isFile() || backupMetadata.isSymbolicLink()) {
+        throw new Error('Transaction backup must be a regular file')
+    }
+}
+
+/**
+ * The recorded transaction id names a directory inside the journal, so it must
+ * be a single safe path segment before it is ever opened.
+ * @param {unknown} id
+ * @param {string} collection
+ * @returns {string}
+ */
+function assertRecoverableTransactionId(id, collection) {
+    if (
+        typeof id !== 'string' ||
+        id.length === 0 ||
+        id.length > 128 ||
+        id.includes('\0') ||
+        path.basename(id) !== id
+    ) {
+        throw new Error(`Collection transaction state has no active transaction: ${collection}`)
+    }
+    return id
+}
+
+/**
+ * A recovering transaction may only truncate events it actually appended, so
+ * the recorded offset must fall inside the journal that exists now.
+ * @param {Record<string, any>} transaction
+ * @param {number} collectionFd
+ * @param {string} eventRelative
+ */
+function assertEventJournalBounds(transaction, collectionFd, eventRelative) {
+    const eventFd = openFileAtRoot(collectionFd, eventRelative)
+    if (eventFd === null) {
+        if (transaction.eventOffset !== 0) {
+            throw new Error('Transaction event journal is missing')
+        }
+        return
+    }
+    try {
+        const eventMetadata = statSecureDescriptor(eventFd)
+        if (!eventMetadata.isFile() || transaction.eventOffset > eventMetadata.size) {
+            throw new Error('Transaction event offset is outside safe bounds')
+        }
+    } finally {
+        closeSecureDescriptor(eventFd)
+    }
+}
+
+/**
+ * Scalar identity and bounds of a recovery manifest. Kept separate from the
+ * capture walk so each half stays legible; every check is load-bearing for
+ * crash recovery, so none may be relaxed.
+ * @param {Record<string, any>} transaction
+ * @param {string} collection
+ * @param {string} id
+ */
+function assertManifestScalars(transaction, collection, id) {
     if (
         transaction.format !== FORMAT ||
         transaction.id !== id ||
@@ -241,89 +377,68 @@ async function validateRecoveryManifest(transaction, collection, id, collectionR
     ) {
         throw new Error('Transaction manifest has invalid values')
     }
+}
 
-    const transactionRoot = containedPath(journalRoot, id, 'Transaction id')
-    await assertNoSymlinkComponents(journalRoot, transactionRoot, 'Transaction journal path')
-    const seen = new Set()
-    let capturePathBytes = 0
-    let manifestXattrBytes = 0
-    for (const capture of transaction.captures) {
-        if (!capture || typeof capture !== 'object' || Array.isArray(capture)) {
-            throw new Error('Transaction capture must be an object')
-        }
-        if (typeof capture.present !== 'boolean') {
-            throw new Error('Transaction capture has an invalid present flag')
-        }
-        assertExactKeys(
-            capture,
-            capture.present
-                ? ['path', 'present', 'backup', 'mode', 'mtimeMs', 'xattrs']
-                : ['path', 'present'],
-            'Transaction capture'
-        )
-        const target = containedPath(collectionRoot, capture.path, 'Transaction capture path')
-        capturePathBytes += Buffer.byteLength(capture.path)
-        if (capturePathBytes > MAX_CAPTURE_PATH_TOTAL_BYTES) {
-            throw new Error('Transaction capture paths exceed the safe aggregate bound')
-        }
-        if (seen.has(target)) throw new Error('Transaction manifest contains duplicate captures')
-        seen.add(target)
-        await assertNoSymlinkComponents(collectionRoot, target, 'Transaction capture path')
-        if (!capture.present) continue
-        const backup = containedPath(transactionRoot, capture.backup, 'Transaction backup path')
-        await assertNoSymlinkComponents(transactionRoot, backup, 'Transaction backup path')
-        let backupMetadata
-        try {
-            backupMetadata = await lstat(backup)
-        } catch (error) {
-            if (hasCode(error, 'ENOENT')) throw new Error('Transaction backup is missing')
-            throw error
-        }
-        if (!backupMetadata.isFile() || backupMetadata.isSymbolicLink()) {
-            throw new Error('Transaction backup must be a regular file')
-        }
-        if (
-            !Number.isSafeInteger(capture.mode) ||
-            capture.mode < 0 ||
-            capture.mode > 0o777 ||
-            typeof capture.mtimeMs !== 'number' ||
-            !Number.isFinite(capture.mtimeMs) ||
-            capture.mtimeMs < 0 ||
-            capture.mtimeMs > 8.64e15 ||
-            !Array.isArray(capture.xattrs) ||
-            capture.xattrs.length > MAX_XATTRS
-        ) {
-            throw new Error('Transaction capture metadata is outside safe bounds')
-        }
-        const names = new Set()
-        let xattrBytes = 0
-        for (const attribute of capture.xattrs) {
-            if (!attribute || typeof attribute !== 'object' || Array.isArray(attribute)) {
-                throw new Error('Transaction xattr must be an object')
-            }
-            assertExactKeys(attribute, ['name', 'value'], 'Transaction xattr')
-            if (
-                typeof attribute.name !== 'string' ||
-                attribute.name.length === 0 ||
-                Buffer.byteLength(attribute.name) > 255 ||
-                attribute.name.includes('\0') ||
-                names.has(attribute.name) ||
-                !isCanonicalBase64(attribute.value)
-            ) {
-                throw new Error('Transaction xattr is outside safe bounds')
-            }
-            xattrBytes += Buffer.from(attribute.value, 'base64').length
-            manifestXattrBytes += Buffer.from(attribute.value, 'base64').length
-            if (xattrBytes > MAX_XATTR_TOTAL_BYTES) {
-                throw new Error('Transaction xattrs exceed the safe aggregate bound')
-            }
-            if (manifestXattrBytes > MAX_XATTR_TOTAL_BYTES) {
-                throw new Error('Transaction manifest xattrs exceed the safe aggregate bound')
-            }
-            names.add(attribute.name)
-        }
+/** @param {Record<string, any>} capture */
+function assertCaptureMetadataBounds(capture) {
+    if (
+        !Number.isSafeInteger(capture.mode) ||
+        capture.mode < 0 ||
+        capture.mode > 0o777 ||
+        typeof capture.mtimeMs !== 'number' ||
+        !Number.isFinite(capture.mtimeMs) ||
+        capture.mtimeMs < 0 ||
+        capture.mtimeMs > 8.64e15 ||
+        !Array.isArray(capture.xattrs) ||
+        capture.xattrs.length > MAX_XATTRS
+    ) {
+        throw new Error('Transaction capture metadata is outside safe bounds')
     }
-    return transaction
+}
+
+/**
+ * Validates one capture's xattrs, enforcing both the per-capture and the
+ * whole-manifest aggregate byte bounds.
+ * @param {Record<string, any>} capture
+ * @param {number} manifestXattrBytes bytes already counted across earlier captures
+ * @returns {number} the running manifest total after this capture
+ */
+function validateCaptureXattrs(capture, manifestXattrBytes) {
+    const names = new Set()
+    let xattrBytes = 0
+    let manifestTotal = manifestXattrBytes
+    for (const attribute of capture.xattrs) {
+        if (!attribute || typeof attribute !== 'object' || Array.isArray(attribute)) {
+            throw new Error('Transaction xattr must be an object')
+        }
+        assertExactKeys(attribute, ['name', 'value'], 'Transaction xattr')
+        assertXattrEntryBounds(attribute, names)
+        const valueBytes = Buffer.from(attribute.value, 'base64').length
+        xattrBytes += valueBytes
+        manifestTotal += valueBytes
+        if (xattrBytes > MAX_XATTR_TOTAL_BYTES) {
+            throw new Error('Transaction xattrs exceed the safe aggregate bound')
+        }
+        if (manifestTotal > MAX_XATTR_TOTAL_BYTES) {
+            throw new Error('Transaction manifest xattrs exceed the safe aggregate bound')
+        }
+        names.add(attribute.name)
+    }
+    return manifestTotal
+}
+
+/** @param {Record<string, any>} attribute @param {Set<string>} names */
+function assertXattrEntryBounds(attribute, names) {
+    if (
+        typeof attribute.name !== 'string' ||
+        attribute.name.length === 0 ||
+        Buffer.byteLength(attribute.name) > 255 ||
+        attribute.name.includes('\0') ||
+        names.has(attribute.name) ||
+        !isCanonicalBase64(attribute.value)
+    ) {
+        throw new Error('Transaction xattr is outside safe bounds')
+    }
 }
 
 /** Durably creates a backup directory entry without copying large file bytes. */
@@ -1073,6 +1188,36 @@ export class CollectionTransactionJournal {
     }
 
     /**
+     * Reads a transaction manifest through pinned descriptors. Captures live
+     * either inline in the manifest or in segment files, never both.
+     * @param {number} transactionFd
+     * @param {string} collection
+     * @param {string} id
+     * @returns {Promise<Record<string, any>>}
+     */
+    async loadTransactionManifest(transactionFd, collection, id) {
+        const manifestFd = openFileAtRoot(transactionFd, 'transaction.json')
+        if (manifestFd === null) throw new Error('Transaction manifest is missing')
+        let transaction
+        try {
+            transaction = readJsonDescriptor(manifestFd, MAX_MANIFEST_BYTES, 'Transaction manifest')
+        } finally {
+            closeSecureDescriptor(manifestFd)
+        }
+        const segmentedCaptures = await readCaptureSegments(
+            transactionFd,
+            this.transactionRoot(collection, id)
+        )
+        if (segmentedCaptures.length > 0) {
+            if (!Array.isArray(transaction.captures) || transaction.captures.length !== 0) {
+                throw new Error('Transaction mixes inline and segmented captures')
+            }
+            transaction.captures = segmentedCaptures
+        }
+        return transaction
+    }
+
+    /**
      * Recovers an interrupted transaction while the caller holds the
      * collection write lock.
      * @param {string} collection
@@ -1087,16 +1232,7 @@ export class CollectionTransactionJournal {
             await this.cleanupOrphans(collection)
             return false
         }
-        const id = state.transactionId
-        if (
-            typeof id !== 'string' ||
-            id.length === 0 ||
-            id.length > 128 ||
-            id.includes('\0') ||
-            path.basename(id) !== id
-        ) {
-            throw new Error(`Collection transaction state has no active transaction: ${collection}`)
-        }
+        const id = assertRecoverableTransactionId(state.transactionId, collection)
         let journalFd
         let transactionFd
         let collectionFd
@@ -1108,27 +1244,7 @@ export class CollectionTransactionJournal {
             if (transactionFd === null || !statSecureDescriptor(transactionFd).isDirectory()) {
                 throw new Error('Transaction journal directory is missing')
             }
-            const manifestFd = openFileAtRoot(transactionFd, 'transaction.json')
-            if (manifestFd === null) throw new Error('Transaction manifest is missing')
-            try {
-                transaction = readJsonDescriptor(
-                    manifestFd,
-                    MAX_MANIFEST_BYTES,
-                    'Transaction manifest'
-                )
-            } finally {
-                closeSecureDescriptor(manifestFd)
-            }
-            const segmentedCaptures = await readCaptureSegments(
-                transactionFd,
-                this.transactionRoot(collection, id)
-            )
-            if (segmentedCaptures.length > 0) {
-                if (!Array.isArray(transaction.captures) || transaction.captures.length !== 0) {
-                    throw new Error('Transaction mixes inline and segmented captures')
-                }
-                transaction.captures = segmentedCaptures
-            }
+            transaction = await this.loadTransactionManifest(transactionFd, collection, id)
             await validateRecoveryManifest(
                 transaction,
                 collection,
@@ -1157,21 +1273,7 @@ export class CollectionTransactionJournal {
                 this.eventPath(collection)
             )
             containedPath(this.collectionRoot(collection), eventRelative, 'Transaction event path')
-            const eventFd = openFileAtRoot(collectionFd, eventRelative)
-            if (eventFd === null) {
-                if (transaction.eventOffset !== 0) {
-                    throw new Error('Transaction event journal is missing')
-                }
-            } else {
-                try {
-                    const eventMetadata = statSecureDescriptor(eventFd)
-                    if (!eventMetadata.isFile() || transaction.eventOffset > eventMetadata.size) {
-                        throw new Error('Transaction event offset is outside safe bounds')
-                    }
-                } finally {
-                    closeSecureDescriptor(eventFd)
-                }
-            }
+            assertEventJournalBounds(transaction, collectionFd, eventRelative)
             if (transaction.phase !== 'committed') {
                 await this.restoreBeforeImagesSecure(transaction, collectionFd, transactionFd)
                 this.truncateEventsSecure(transaction, collectionFd)
