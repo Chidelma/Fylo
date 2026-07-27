@@ -16,6 +16,7 @@ on:
             - 'rust-toolchain.toml'
             - 'rust-miri-toolchain.toml'
             - 'rustfmt.toml'
+            - 'scripts/benchmark-rust-readonly.mjs'
             - 'scripts/build-browser.mjs'
             - 'scripts/run-rust.mjs'
             - 'scripts/verify-rust-*.mjs'
@@ -40,6 +41,7 @@ on:
             - 'rust-toolchain.toml'
             - 'rust-miri-toolchain.toml'
             - 'rustfmt.toml'
+            - 'scripts/benchmark-rust-readonly.mjs'
             - 'scripts/build-browser.mjs'
             - 'scripts/run-rust.mjs'
             - 'scripts/verify-rust-*.mjs'
@@ -180,3 +182,19 @@ jobs:
 
             - name: Verify current-engine interoperability
               run: bun run rust:interop:readonly
+
+            - name: Benchmark current and native read-only engines
+              run: >-
+                  bun ./scripts/benchmark-rust-readonly.mjs
+                  --documents 250
+                  --iterations 40
+                  --warmup 10
+                  --output target/benchmarks/read-only-${{ runner.os }}.json
+
+            - name: Retain read-only benchmark evidence
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: rust-read-only-benchmark-${{ runner.os }}
+                  path: target/benchmarks/read-only-${{ runner.os }}.json
+                  if-no-files-found: error
+                  retention-days: 30
