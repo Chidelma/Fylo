@@ -1,0 +1,138 @@
+{
+    "schemaVersion": 1,
+    "queryFormat": "fylo.query.errors.v1",
+    "producer": "fylo-rust-contract",
+    "cases": [
+        {
+            "name": "snapshot byte limit",
+            "operation": "snapshot",
+            "snapshot": "a/1\n",
+            "limits": { "maxSnapshotBytes": 3 },
+            "errorCode": "EINDEX_SNAPSHOT_SIZE"
+        },
+        {
+            "name": "snapshot key limit",
+            "operation": "snapshot",
+            "snapshot": "abc/1\n",
+            "limits": { "maxKeyBytes": 4 },
+            "errorCode": "EINDEX_KEY_SIZE"
+        },
+        {
+            "name": "snapshot forbidden nul",
+            "operation": "snapshot",
+            "snapshot": "a/\u0000\n",
+            "errorCode": "EINDEX_SNAPSHOT_FORMAT"
+        },
+        {
+            "name": "snapshot forbidden carriage return",
+            "operation": "snapshot",
+            "snapshot": "a/1\r\n",
+            "errorCode": "EINDEX_SNAPSHOT_FORMAT"
+        },
+        {
+            "name": "snapshot unsorted",
+            "operation": "snapshot",
+            "snapshot": "b/2\na/1\n",
+            "errorCode": "EINDEX_SNAPSHOT_ORDER"
+        },
+        {
+            "name": "snapshot duplicate",
+            "operation": "snapshot",
+            "snapshot": "a/1\na/1\n",
+            "errorCode": "EINDEX_SNAPSHOT_ORDER"
+        },
+        {
+            "name": "query input byte limit",
+            "operation": "parse",
+            "input": "[]",
+            "limits": { "maxInputBytes": 1 },
+            "errorCode": "EQUERY_INPUT_SIZE"
+        },
+        {
+            "name": "query malformed json",
+            "operation": "parse",
+            "input": "[",
+            "errorCode": "EQUERY_INVALID"
+        },
+        {
+            "name": "query empty",
+            "operation": "parse",
+            "input": "[]",
+            "errorCode": "EQUERY_EMPTY"
+        },
+        {
+            "name": "query count limit",
+            "operation": "parse",
+            "input": "[{\"prefix\":\"a/\"},{\"prefix\":\"b/\"}]",
+            "limits": { "maxQueries": 1 },
+            "errorCode": "EQUERY_COUNT"
+        },
+        {
+            "name": "query term limit",
+            "operation": "parse",
+            "input": "[{\"prefix\":\"long/\"}]",
+            "limits": { "maxTermBytes": 4 },
+            "errorCode": "EQUERY_TERM_SIZE"
+        },
+        {
+            "name": "query match count limit",
+            "operation": "scan",
+            "snapshot": "a/1\na/2\n",
+            "input": "[{\"prefix\":\"a/\"}]",
+            "limits": { "maxMatches": 1 },
+            "errorCode": "EQUERY_MATCH_COUNT"
+        },
+        {
+            "name": "query output byte limit",
+            "operation": "scanEncoded",
+            "snapshot": "a/12\n",
+            "input": "[{\"prefix\":\"a/\"}]",
+            "limits": { "maxOutputBytes": 2 },
+            "errorCode": "EQUERY_OUTPUT_SIZE"
+        },
+        {
+            "name": "structured query root",
+            "operation": "structured",
+            "input": "[]",
+            "errorCode": "EQUERY_INVALID"
+        },
+        {
+            "name": "structured operation count",
+            "operation": "structured",
+            "input": "{\"$ops\":[{},{}]}",
+            "limits": { "maxQueries": 1 },
+            "errorCode": "EQUERY_COUNT"
+        },
+        {
+            "name": "structured invalid limit",
+            "operation": "structured",
+            "input": "{\"$limit\":-1}",
+            "errorCode": "EQUERY_INVALID"
+        },
+        {
+            "name": "structured invalid timestamp",
+            "operation": "structured",
+            "input": "{\"$updated\":{\"$gte\":\"now\"}}",
+            "errorCode": "EQUERY_INVALID"
+        },
+        {
+            "name": "SQL empty",
+            "operation": "sql",
+            "input": "",
+            "errorCode": "EQUERY_INVALID"
+        },
+        {
+            "name": "SQL input byte limit",
+            "operation": "sql",
+            "input": "SELECT * FROM users",
+            "limits": { "maxInputBytes": 8 },
+            "errorCode": "EQUERY_INPUT_SIZE"
+        },
+        {
+            "name": "SQL malformed",
+            "operation": "sql",
+            "input": "SELECT FROM",
+            "errorCode": "EQUERY_INVALID"
+        }
+    ]
+}

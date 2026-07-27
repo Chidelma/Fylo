@@ -1,0 +1,61 @@
+name: Rust scheduled qualification
+
+on:
+    workflow_dispatch:
+    schedule:
+        - cron: '17 5 * * *'
+
+permissions:
+    contents: read
+
+concurrency:
+    group: rust-nightly-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    fuzz:
+        name: Retained portable-kernel fuzz evidence
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Install pinned fuzz toolchain
+              run: rustup toolchain install nightly-2026-07-20 --profile minimal
+
+            - name: Install pinned cargo-fuzz
+              run: cargo +nightly-2026-07-20 install cargo-fuzz --version 0.13.2 --locked
+
+            - name: Fuzz snapshot and scan boundaries
+              run: >-
+                  cargo +nightly-2026-07-20 fuzz run query_snapshot
+                  -- -max_total_time=180 -timeout=10 -rss_limit_mb=4096
+
+            - name: Fuzz portable parsers and round trips
+              run: >-
+                  cargo +nightly-2026-07-20 fuzz run portable_inputs
+                  -- -max_total_time=180 -timeout=10 -rss_limit_mb=4096
+
+            - name: Record exact qualification identity
+              if: always()
+              run: |
+                  mkdir -p target/fuzz-evidence
+                  rustc +nightly-2026-07-20 -Vv > target/fuzz-evidence/toolchain.txt
+                  cargo +nightly-2026-07-20 fuzz --version > target/fuzz-evidence/cargo-fuzz.txt
+                  git rev-parse HEAD > target/fuzz-evidence/commit.txt
+                  find fuzz/corpus -type f -print | sort > target/fuzz-evidence/corpus.txt
+                  find fuzz/artifacts -type f -print 2>/dev/null | sort > target/fuzz-evidence/artifacts.txt || true
+
+            - name: Retain fuzz corpus and findings
+              if: always()
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: rust-portable-fuzz-${{ github.run_id }}
+                  path: |
+                      target/fuzz-evidence
+                      fuzz/corpus
+                      fuzz/artifacts
+                  if-no-files-found: warn
+                  retention-days: 90

@@ -5,6 +5,7 @@ on:
         branches: [main]
         paths:
             - '.github/workflows/rust.yml'
+            - '.github/workflows/rust-nightly.yml'
             - 'Cargo.lock'
             - 'Cargo.toml'
             - 'VERSION'
@@ -33,6 +34,7 @@ on:
             - codex/rust-rewrite
         paths:
             - '.github/workflows/rust.yml'
+            - '.github/workflows/rust-nightly.yml'
             - 'Cargo.lock'
             - 'Cargo.toml'
             - 'VERSION'

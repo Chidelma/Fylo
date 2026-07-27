@@ -75,5 +75,77 @@
             "timestamps": { "createdAt": 1, "updatedAt": 1 },
             "expected": true
         }
+    ],
+    "resultCases": [
+        {
+            "name": "stable input order with limit",
+            "query": {
+                "$ops": [
+                    { "role": { "$eq": "admin" } },
+                    { "role": { "$eq": "editor" } }
+                ],
+                "$limit": 2
+            },
+            "rows": [
+                {
+                    "id": "doc-c",
+                    "document": { "role": "editor" },
+                    "timestamps": { "createdAt": 3, "updatedAt": 30 }
+                },
+                {
+                    "id": "doc-a",
+                    "document": { "role": "admin" },
+                    "timestamps": { "createdAt": 1, "updatedAt": 10 }
+                },
+                {
+                    "id": "doc-b",
+                    "document": { "role": "editor" },
+                    "timestamps": { "createdAt": 2, "updatedAt": 20 }
+                }
+            ],
+            "expectedIds": ["doc-c", "doc-a"]
+        },
+        {
+            "name": "zero limit retains historical unlimited behavior",
+            "query": { "$ops": [], "$limit": 0 },
+            "rows": [
+                {
+                    "id": "doc-b",
+                    "document": { "value": 2 },
+                    "timestamps": { "createdAt": 2, "updatedAt": 20 }
+                },
+                {
+                    "id": "doc-a",
+                    "document": { "value": 1 },
+                    "timestamps": { "createdAt": 1, "updatedAt": 10 }
+                }
+            ],
+            "expectedIds": ["doc-b", "doc-a"]
+        },
+        {
+            "name": "timestamp filtering happens before pagination",
+            "query": {
+                "$updated": { "$gte": 20 },
+                "$limit": 1
+            },
+            "rows": [
+                {
+                    "id": "old",
+                    "document": { "value": 1 },
+                    "timestamps": { "createdAt": 1, "updatedAt": 10 }
+                },
+                {
+                    "id": "first-match",
+                    "document": { "value": 2 },
+                    "timestamps": { "createdAt": 2, "updatedAt": 20 }
+                },
+                {
+                    "id": "second-match",
+                    "document": { "value": 3 },
+                    "timestamps": { "createdAt": 3, "updatedAt": 30 }
+                }
+            ],
+            "expectedIds": ["first-match"]
+        }
     ]
 }

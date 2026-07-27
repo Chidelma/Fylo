@@ -8,12 +8,20 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+fylo-format = { version = "0.1.0", path = "../crates/fylo-format" }
 fylo-query = { version = "0.1.0", path = "../crates/fylo-query" }
 libfuzzer-sys = "0.4.10"
 
 [[bin]]
 name = "query_snapshot"
 path = "fuzz_targets/query_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "portable_inputs"
+path = "fuzz_targets/portable_inputs.rs"
 test = false
 doc = false
 bench = false

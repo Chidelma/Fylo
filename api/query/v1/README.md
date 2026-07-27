@@ -27,3 +27,8 @@ separate higher-layer contracts.
 executing mutations. Its compatibility AST and `EXPLAIN` access paths are
 checked against the JavaScript parser and planner using
 `tests/fixtures/rust-sql-v1.json`.
+
+Malformed snapshots, bounded-input failures, structured-query failures, and
+SQL parser failures are frozen in `tests/fixtures/rust-query-errors-v1.json`.
+Stable result ordering and `$limit` behavior are frozen in
+`tests/fixtures/rust-predicate-v1.json`.

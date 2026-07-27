@@ -19,7 +19,21 @@ for (const testCase of fixture.cases) {
     }
 }
 
+for (const testCase of fixture.resultCases) {
+    const actual = []
+    for (const row of testCase.rows) {
+        if (!engine.matchesQuery(row.id, row.document, testCase.query, row.timestamps)) continue
+        actual.push(row.id)
+        if (testCase.query.$limit && actual.length >= testCase.query.$limit) break
+    }
+    if (JSON.stringify(actual) !== JSON.stringify(testCase.expectedIds)) {
+        throw new Error(
+            `${testCase.name} result fixture drift: expected ${JSON.stringify(testCase.expectedIds)}, got ${JSON.stringify(actual)}`
+        )
+    }
+}
+
 console.log(
-    `Verified ${fixture.cases.length} structured predicates against the JavaScript query oracle`
+    `Verified ${fixture.cases.length} structured predicates and ${fixture.resultCases.length} ordered result cases against the JavaScript query oracle`
 )
 process.exit(0)

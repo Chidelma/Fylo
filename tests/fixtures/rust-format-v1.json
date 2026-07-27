@@ -36,6 +36,41 @@
             "errorCode": "EARRAYOFOBJECTS"
         }
     ],
+    "encodedDocuments": [
+        {
+            "name": "canonical bytes preserve insertion order",
+            "input": "{\"z\":1,\"a\":{\"city\":\"Toronto\"}}",
+            "valid": true,
+            "encoded": "{\"z\":1,\"a\":{\"city\":\"Toronto\"}}"
+        },
+        {
+            "name": "malformed JSON",
+            "input": "{\"name\":",
+            "valid": false,
+            "errorCode": "EFORMAT_JSON"
+        },
+        {
+            "name": "document byte limit",
+            "input": "{\"name\":\"Ada\"}",
+            "limits": { "maxBytes": 4 },
+            "valid": false,
+            "errorCode": "EFORMAT_SIZE"
+        },
+        {
+            "name": "document depth limit",
+            "input": "{\"profile\":{\"city\":\"Toronto\"}}",
+            "limits": { "maxDepth": 1 },
+            "valid": false,
+            "errorCode": "EFORMAT_DEPTH"
+        },
+        {
+            "name": "document node limit",
+            "input": "{\"a\":1,\"b\":2}",
+            "limits": { "maxNodes": 2 },
+            "valid": false,
+            "errorCode": "EFORMAT_NODES"
+        }
+    ],
     "metadata": [
         {
             "name": "canonical fields win",
