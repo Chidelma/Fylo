@@ -9,6 +9,16 @@ Implemented operations:
 - create-only `put-file` with an explicit TTID, durable key, extension, bytes,
   and typed custom metadata;
 - full-body `patch-document` while preserving the TTID and inode metadata;
+- shallow merge `patch-fields`, matching the JavaScript `patch(id, changes)`
+  top-level replacement contract;
+- bounded `sql` `INSERT`, `UPDATE`, and `DELETE` mutations, where a multi-record
+  `UPDATE`/`DELETE` commits under one transaction manifest;
+- `set-metadata` developer-metadata merge on documents and raw files, where a
+  JSON `null` removes a name and `user.fylo.meta-updated-at` advances strictly;
+- `set-access` UID/GID/mode projection onto an existing record;
+- schema-declared AES-256-GCM field encryption with the head `_v` stamp when a
+  schema root and both credentials are configured;
+- `commit` content-addressed auto-commit for versioned roots;
 - retained soft delete;
 - UID/GID/mode projection on POSIX at put time;
 - UID plus trusted supplementary groups for patch/delete authorization;
@@ -38,6 +48,27 @@ Rust:
 
 JavaScript must roll back the first two states and roll forward the third.
 
-This is not a supported writer. Metadata mutations, encrypted writes,
-schema/history integration, SQL mutations, exhaustive failpoints, and native
-retained release evidence remain Phase 5 gates.
+`INSERT` allocates a monotonic TTID from this process. It is not the JavaScript
+TTID generator, so cross-process identifier ordering is only guaranteed by the
+clock, and a collision retries up to sixteen times before failing closed.
+
+`set-metadata` merges; it has no authoritative-replace mode, so a caller that
+needs the JavaScript `replaceDocMetadata` contract must send explicit `null`
+removals. Windows before-images do not yet capture alternate data streams, so a
+rolled-back metadata mutation restores bytes but not the stream on NTFS.
+
+Encryption and schema validation run in `fylo-engine` before any byte reaches
+the journal, so an interrupted encrypted write can never leave plaintext behind.
+Documents are validated by the same compiled CHEX binary the JavaScript engine
+drives, and — like the JavaScript writer — only when `FYLO_STRICT` is set to a
+non-empty value; that is also when `_v` is stamped. Reading a document written
+under an older schema version still requires the JavaScript upgraders.
+
+`commit` reproduces `commitIfDirty`'s full-scan path: blobs, four-level tree
+objects, an immutable commit, and a ref update, but only when the root hash
+moved. It supports the default branch worktree only; other branches live in
+hidden worktrees the JavaScript engine owns.
+
+This is not a supported writer. Exhaustive failpoints, disk-full and quota
+cases, Windows semantics, cloned-root replay, and native retained release
+evidence remain Phase 5 gates.
