@@ -29,6 +29,7 @@
         "rust:deny": "bun ./scripts/run-rust.mjs cargo deny check",
         "rust:fmt": "bun ./scripts/run-rust.mjs cargo fmt --all --check",
         "rust:interop:readonly": "bun ./scripts/verify-rust-readonly.mjs",
+        "rust:interop:writes": "bun ./scripts/verify-rust-write-interop.mjs",
         "rust:benchmark:readonly": "bun ./scripts/benchmark-rust-readonly.mjs",
         "rust:test": "bun ./scripts/run-rust.mjs cargo test --workspace --all-features",
         "rust:verify": "bun ./scripts/run-rust.mjs cargo run -p xtask -- verify-workspace",

@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+mod write;
+
+pub use write::{NativeWriteRoot, PutDocumentOptions, WriteAccess, WriteActor};
+
 /// Maximum collection descriptor bytes.
 pub const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 /// Maximum generation-state bytes.
@@ -1597,7 +1601,7 @@ enum ExpectedType {
     Directory,
 }
 
-/// Stable native read-only storage failure codes.
+/// Stable native storage failure codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeStorageErrorCode {
     /// Filesystem I/O failed.
@@ -1610,6 +1614,8 @@ pub enum NativeStorageErrorCode {
     FileTooLarge,
     /// Collection metadata was corrupt.
     CorruptMetadata,
+    /// A document body was malformed or unsupported.
+    CorruptDocument,
     /// Prefix-index bytes were corrupt.
     CorruptIndex,
     /// Collection name was invalid or reserved.
@@ -1618,6 +1624,10 @@ pub enum NativeStorageErrorCode {
     InvalidDocumentId,
     /// Requested record was not found.
     NotFound,
+    /// Another writer owns the collection or recovery is required.
+    ConcurrentWrite,
+    /// A portable access descriptor denied the operation.
+    PermissionDenied,
     /// The preview does not support the requested collection/operation.
     Unsupported,
 }
@@ -1632,10 +1642,13 @@ impl NativeStorageErrorCode {
             Self::WrongType => "ENATIVE_WRONG_TYPE",
             Self::FileTooLarge => "ENATIVE_FILE_SIZE",
             Self::CorruptMetadata => "ENATIVE_METADATA",
+            Self::CorruptDocument => "ENATIVE_DOCUMENT",
             Self::CorruptIndex => "ENATIVE_INDEX",
             Self::InvalidCollection => "ENATIVE_COLLECTION",
             Self::InvalidDocumentId => "EINVALIDDOCID",
             Self::NotFound => "ENATIVE_NOT_FOUND",
+            Self::ConcurrentWrite => "ENATIVE_CONCURRENT_WRITE",
+            Self::PermissionDenied => "EACCES",
             Self::Unsupported => "ENATIVE_UNSUPPORTED",
         }
     }

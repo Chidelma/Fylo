@@ -252,6 +252,9 @@ jobs:
             - name: Verify current-engine interoperability
               run: bun run rust:interop:readonly
 
+            - name: Verify native write and crash-recovery interoperability
+              run: bun run rust:interop:writes
+
             - name: Benchmark current and native read-only engines
               run: >-
                   bun ./scripts/benchmark-rust-readonly.mjs
