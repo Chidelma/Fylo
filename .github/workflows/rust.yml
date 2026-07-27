@@ -255,6 +255,15 @@ jobs:
             - name: Verify native write and crash-recovery interoperability
               run: bun run rust:interop:writes
 
+            - name: Verify native encrypted write interoperability
+              run: bun run rust:interop:encrypted
+
+            - name: Verify native versioned commit interoperability
+              run: bun run rust:interop:versioned
+
+            - name: Verify native machine protocol conformance
+              run: bun run rust:interop:machine
+
             - name: Benchmark current and native read-only engines
               run: >-
                   bun ./scripts/benchmark-rust-readonly.mjs

@@ -90,10 +90,37 @@ impl EncryptionReader {
         Ok(fields)
     }
 
-    pub(crate) fn encrypted_fields(&self, collection: &str) -> Result<Vec<String>, String> {
+    /// Encrypt every schema-declared field, matching the JavaScript
+    /// `encodeEncrypted` traversal and `v2.` envelope byte for byte.
+    pub(crate) fn encode_document(
+        &self,
+        collection: &str,
+        mut fields: Map<String, Value>,
+    ) -> Result<Map<String, Value>, String> {
+        let encrypted = self.encrypted_fields(collection)?;
+        if encrypted.is_empty() {
+            return Ok(fields);
+        }
+        let key = self.key.as_ref().ok_or_else(|| {
+            format!(
+                "cannot encrypt collection {collection}: FYLO_ENCRYPTION_KEY and FYLO_CIPHER_SALT are required"
+            )
+        })?;
+        for (field, value) in &mut fields {
+            let path = field.clone();
+            encode_value(value, &path, &encrypted, key).map_err(|reason| {
+                format!("cannot encrypt declared field in collection {collection}: {reason}")
+            })?;
+        }
+        Ok(fields)
+    }
+
+    /// Load the head schema version and body, or `None` for an unversioned
+    /// collection.
+    pub(crate) fn head_schema(&self, collection: &str) -> Result<Option<(String, Value)>, String> {
         let manifest_path = PathBuf::from(collection).join("manifest.json");
         if !self.path_exists(&manifest_path)? {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let manifest: SchemaManifest =
             serde_json::from_slice(&self.read_file(&manifest_path, MAX_SCHEMA_MANIFEST_BYTES)?)
@@ -105,6 +132,13 @@ impl EncryptionReader {
         let schema: Value =
             serde_json::from_slice(&self.read_file(&schema_path, MAX_SCHEMA_BYTES)?)
                 .map_err(|error| format!("head schema is corrupt: {error}"))?;
+        Ok(Some((manifest.current, schema)))
+    }
+
+    pub(crate) fn encrypted_fields(&self, collection: &str) -> Result<Vec<String>, String> {
+        let Some((_, schema)) = self.head_schema(collection)? else {
+            return Ok(Vec::new());
+        };
         let Some(encrypted) = schema.get("$encrypted") else {
             return Ok(Vec::new());
         };
@@ -225,6 +259,75 @@ fn decode_value(
         _ => {}
     }
     Ok(())
+}
+
+/// JavaScript drops the parent path when it recurses into an array element, so
+/// an object nested inside an array is never encrypted. The Rust writer must
+/// reproduce that exactly or the JavaScript reader would see ciphertext where
+/// its own writer produced plaintext.
+fn encode_value(
+    value: &mut Value,
+    field: &str,
+    encrypted: &[String],
+    key: &[u8; 32],
+) -> Result<(), String> {
+    match value {
+        Value::Object(fields) => {
+            for (child, value) in fields {
+                let path = child_path(field, child);
+                encode_value(value, &path, encrypted, key)?;
+            }
+        }
+        Value::Array(values) => {
+            for item in values {
+                if item.is_object() || item.is_array() {
+                    encode_value(item, "", encrypted, key)?;
+                } else if is_encrypted_field(field, encrypted) {
+                    *item = Value::String(encrypt(&stringify_stored_value(item), key)?);
+                }
+            }
+        }
+        _ if is_encrypted_field(field, encrypted) => {
+            *value = Value::String(encrypt(&stringify_stored_value(value), key)?);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn child_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_owned()
+    } else {
+        format!("{parent}/{child}")
+    }
+}
+
+fn stringify_stored_value(value: &Value) -> String {
+    let rendered = match value {
+        Value::String(value) => value.clone(),
+        Value::Null => "null".to_owned(),
+        other => other.to_string(),
+    };
+    rendered.replace('/', "%2F")
+}
+
+fn encrypt(plaintext: &str, key: &[u8; 32]) -> Result<String, String> {
+    let mut nonce = Zeroizing::new([0_u8; 12]);
+    getrandom::fill(nonce.as_mut_slice())
+        .map_err(|error| format!("cannot generate a ciphertext nonce: {error}"))?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "invalid AES-256 key".to_owned())?;
+    let sealed: &aes_gcm::aead::Nonce<Aes256Gcm> = nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| "ciphertext nonce has an invalid length".to_owned())?;
+    let ciphertext = cipher
+        .encrypt(sealed, plaintext.as_bytes())
+        .map_err(|_| "configured key could not seal the value".to_owned())?;
+    let mut combined = Vec::with_capacity(nonce.len() + ciphertext.len());
+    combined.extend_from_slice(nonce.as_slice());
+    combined.extend_from_slice(&ciphertext);
+    Ok(format!("v2.{}", encode_base64_url(&combined)))
 }
 
 pub(crate) fn is_encrypted_field(field: &str, encrypted: &[String]) -> bool {

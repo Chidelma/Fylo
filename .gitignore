@@ -7,7 +7,7 @@ db
 docker-compose.yml
 Dockerfile
 .vscode
-bin
+/bin
 .DS_Store
 __pycache__/
 *.py[cod]
@@ -35,3 +35,4 @@ dist-web
 dist-staging-*
 src/browser/wasm/target/
 benchmarks/
+coverage/

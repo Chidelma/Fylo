@@ -20,6 +20,8 @@ use sha2::{Digest, Sha256};
 mod write;
 
 pub use write::{NativeWriteRoot, PutDocumentOptions, PutRawFileOptions, WriteAccess, WriteActor};
+pub use write::{RootOwner, live_root_owner};
+pub use write::{SqlMutationResult, SqlMutationResultKind};
 
 /// Maximum collection descriptor bytes.
 pub const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
@@ -49,6 +51,7 @@ pub const MAX_VERSION_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const KEY_XATTR: &str = "user.fylo.key";
 const CHECKSUM_XATTR: &str = "user.fylo.checksum";
 const META_XATTR_PREFIX: &str = "user.fylo.meta.";
+const META_UPDATED_XATTR: &str = "user.fylo.meta-updated-at";
 const ACCESS_XATTR: &str = "user.fylo.access";
 
 const RESERVED_COLLECTIONS: &[&str] = &[
@@ -1038,6 +1041,31 @@ impl NativeCollection {
         self.read_document_at(&self.path.join("docs"), identifier)
     }
 
+    /// Read one live record's developer metadata (`user.fylo.meta.*` xattrs).
+    ///
+    /// Works for both collection kinds, because the JavaScript engine stores
+    /// document and raw-file developer metadata the same way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid IDs, unsafe paths, oversized metadata, or
+    /// I/O failures.
+    pub fn read_custom_metadata(
+        &self,
+        identifier: &str,
+    ) -> Result<BTreeMap<String, Value>, NativeStorageError> {
+        validate_ttid_shape(identifier)?;
+        let path = if self.kind == CollectionKind::Document {
+            self.read_document(identifier)?.path
+        } else {
+            self.read_raw_file(identifier)?.path
+        };
+        let (file, _) = self.root.open_file(&path, MAX_RAW_FILE_BYTES)?;
+        let attributes = read_fylo_attributes(&file, &path)?;
+        self.root.verify_open_file_identity(&path, &file)?;
+        decode_custom_metadata(&attributes)
+    }
+
     /// Read one retained soft-deleted JSON document. Its modification time is
     /// the deletion timestamp established by the JavaScript engine.
     ///
@@ -1628,6 +1656,8 @@ pub enum NativeStorageErrorCode {
     ConcurrentWrite,
     /// A portable access descriptor denied the operation.
     PermissionDenied,
+    /// A SQL mutation was malformed or used an unsupported execution shape.
+    InvalidQuery,
     /// The preview does not support the requested collection/operation.
     Unsupported,
 }
@@ -1649,6 +1679,7 @@ impl NativeStorageErrorCode {
             Self::NotFound => "ENATIVE_NOT_FOUND",
             Self::ConcurrentWrite => "ENATIVE_CONCURRENT_WRITE",
             Self::PermissionDenied => "EACCES",
+            Self::InvalidQuery => "EQUERY_INVALID",
             Self::Unsupported => "ENATIVE_UNSUPPORTED",
         }
     }
@@ -1719,6 +1750,7 @@ fn read_fylo_attributes(
         if name != KEY_XATTR
             && name != CHECKSUM_XATTR
             && name != ACCESS_XATTR
+            && name != META_UPDATED_XATTR
             && !name.starts_with(META_XATTR_PREFIX)
         {
             continue;
@@ -1789,6 +1821,7 @@ fn read_fylo_attributes(
             name == KEY_XATTR
                 || name == CHECKSUM_XATTR
                 || name == ACCESS_XATTR
+                || name == META_UPDATED_XATTR
                 || name.starts_with(META_XATTR_PREFIX)
         })
         .map(|(name, value)| {

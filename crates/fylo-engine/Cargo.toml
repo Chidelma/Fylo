@@ -12,6 +12,7 @@ aes-gcm.workspace = true
 fylo-format = { version = "0.1.0", path = "../fylo-format" }
 fylo-query = { version = "0.1.0", path = "../fylo-query" }
 fylo-storage-native = { version = "0.1.0", path = "../fylo-storage-native" }
+getrandom.workspace = true
 hmac.workspace = true
 pbkdf2.workspace = true
 serde.workspace = true

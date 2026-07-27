@@ -172,6 +172,7 @@ version = "0.1.0"
 dependencies = [
  "fylo-engine",
  "fylo-format",
+ "fylo-machine",
  "fylo-query",
  "fylo-storage-native",
  "serde_json",
@@ -185,6 +186,7 @@ dependencies = [
  "fylo-format",
  "fylo-query",
  "fylo-storage-native",
+ "getrandom",
  "hmac",
  "pbkdf2",
  "serde",
@@ -198,6 +200,17 @@ dependencies = [
 name = "fylo-format"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fylo-machine"
+version = "0.1.0"
+dependencies = [
+ "fylo-engine",
+ "fylo-query",
+ "fylo-storage-native",
  "serde",
  "serde_json",
 ]

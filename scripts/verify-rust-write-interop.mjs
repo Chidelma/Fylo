@@ -84,6 +84,58 @@ try {
     await verifyCurrentDocument(root, { name: 'Grace', score: 50 })
 
     await runRequired(binary, [
+        'patch-fields',
+        '--root',
+        root,
+        '--collection',
+        collection,
+        '--id',
+        identifier,
+        '--changes',
+        '{"score":51}'
+    ])
+    await verifyCurrentDocument(root, { name: 'Grace', score: 51 })
+
+    const updated = await sql(binary, `UPDATE ${collection} SET score = 50 WHERE name = 'Grace'`)
+    assert(
+        updated.kind === 'UPDATE' && updated.affected === 1,
+        'Rust SQL UPDATE did not match one row'
+    )
+    await verifyCurrentDocument(root, { name: 'Grace', score: 50 })
+
+    const inserted = await sql(
+        binary,
+        `INSERT INTO ${collection} (name, score) VALUES ('Hopper', 7)`
+    )
+    assert(
+        inserted.kind === 'INSERT' && inserted.affected === 1,
+        'Rust SQL INSERT did not write one row'
+    )
+    const insertedReader = new Fylo(root, { versioning: { autoCommit: false } })
+    await insertedReader.ready()
+    const insertedDocument = (await insertedReader[collection].get(inserted.identifiers[0]).once())[
+        inserted.identifiers[0]
+    ]
+    assert(insertedDocument?.name === 'Hopper', 'JavaScript could not read the Rust SQL INSERT')
+    await insertedReader.close()
+
+    const removed = await sql(binary, `DELETE FROM ${collection} WHERE name = 'Hopper'`)
+    assert(
+        removed.kind === 'DELETE' && removed.affected === 1,
+        'Rust SQL DELETE did not remove one row'
+    )
+    const removedReader = new Fylo(root, { versioning: { autoCommit: false } })
+    await removedReader.ready()
+    const survivors = []
+    for await (const record of removedReader[collection]
+        .find({ $ops: [{ name: { $eq: 'Hopper' } }] })
+        .collect()) {
+        survivors.push(record)
+    }
+    assert(survivors.length === 0, 'Rust SQL DELETE left a queryable row')
+    await removedReader.close()
+
+    await runRequired(binary, [
         'put-file',
         '--root',
         root,
@@ -115,6 +167,26 @@ try {
     assert(fileMatches.length === 1, 'JavaScript could not query the Rust raw-file index')
     await fileReader.close()
 
+    await runRequired(binary, [
+        'set-metadata',
+        '--root',
+        root,
+        '--collection',
+        fileCollection,
+        '--id',
+        fileIdentifier,
+        '--record',
+        '{"reviewed":null,"owner":"storage","revision":3}'
+    ])
+    const metaReader = new Fylo(root, { versioning: { autoCommit: false } })
+    await metaReader.ready()
+    const metadata = await metaReader[fileCollection].get(fileIdentifier).metadata()
+    assert(metadata.owner === 'storage', 'JavaScript did not read Rust-merged metadata')
+    assert(metadata.revision === 3, 'JavaScript lost the Rust typed metadata value')
+    assert(metadata.source === 'rust', 'Rust metadata merge dropped an untouched name')
+    assert(!('reviewed' in metadata), 'Rust metadata null did not remove the name')
+    await metaReader.close()
+
     const interruptedDelete = await run(
         binary,
         ['delete-document', '--root', root, '--collection', collection, '--id', identifier],
@@ -139,7 +211,7 @@ try {
     await current.ready()
     const inspection = await current[collection].inspect()
     assert(Number(inspection.docsStored) === 0, 'JavaScript did not roll forward Rust delete')
-    assert(Number(inspection.deletedDocs) === 1, 'Rust tombstone was not retained')
+    assert(Number(inspection.deletedDocs) === 2, 'Rust tombstones were not retained')
     await current.close()
 
     console.log('Verified Rust writes and JavaScript recovery in both rollback directions')
@@ -160,6 +232,11 @@ async function verifyCurrentDocument(root, expected) {
     }
     assert(found.length === 1, 'JavaScript could not query the Rust-rebuilt index')
     await current.close()
+}
+
+async function sql(binary, statement) {
+    const result = await runRequired(binary, ['sql', '--root', root, '--statement', statement])
+    return JSON.parse(result.stdout).result
 }
 
 async function runRequired(binary, arguments_) {

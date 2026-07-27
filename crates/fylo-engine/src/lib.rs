@@ -5,6 +5,7 @@
 //! stable collection generation around every logical read.
 
 mod encryption;
+mod schema;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -18,9 +19,10 @@ use fylo_query::{
 };
 use fylo_storage_native::{
     AccessDescriptor, CollectionKind, GenerationStatus, IndexVerification, NativeAccess,
-    NativeCollection, NativeRoot, NativeStorageError, RepositoryHistory, StoredRawFile,
-    VersionVerification,
+    NativeCollection, NativeRoot, NativeStorageError, NativeWriteRoot, PutDocumentOptions,
+    RepositoryHistory, StoredRawFile, VersionVerification, WriteAccess, WriteActor,
 };
+use schema::SchemaTools;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -31,6 +33,235 @@ const MAX_STABLE_READ_ATTEMPTS: usize = 3;
 pub struct ReadOnlyEngine {
     root: NativeRoot,
     encryption: Option<EncryptionReader>,
+}
+
+/// Native FYLO write engine.
+///
+/// The engine owns schema-declared field encryption and canonical document
+/// encoding; `fylo-storage-native` owns durability. Encryption is applied
+/// before any byte reaches the transaction journal so a crash can never leave
+/// plaintext behind for a declared field.
+#[derive(Clone)]
+pub struct WriteEngine {
+    writer: NativeWriteRoot,
+    encryption: Option<EncryptionReader>,
+    schema: Option<std::rc::Rc<SchemaTools>>,
+}
+
+impl WriteEngine {
+    /// Open a write engine without field encryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root cannot be opened safely.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, EngineError> {
+        Ok(Self {
+            writer: NativeWriteRoot::open(path).map_err(EngineError::storage)?,
+            encryption: None,
+            schema: None,
+        })
+    }
+
+    /// Open a write engine with schema tooling but no decryption key.
+    ///
+    /// Schema inspection and validation work; a collection that declares
+    /// `$encrypted` fields fails closed until credentials are supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either root cannot be opened safely.
+    pub fn open_with_schema(
+        path: impl AsRef<Path>,
+        schema_root: impl AsRef<Path>,
+    ) -> Result<Self, EngineError> {
+        let schema_root = schema_root.as_ref().to_path_buf();
+        Ok(Self {
+            writer: NativeWriteRoot::open(path).map_err(EngineError::storage)?,
+            encryption: Some(
+                EncryptionReader::open(&schema_root, None).map_err(EngineError::encryption)?,
+            ),
+            schema: Some(std::rc::Rc::new(SchemaTools::new(schema_root))),
+        })
+    }
+
+    /// Open a write engine with JavaScript-compatible field encryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe roots, short/invalid credentials, corrupt
+    /// schema metadata, or key derivation failures.
+    pub fn open_with_encryption(
+        path: impl AsRef<Path>,
+        schema_root: impl AsRef<Path>,
+        secret: &str,
+        salt: &str,
+    ) -> Result<Self, EngineError> {
+        let schema_root = schema_root.as_ref().to_path_buf();
+        Ok(Self {
+            writer: NativeWriteRoot::open(path).map_err(EngineError::storage)?,
+            encryption: Some(
+                EncryptionReader::open(&schema_root, Some((secret, salt)))
+                    .map_err(EngineError::encryption)?,
+            ),
+            schema: Some(std::rc::Rc::new(SchemaTools::new(schema_root))),
+        })
+    }
+
+    /// Canonical root identity.
+    #[must_use]
+    pub fn root_path(&self) -> &Path {
+        self.writer.path()
+    }
+
+    /// Create one document, encrypting every schema-declared field first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid document, missing encryption
+    /// credentials, or any durable write failure.
+    pub fn put_document(
+        &self,
+        collection: &str,
+        identifier: &str,
+        fields: Map<String, Value>,
+        access: WriteAccess,
+    ) -> Result<(), EngineError> {
+        let bytes = self.encode(collection, fields)?;
+        self.writer
+            .put_document(
+                collection,
+                identifier,
+                &bytes,
+                PutDocumentOptions { access },
+            )
+            .map_err(EngineError::storage)
+    }
+
+    /// Replace one document body, encrypting every schema-declared field first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid document, missing encryption
+    /// credentials, a denied write, or any durable write failure.
+    pub fn patch_document(
+        &self,
+        collection: &str,
+        identifier: &str,
+        fields: Map<String, Value>,
+        actor: Option<&AccessContext>,
+    ) -> Result<(), EngineError> {
+        let bytes = self.encode(collection, fields)?;
+        let actor = actor.map(write_actor);
+        self.writer
+            .patch_document(collection, identifier, &bytes, actor.as_ref())
+            .map_err(EngineError::storage)
+    }
+
+    /// `schemaInspect` for one collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no schema root is configured or the manifest is
+    /// corrupt.
+    pub fn schema_inspect(&self, collection: &str) -> Result<Value, EngineError> {
+        self.schema_tools()?
+            .inspect(collection)
+            .map_err(EngineError::schema)
+    }
+
+    /// `schemaDoctor` for one collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no schema root is configured.
+    pub fn schema_doctor(&self, collection: &str) -> Result<Value, EngineError> {
+        Ok(self.schema_tools()?.doctor(collection))
+    }
+
+    /// Head schema version label, or `None` for an unversioned collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no schema root is configured or the manifest is
+    /// corrupt.
+    pub fn schema_current(&self, collection: &str) -> Result<Option<String>, EngineError> {
+        self.schema_tools()?
+            .current_version(collection)
+            .map_err(EngineError::schema)
+    }
+
+    /// Resolved schema root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no schema root is configured.
+    pub fn schema_dir(&self) -> Result<&Path, EngineError> {
+        Ok(self.schema_tools()?.schema_dir())
+    }
+
+    /// Validate one document against the head schema and stamp `_v`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no schema root is configured, the validator is
+    /// unavailable, or the document does not match its schema.
+    pub fn schema_validate(
+        &self,
+        collection: &str,
+        document: &Map<String, Value>,
+    ) -> Result<Map<String, Value>, EngineError> {
+        Ok(self
+            .schema_tools()?
+            .validate_against_head(collection, document)
+            .map_err(EngineError::schema)?
+            .unwrap_or_else(|| document.clone()))
+    }
+
+    fn schema_tools(&self) -> Result<&SchemaTools, EngineError> {
+        self.schema.as_deref().ok_or_else(|| {
+            EngineError::new(
+                EngineErrorCode::Schema,
+                "schema operations require FYLO_SCHEMA and both encryption credentials",
+            )
+        })
+    }
+
+    fn encode(&self, collection: &str, fields: Map<String, Value>) -> Result<Vec<u8>, EngineError> {
+        let fields = if let Some(encryption) = self.encryption.as_ref() {
+            // Validate before encrypting: CHEX must see the plaintext the
+            // schema describes, and the `_v` stamp it returns must survive.
+            //
+            // The JavaScript engine validates and stamps `_v` only under
+            // `FYLO_STRICT`, so an unconditional native stamp would make the
+            // same put produce different bytes in the two engines.
+            let fields = match self.schema.as_ref() {
+                // An empty `FYLO_STRICT` is falsy in JavaScript, so it must
+                // not enable validation here either.
+                Some(schema)
+                    if std::env::var("FYLO_STRICT").is_ok_and(|value| !value.is_empty()) =>
+                {
+                    schema
+                        .validate_against_head(collection, &fields)
+                        .map_err(EngineError::schema)?
+                        .unwrap_or(fields)
+                }
+                _ => fields,
+            };
+            encryption
+                .encode_document(collection, fields)
+                .map_err(EngineError::encryption)?
+        } else {
+            reject_undeclared_ciphertext(collection, &fields).map_err(EngineError::encryption)?;
+            fields
+        };
+        Document::try_from_value(Value::Object(fields), DocumentLimits::default())
+            .and_then(|document| document.encode())
+            .map_err(EngineError::format)
+    }
+}
+
+fn write_actor(actor: &AccessContext) -> WriteActor {
+    WriteActor::new(actor.uid, actor.groups.iter().copied())
 }
 
 /// Trusted actor identity supplied by a client or application boundary.
@@ -48,6 +279,18 @@ impl AccessContext {
             uid,
             groups: groups.into_iter().collect(),
         }
+    }
+
+    /// Trusted actor UID.
+    #[must_use]
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Trusted supplementary group IDs.
+    #[must_use]
+    pub const fn groups(&self) -> &BTreeSet<u32> {
+        &self.groups
     }
 }
 
@@ -191,6 +434,42 @@ impl ReadOnlyEngine {
                 document,
             })
         })
+    }
+
+    /// Canonical plus developer metadata for one live record.
+    ///
+    /// System fields win over colliding developer keys, so a caller always
+    /// receives canonical identifiers and timestamps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing record, corrupt metadata, an unsafe
+    /// path, or denied access.
+    pub fn metadata(&self, collection: &str, identifier: &str) -> Result<Value, EngineError> {
+        let handle = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        let custom: Map<String, Value> = handle
+            .read_custom_metadata(identifier)
+            .map_err(EngineError::storage)?
+            .into_iter()
+            .collect();
+        if handle.kind() == CollectionKind::File {
+            let file = self.get_file(collection, identifier)?;
+            let mut merged = file.metadata.merge_with_custom(&custom);
+            let descriptor = serde_json::to_value(&file.file).map_err(|error| {
+                EngineError::new(EngineErrorCode::CorruptData, error.to_string())
+            })?;
+            if let Some(fields) = descriptor.as_object() {
+                for (name, value) in fields {
+                    merged.entry(name.clone()).or_insert_with(|| value.clone());
+                }
+            }
+            return Ok(Value::Object(merged));
+        }
+        let record = self.get(collection, identifier)?;
+        Ok(Value::Object(record.metadata.merge_with_custom(&custom)))
     }
 
     /// Read one unwrapped raw file with canonical, custom, and native metadata.
@@ -542,6 +821,66 @@ impl ReadOnlyEngine {
                         updated_at: stored.modified_millis,
                         mtime: stored.modified_millis,
                     },
+                    document,
+                });
+                if query
+                    .limit()
+                    .is_some_and(|limit| limit > 0 && records.len() >= limit)
+                {
+                    break;
+                }
+            }
+            Ok(records)
+        })
+    }
+
+    /// Execute a structured query across retained tombstones.
+    ///
+    /// Ordering and predicate semantics match the live cursor; only the source
+    /// namespace differs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for unsafe/corrupt storage or invalid queries.
+    pub fn find_deleted(
+        &self,
+        collection: &str,
+        query: &StructuredQuery,
+        actor: Option<&AccessContext>,
+    ) -> Result<Vec<ReadDeletedDocument>, EngineError> {
+        let collection = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        Self::read_stable(&collection, || {
+            let mut records = Vec::new();
+            for identifier in collection
+                .deleted_document_ids()
+                .map_err(EngineError::storage)?
+            {
+                let stored = collection
+                    .read_deleted_document(&identifier)
+                    .map_err(EngineError::storage)?;
+                if !read_access_allowed(stored.access, actor) {
+                    continue;
+                }
+                let document = self.decode_document(
+                    collection.name(),
+                    Document::parse(&stored.bytes, DocumentLimits::default())
+                        .map_err(EngineError::format)?,
+                )?;
+                let timestamps = decode_ttid(&identifier).map_err(EngineError::format)?;
+                if !query.matches(
+                    document.fields(),
+                    timestamps.created_at,
+                    stored.modified_millis,
+                ) {
+                    continue;
+                }
+                records.push(ReadDeletedDocument {
+                    id: identifier,
+                    created_at: timestamps.created_at,
+                    deleted_at: stored.modified_millis,
                     document,
                 });
                 if query
@@ -1006,6 +1345,10 @@ pub enum EngineErrorCode {
     Encryption,
     /// Portable UID/GID/mode policy denied the operation.
     Access,
+    /// The native engine cannot honour a documented contract on this input.
+    Unsupported,
+    /// A document failed schema validation, or schema tooling failed.
+    Schema,
 }
 
 impl EngineErrorCode {
@@ -1020,6 +1363,8 @@ impl EngineErrorCode {
             Self::ConcurrentWrite => "EENGINE_CONCURRENT_WRITE",
             Self::Encryption => "EENGINE_ENCRYPTION",
             Self::Access => "EACCES",
+            Self::Unsupported => "EENGINE_UNSUPPORTED",
+            Self::Schema => "ESCHEMA",
         }
     }
 }
@@ -1039,6 +1384,10 @@ impl EngineError {
             message: message.into(),
             source: None,
         }
+    }
+
+    fn schema(message: String) -> Self {
+        Self::new(EngineErrorCode::Schema, message)
     }
 
     fn storage(error: NativeStorageError) -> Self {
