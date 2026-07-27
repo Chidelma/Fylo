@@ -19,5 +19,8 @@ serde_json.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(unix)'.dev-dependencies]
+xattr.workspace = true
+
 [lints]
 workspace = true

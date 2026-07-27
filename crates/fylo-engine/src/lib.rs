@@ -17,8 +17,9 @@ use fylo_query::{
     index_entries_for_document,
 };
 use fylo_storage_native::{
-    CollectionKind, GenerationStatus, IndexVerification, NativeAccess, NativeCollection,
-    NativeRoot, NativeStorageError, RepositoryHistory, StoredRawFile, VersionVerification,
+    AccessDescriptor, CollectionKind, GenerationStatus, IndexVerification, NativeAccess,
+    NativeCollection, NativeRoot, NativeStorageError, RepositoryHistory, StoredRawFile,
+    VersionVerification,
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -30,6 +31,24 @@ const MAX_STABLE_READ_ATTEMPTS: usize = 3;
 pub struct ReadOnlyEngine {
     root: NativeRoot,
     encryption: Option<EncryptionReader>,
+}
+
+/// Trusted actor identity supplied by a client or application boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccessContext {
+    uid: u32,
+    groups: BTreeSet<u32>,
+}
+
+impl AccessContext {
+    /// Construct an actor from a UID and trusted supplementary GIDs.
+    #[must_use]
+    pub fn new(uid: u32, groups: impl IntoIterator<Item = u32>) -> Self {
+        Self {
+            uid,
+            groups: groups.into_iter().collect(),
+        }
+    }
 }
 
 impl ReadOnlyEngine {
@@ -124,6 +143,29 @@ impl ReadOnlyEngine {
     /// Returns a stable error for unsafe storage, corrupt documents, invalid
     /// identifiers, or concurrent write generations.
     pub fn get(&self, collection: &str, identifier: &str) -> Result<ReadDocument, EngineError> {
+        self.get_with_access(collection, identifier, None)
+    }
+
+    /// Read one document as a trusted actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EACCES` when the document's portable descriptor denies reads.
+    pub fn get_as(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: &AccessContext,
+    ) -> Result<ReadDocument, EngineError> {
+        self.get_with_access(collection, identifier, Some(actor))
+    }
+
+    fn get_with_access(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: Option<&AccessContext>,
+    ) -> Result<ReadDocument, EngineError> {
         let collection = self
             .root
             .collection(collection)
@@ -132,6 +174,7 @@ impl ReadOnlyEngine {
             let stored = collection
                 .read_document(identifier)
                 .map_err(EngineError::storage)?;
+            require_read_access(stored.access, actor)?;
             let document = self.decode_document(
                 collection.name(),
                 Document::parse(&stored.bytes, DocumentLimits::default())
@@ -157,6 +200,29 @@ impl ReadOnlyEngine {
     /// Returns a stable error for unsafe storage, missing/corrupt xattrs,
     /// invalid identifiers, oversized files, or concurrent write generations.
     pub fn get_file(&self, collection: &str, identifier: &str) -> Result<ReadFile, EngineError> {
+        self.get_file_with_access(collection, identifier, None)
+    }
+
+    /// Read one raw file as a trusted actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EACCES` when the file's portable descriptor denies reads.
+    pub fn get_file_as(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: &AccessContext,
+    ) -> Result<ReadFile, EngineError> {
+        self.get_file_with_access(collection, identifier, Some(actor))
+    }
+
+    fn get_file_with_access(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: Option<&AccessContext>,
+    ) -> Result<ReadFile, EngineError> {
         let collection = self
             .root
             .collection(collection)
@@ -165,6 +231,7 @@ impl ReadOnlyEngine {
             let stored = collection
                 .read_raw_file(identifier)
                 .map_err(EngineError::storage)?;
+            require_read_access(stored.access_descriptor, actor)?;
             build_read_file(identifier, stored)
         })
     }
@@ -180,6 +247,29 @@ impl ReadOnlyEngine {
         collection: &str,
         identifier: &str,
     ) -> Result<ReadDeletedDocument, EngineError> {
+        self.get_deleted_with_access(collection, identifier, None)
+    }
+
+    /// Read one retained deleted document as a trusted actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EACCES` when the retained descriptor denies reads.
+    pub fn get_deleted_as(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: &AccessContext,
+    ) -> Result<ReadDeletedDocument, EngineError> {
+        self.get_deleted_with_access(collection, identifier, Some(actor))
+    }
+
+    fn get_deleted_with_access(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: Option<&AccessContext>,
+    ) -> Result<ReadDeletedDocument, EngineError> {
         let collection = self
             .root
             .collection(collection)
@@ -188,6 +278,7 @@ impl ReadOnlyEngine {
             let stored = collection
                 .read_deleted_document(identifier)
                 .map_err(EngineError::storage)?;
+            require_read_access(stored.access, actor)?;
             let document = self.decode_document(
                 collection.name(),
                 Document::parse(&stored.bytes, DocumentLimits::default())
@@ -214,6 +305,29 @@ impl ReadOnlyEngine {
         collection: &str,
         identifier: &str,
     ) -> Result<ReadDeletedFile, EngineError> {
+        self.get_deleted_file_with_access(collection, identifier, None)
+    }
+
+    /// Read one retained deleted raw file as a trusted actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EACCES` when the retained descriptor denies reads.
+    pub fn get_deleted_file_as(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: &AccessContext,
+    ) -> Result<ReadDeletedFile, EngineError> {
+        self.get_deleted_file_with_access(collection, identifier, Some(actor))
+    }
+
+    fn get_deleted_file_with_access(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: Option<&AccessContext>,
+    ) -> Result<ReadDeletedFile, EngineError> {
         let collection = self
             .root
             .collection(collection)
@@ -222,6 +336,7 @@ impl ReadOnlyEngine {
             let stored = collection
                 .read_deleted_raw_file(identifier)
                 .map_err(EngineError::storage)?;
+            require_read_access(stored.access_descriptor, actor)?;
             let deleted_at = stored.modified_millis;
             Ok(ReadDeletedFile {
                 deleted_at,
@@ -368,6 +483,32 @@ impl ReadOnlyEngine {
         collection: &str,
         query: &StructuredQuery,
     ) -> Result<Vec<ReadDocument>, EngineError> {
+        self.find_with_access(collection, query, None)
+    }
+
+    /// Execute a structured query as a trusted actor.
+    ///
+    /// Protected rows that deny reads are omitted, matching the JavaScript
+    /// collection cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for unsafe/corrupt storage or invalid queries.
+    pub fn find_as(
+        &self,
+        collection: &str,
+        query: &StructuredQuery,
+        actor: &AccessContext,
+    ) -> Result<Vec<ReadDocument>, EngineError> {
+        self.find_with_access(collection, query, Some(actor))
+    }
+
+    fn find_with_access(
+        &self,
+        collection: &str,
+        query: &StructuredQuery,
+        actor: Option<&AccessContext>,
+    ) -> Result<Vec<ReadDocument>, EngineError> {
         let collection = self
             .root
             .collection(collection)
@@ -378,6 +519,9 @@ impl ReadOnlyEngine {
                 let stored = collection
                     .read_document(&identifier)
                     .map_err(EngineError::storage)?;
+                if !read_access_allowed(stored.access, actor) {
+                    continue;
+                }
                 let document = self.decode_document(
                     collection.name(),
                     Document::parse(&stored.bytes, DocumentLimits::default())
@@ -422,6 +566,27 @@ impl ReadOnlyEngine {
     /// Returns a stable error for non-SELECT plans, joins, malformed query
     /// ASTs, unsafe storage, or unstable collection generations.
     pub fn select_sql(&self, plan: &SqlPlan) -> Result<Value, EngineError> {
+        self.select_sql_with_access(plan, None)
+    }
+
+    /// Execute a read-only SQL plan as a trusted actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for invalid plans, storage, or access failures.
+    pub fn select_sql_as(
+        &self,
+        plan: &SqlPlan,
+        actor: &AccessContext,
+    ) -> Result<Value, EngineError> {
+        self.select_sql_with_access(plan, Some(actor))
+    }
+
+    fn select_sql_with_access(
+        &self,
+        plan: &SqlPlan,
+        actor: Option<&AccessContext>,
+    ) -> Result<Value, EngineError> {
         if plan.operation != SqlOperation::Select {
             return Err(EngineError::new(
                 EngineErrorCode::Query,
@@ -436,7 +601,7 @@ impl ReadOnlyEngine {
         }
         let query = StructuredQuery::from_value(&plan.ast, QueryLimits::default())
             .map_err(EngineError::query)?;
-        let records = self.find(&plan.collection, &query)?;
+        let records = self.find_with_access(&plan.collection, &query, actor)?;
         Ok(shape_select_results(records, &plan.ast))
     }
 
@@ -534,6 +699,35 @@ impl ReadOnlyEngine {
         Document::try_from_value(Value::Object(fields), DocumentLimits::default())
             .map_err(EngineError::format)
     }
+}
+
+fn require_read_access(
+    descriptor: Option<AccessDescriptor>,
+    actor: Option<&AccessContext>,
+) -> Result<(), EngineError> {
+    if read_access_allowed(descriptor, actor) {
+        Ok(())
+    } else {
+        Err(EngineError::new(
+            EngineErrorCode::Access,
+            "portable FYLO access descriptor denied the read",
+        ))
+    }
+}
+
+fn read_access_allowed(
+    descriptor: Option<AccessDescriptor>,
+    actor: Option<&AccessContext>,
+) -> bool {
+    let Some(descriptor) = descriptor else {
+        return true;
+    };
+    let bits = match actor {
+        Some(actor) if actor.uid == descriptor.uid => (descriptor.mode >> 6) & 0o7,
+        Some(actor) if actor.groups.contains(&descriptor.gid) => (descriptor.mode >> 3) & 0o7,
+        _ => descriptor.mode & 0o7,
+    };
+    bits & 0o4 != 0
 }
 
 fn build_read_file(identifier: &str, stored: StoredRawFile) -> Result<ReadFile, EngineError> {
@@ -810,6 +1004,8 @@ pub enum EngineErrorCode {
     ConcurrentWrite,
     /// Encrypted data could not be safely decoded.
     Encryption,
+    /// Portable UID/GID/mode policy denied the operation.
+    Access,
 }
 
 impl EngineErrorCode {
@@ -823,6 +1019,7 @@ impl EngineErrorCode {
             Self::CorruptData => "EENGINE_CORRUPT",
             Self::ConcurrentWrite => "EENGINE_CONCURRENT_WRITE",
             Self::Encryption => "EENGINE_ENCRYPTION",
+            Self::Access => "EACCES",
         }
     }
 }

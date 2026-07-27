@@ -12,6 +12,7 @@ import { assertIndexableDocument } from '../src/storage/prefix-index.js'
 const operations = JSON.parse(await readFile('api/machine/v1/operations.json', 'utf8'))
 const schema = JSON.parse(await readFile('api/machine/v1/schema.json', 'utf8'))
 const errors = JSON.parse(await readFile('api/errors/v1.json', 'utf8'))
+const oracleReleases = JSON.parse(await readFile('api/oracle/v1/releases.json', 'utf8'))
 const fixture = JSON.parse(await readFile('tests/fixtures/rust-format-v1.json', 'utf8'))
 const machineSource = await readFile('src/cli/machine.js', 'utf8')
 const protocolSource = await readFile('src/cli/protocol.js', 'utf8')
@@ -24,6 +25,7 @@ const rustFormatSource = await readFile('crates/fylo-format/src/lib.rs', 'utf8')
 const rustStorageSource = await readFile('crates/fylo-storage-native/src/lib.rs', 'utf8')
 const rustEngineSource = await readFile('crates/fylo-engine/src/lib.rs', 'utf8')
 const wasmHostSource = await readFile('src/browser/wasm/index-scanner.js', 'utf8')
+const rustWorkflowSource = await readFile('.github/workflows/rust.yml', 'utf8')
 
 assert(operations.protocolVersion === MACHINE_PROTOCOL_VERSION, 'operation protocol version drift')
 assert(
@@ -33,6 +35,25 @@ assert(
 assert(DEFAULT_MAX_REQUEST_FRAME_BYTES === 1024 * 1024, 'request frame default drift')
 assert(DEFAULT_MAX_RESPONSE_FRAME_BYTES === 8 * 1024 * 1024, 'response frame default drift')
 assert(MAX_CONFIGURED_FRAME_BYTES === 64 * 1024 * 1024, 'configured frame maximum drift')
+assert(
+    oracleReleases.format === 'fylo.released-oracle-sources.v1',
+    'released oracle registry format drift'
+)
+for (const release of oracleReleases.releases) {
+    assert(release.tag === `v${release.version}`, 'released oracle tag/version drift')
+    assert(/^[0-9a-f]{40}$/.test(release.commit), 'released oracle commit must be a SHA-1')
+    for (const [target, asset] of Object.entries(release.assets)) {
+        assert(typeof target === 'string' && target.length > 0, 'oracle target is empty')
+        assert(/^[0-9a-f]{64}$/.test(asset.sha256), `${target} oracle checksum is invalid`)
+        if (asset.ci) {
+            assert(
+                rustWorkflowSource.includes(asset.name) &&
+                    rustWorkflowSource.includes(asset.sha256),
+                `${target} oracle workflow pin drift`
+            )
+        }
+    }
+}
 
 const typedef = machineSource.match(/@typedef \{'([^}]+)'\} MachineOperation/)?.[1]
 assert(typedef, 'MachineOperation typedef not found')

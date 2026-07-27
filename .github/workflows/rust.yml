@@ -17,6 +17,9 @@ on:
             - 'rust-miri-toolchain.toml'
             - 'rustfmt.toml'
             - 'scripts/benchmark-rust-readonly.mjs'
+            - 'scripts/record-released-rust-oracle.mjs'
+            - 'scripts/restore-rust-oracle-metadata.mjs'
+            - 'scripts/smoke-released-rust-oracle-restore.mjs'
             - 'scripts/build-browser.mjs'
             - 'scripts/run-rust.mjs'
             - 'scripts/verify-rust-*.mjs'
@@ -42,6 +45,9 @@ on:
             - 'rust-miri-toolchain.toml'
             - 'rustfmt.toml'
             - 'scripts/benchmark-rust-readonly.mjs'
+            - 'scripts/record-released-rust-oracle.mjs'
+            - 'scripts/restore-rust-oracle-metadata.mjs'
+            - 'scripts/smoke-released-rust-oracle-restore.mjs'
             - 'scripts/build-browser.mjs'
             - 'scripts/run-rust.mjs'
             - 'scripts/verify-rust-*.mjs'
@@ -198,3 +204,88 @@ jobs:
                   path: target/benchmarks/read-only-${{ runner.os }}.json
                   if-no-files-found: error
                   retention-days: 30
+
+    released-oracle:
+        name: Released oracle (${{ matrix.target }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 30
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-latest
+                      target: linux-x64
+                      asset: fylo-linux-x64
+                      sha256: fc1c0ee3fb18d6f5278be4135871cabe5e074234d406deb5f0ded8062b556f2e
+                    - os: macos-latest
+                      target: macos-arm64
+                      asset: fylo-macos-arm64
+                      sha256: ae39a2b66ea9771766f3f3d6b3d0d1b01e1b3842a45aa0389535109b91bdee50
+                    - os: windows-latest
+                      target: windows-x64
+                      asset: fylo-windows-x64.exe
+                      sha256: 2b3083fb86989e2408f6a5027923a8efe1595783b64c0a149624adb7154885dd
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Set up Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install dependencies
+              run: bun install --frozen-lockfile
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
+            - name: Download pinned released JavaScript engine
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p target/oracle-bin
+                  gh release download v26.30.06 \
+                    --repo d31ma/Fylo \
+                    --pattern '${{ matrix.asset }}' \
+                    --dir target/oracle-bin
+                  chmod +x 'target/oracle-bin/${{ matrix.asset }}' || true
+
+            - name: Record released compatibility root
+              run: >-
+                  bun ./scripts/record-released-rust-oracle.mjs
+                  --binary target/oracle-bin/${{ matrix.asset }}
+                  --release v26.30.06
+                  --expected-sha256 ${{ matrix.sha256 }}
+                  --output target/oracles/${{ matrix.target }}
+
+            - name: Verify current-engine compatibility
+              run: >-
+                  bun ./scripts/verify-rust-golden-root.mjs
+                  --input target/oracles/${{ matrix.target }}
+
+            - name: Build Rust read-only verifier
+              run: >-
+                  bun ./scripts/run-rust.mjs cargo build
+                  --locked -p fylo-cli --bin fylo-rust
+
+            - name: Verify released root with Rust
+              run: >-
+                  bun ./scripts/verify-released-rust-oracle.mjs
+                  --input target/oracles/${{ matrix.target }}
+
+            - name: Verify metadata-sidecar restoration
+              run: >-
+                  bun ./scripts/smoke-released-rust-oracle-restore.mjs
+                  --input target/oracles/${{ matrix.target }}
+
+            - name: Retain released compatibility root
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: rust-released-oracle-v26.30.06-${{ matrix.target }}
+                  path: target/oracles/${{ matrix.target }}
+                  if-no-files-found: error
+                  retention-days: 90

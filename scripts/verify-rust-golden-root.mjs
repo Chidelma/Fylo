@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
@@ -9,8 +10,23 @@ if (!input) throw new Error('Usage: verify-rust-golden-root.mjs --input <fixture
 
 const directory = resolve(input)
 const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
-if (manifest.format !== 'fylo.rust-golden-root.v1') {
+const supportedFormats = ['fylo.rust-golden-root.v1', 'fylo.released-oracle.v1']
+if (!supportedFormats.includes(manifest.format)) {
     throw new Error(`Unsupported golden-root manifest: ${manifest.format}`)
+}
+if (manifest.format === 'fylo.released-oracle.v1') {
+    assertEqual(manifest.producer.buildKind, 'release', 'released producer build kind')
+    assertEqual(
+        manifest.producer.version,
+        manifest.producer.releaseTag.replace(/^v/, ''),
+        'released producer version'
+    )
+    const nativeMetadata = await readFile(join(directory, manifest.root.nativeMetadata), 'utf8')
+    assertEqual(
+        sha256(nativeMetadata),
+        manifest.root.nativeMetadataSha256,
+        'native metadata digest'
+    )
 }
 const operationFrames = (await readFile(join(directory, manifest.operations), 'utf8'))
     .trim()
@@ -48,13 +64,16 @@ try {
 
     const query = manifest.probes.query
     assertEqual(
-        await collect(database[query.collection].find(query.query)),
+        await collect(database[query.collection].find(query.query), manifest.format),
         query.value,
         'query probe'
     )
     const deleted = manifest.probes.deleted
     assertEqual(
-        await collect(database[deleted.collection].find.deleted(deleted.query)),
+        await collect(
+            database[deleted.collection].find.deleted(deleted.query),
+            manifest.format
+        ),
         deleted.value,
         'deleted-document probe'
     )
@@ -74,18 +93,24 @@ try {
 } finally {
     await database.close()
 }
+const after = await hashRoot(root)
+assertEqual(after.digest, manifest.root.digest, 'root digest after verification')
 
 console.log(
     `Verified ${manifest.format} from FYLO ${manifest.producer.version} with ${operationFrames.length} operations`
 )
 
-async function collect(cursor) {
+async function collect(cursor, format) {
     const values = []
     for await (const value of cursor.collect()) values.push(value)
-    return values
+    return format === 'fylo.released-oracle.v1' ? Object.assign({}, ...values) : values
 }
 
 function option(name) {
     const index = process.argv.indexOf(name)
     return index === -1 ? null : process.argv[index + 1]
+}
+
+function sha256(value) {
+    return createHash('sha256').update(value).digest('hex')
 }

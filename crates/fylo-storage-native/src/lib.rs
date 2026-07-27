@@ -45,6 +45,7 @@ pub const MAX_VERSION_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const KEY_XATTR: &str = "user.fylo.key";
 const CHECKSUM_XATTR: &str = "user.fylo.checksum";
 const META_XATTR_PREFIX: &str = "user.fylo.meta.";
+const ACCESS_XATTR: &str = "user.fylo.access";
 
 const RESERVED_COLLECTIONS: &[&str] = &[
     "sql",
@@ -1062,11 +1063,17 @@ impl NativeCollection {
         let path = namespace
             .join(&identifier[..2])
             .join(format!("{identifier}.json"));
-        let metadata = self.root.verify_path(&path, ExpectedType::File)?;
-        let bytes = self.root.read_file(&path, MAX_DOCUMENT_BYTES)?;
+        let (mut file, metadata) = self.root.open_file(&path, MAX_DOCUMENT_BYTES)?;
+        let attributes = read_fylo_attributes(&file, &path)?;
+        let bytes = read_bounded(
+            (&mut file).take(MAX_DOCUMENT_BYTES.saturating_add(1)),
+            MAX_DOCUMENT_BYTES,
+        )?;
+        self.root.verify_open_file_identity(&path, &file)?;
         Ok(StoredBytes {
             bytes,
             modified_millis: modified_millis(&metadata)?,
+            access: decode_access_descriptor(&attributes)?,
             path,
         })
     }
@@ -1128,6 +1135,7 @@ impl NativeCollection {
         let key = required_utf8_attribute(&attributes, KEY_XATTR, identifier)?;
         validate_raw_key(&key)?;
         let custom_metadata = decode_custom_metadata(&attributes)?;
+        let access_descriptor = decode_access_descriptor(&attributes)?;
         let bytes = read_bounded(
             (&mut file).take(MAX_RAW_FILE_BYTES.saturating_add(1)),
             MAX_RAW_FILE_BYTES,
@@ -1149,6 +1157,7 @@ impl NativeCollection {
             content_type: raw_file_content_type(&extension).to_owned(),
             checksum_sha256,
             custom_metadata,
+            access_descriptor,
             modified_millis,
             modified_millis_exact,
             access: native_access(&metadata),
@@ -1360,6 +1369,8 @@ pub struct StoredBytes {
     pub bytes: Vec<u8>,
     /// Filesystem modification time in Unix milliseconds.
     pub modified_millis: u64,
+    /// Optional portable FYLO access descriptor.
+    pub access: Option<AccessDescriptor>,
     /// Verified native path.
     pub path: PathBuf,
 }
@@ -1379,6 +1390,8 @@ pub struct StoredRawFile {
     pub checksum_sha256: String,
     /// Developer-defined JSON metadata.
     pub custom_metadata: BTreeMap<String, Value>,
+    /// Optional portable FYLO access descriptor.
+    pub access_descriptor: Option<AccessDescriptor>,
     /// Filesystem modification time in Unix milliseconds.
     pub modified_millis: u64,
     /// Filesystem modification time with the sub-millisecond precision exposed
@@ -1400,6 +1413,20 @@ pub struct NativeAccess {
     pub gid: Option<u32>,
     /// POSIX permission and special bits when available.
     pub mode: Option<u32>,
+}
+
+/// Portable FYLO access descriptor stored in `user.fylo.access`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessDescriptor {
+    /// Descriptor format version.
+    pub version: u8,
+    /// Owning user ID.
+    pub uid: u32,
+    /// Owning group ID.
+    pub gid: u32,
+    /// POSIX-compatible permission bits.
+    pub mode: u32,
 }
 
 /// Read-only prefix-index reference verification.
@@ -1676,7 +1703,11 @@ fn read_fylo_attributes(
                 "raw-file xattr name is not valid UTF-8",
             )
         })?;
-        if name != KEY_XATTR && name != CHECKSUM_XATTR && !name.starts_with(META_XATTR_PREFIX) {
+        if name != KEY_XATTR
+            && name != CHECKSUM_XATTR
+            && name != ACCESS_XATTR
+            && !name.starts_with(META_XATTR_PREFIX)
+        {
             continue;
         }
         let Some(value) = file.get_xattr(name).map_err(NativeStorageError::io)? else {
@@ -1742,7 +1773,10 @@ fn read_fylo_attributes(
     encoded
         .into_iter()
         .filter(|(name, _)| {
-            name == KEY_XATTR || name == CHECKSUM_XATTR || name.starts_with(META_XATTR_PREFIX)
+            name == KEY_XATTR
+                || name == CHECKSUM_XATTR
+                || name == ACCESS_XATTR
+                || name.starts_with(META_XATTR_PREFIX)
         })
         .map(|(name, value)| {
             decode_base64(&value)
@@ -1782,6 +1816,27 @@ fn required_utf8_attribute(
             format!("raw-file attribute {name} is not valid UTF-8: {error}"),
         )
     })
+}
+
+fn decode_access_descriptor(
+    attributes: &BTreeMap<String, Vec<u8>>,
+) -> Result<Option<AccessDescriptor>, NativeStorageError> {
+    let Some(encoded) = attributes.get(ACCESS_XATTR) else {
+        return Ok(None);
+    };
+    let descriptor: AccessDescriptor = serde_json::from_slice(encoded).map_err(|error| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            format!("FYLO access descriptor is corrupt: {error}"),
+        )
+    })?;
+    if descriptor.version != 1 || descriptor.mode > 0o777 {
+        return Err(NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            "FYLO access descriptor is invalid",
+        ));
+    }
+    Ok(Some(descriptor))
 }
 
 fn decode_custom_metadata(
@@ -2319,6 +2374,12 @@ mod tests {
             xattr::set(&path, KEY_XATTR, b"/fixtures/sample.bin").unwrap();
             xattr::set(&path, "user.fylo.meta.source", br#""rust-native-test""#).unwrap();
             xattr::set(&path, "user.fylo.meta.reviewed", b"true").unwrap();
+            xattr::set(
+                &path,
+                ACCESS_XATTR,
+                br#"{"version":1,"uid":1000,"gid":100,"mode":416}"#,
+            )
+            .unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
             path
         }
@@ -2614,6 +2675,15 @@ mod tests {
             Some(&Value::Bool(true))
         );
         assert_eq!(stored.access.mode, Some(0o640));
+        assert_eq!(
+            stored.access_descriptor,
+            Some(AccessDescriptor {
+                version: 1,
+                uid: 1000,
+                gid: 100,
+                mode: 0o640,
+            })
+        );
         assert_eq!(stored.checksum_sha256.len(), 64);
     }
 

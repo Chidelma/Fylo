@@ -4,7 +4,7 @@ use std::env;
 use std::path::Path;
 use std::process::ExitCode;
 
-use fylo_engine::ReadOnlyEngine;
+use fylo_engine::{AccessContext, ReadOnlyEngine};
 use fylo_format::DOCUMENT_FORMAT_V1;
 use fylo_query::{QUERY_FORMAT_V1, QueryLimits, ScanQuery, StructuredQuery, prepare_sql};
 use serde_json::json;
@@ -54,23 +54,25 @@ fn run(arguments: &[String]) -> Result<String, String> {
         "get" => {
             let collection = required_option(arguments, "--collection")?;
             let identifier = required_option(arguments, "--id")?;
-            serde_json::to_string_pretty(
-                &engine
-                    .get(collection, identifier)
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())
+            let actor = access_context(arguments)?;
+            let record = match actor.as_ref() {
+                Some(actor) => engine.get_as(collection, identifier, actor),
+                None => engine.get(collection, identifier),
+            };
+            serde_json::to_string_pretty(&record.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
         }
         "get-file" => get_file_output(&engine, arguments),
         "get-deleted" => {
             let collection = required_option(arguments, "--collection")?;
             let identifier = required_option(arguments, "--id")?;
-            serde_json::to_string_pretty(
-                &engine
-                    .get_deleted(collection, identifier)
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())
+            let actor = access_context(arguments)?;
+            let record = match actor.as_ref() {
+                Some(actor) => engine.get_deleted_as(collection, identifier, actor),
+                None => engine.get_deleted(collection, identifier),
+            };
+            serde_json::to_string_pretty(&record.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
         }
         "get-deleted-file" => get_deleted_file_output(&engine, arguments),
         "scan-index" => {
@@ -102,23 +104,25 @@ fn run(arguments: &[String]) -> Result<String, String> {
             let encoded = required_option(arguments, "--query")?;
             let query = StructuredQuery::parse(encoded.as_bytes(), QueryLimits::default())
                 .map_err(|error| error.to_string())?;
-            serde_json::to_string_pretty(
-                &engine
-                    .find(collection, &query)
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())
+            let actor = access_context(arguments)?;
+            let records = match actor.as_ref() {
+                Some(actor) => engine.find_as(collection, &query, actor),
+                None => engine.find(collection, &query),
+            };
+            serde_json::to_string_pretty(&records.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
         }
         "sql" => {
             let statement = required_option(arguments, "--statement")?;
             let plan = prepare_sql(statement, QueryLimits::default())
                 .map_err(|error| error.to_string())?;
-            serde_json::to_string_pretty(
-                &engine
-                    .select_sql(&plan)
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())
+            let actor = access_context(arguments)?;
+            let result = match actor.as_ref() {
+                Some(actor) => engine.select_sql_as(&plan, actor),
+                None => engine.select_sql(&plan),
+            };
+            serde_json::to_string_pretty(&result.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
         }
         _ => Err(usage()),
     }
@@ -186,9 +190,12 @@ fn open_engine(root: &str) -> Result<ReadOnlyEngine, String> {
 fn get_file_output(engine: &ReadOnlyEngine, arguments: &[String]) -> Result<String, String> {
     let collection = required_option(arguments, "--collection")?;
     let identifier = required_option(arguments, "--id")?;
-    let file = engine
-        .get_file(collection, identifier)
-        .map_err(|error| error.to_string())?;
+    let actor = access_context(arguments)?;
+    let file = match actor.as_ref() {
+        Some(actor) => engine.get_file_as(collection, identifier, actor),
+        None => engine.get_file(collection, identifier),
+    }
+    .map_err(|error| error.to_string())?;
     let mut output = serde_json::to_value(&file).map_err(|error| error.to_string())?;
     output
         .as_object_mut()
@@ -203,9 +210,12 @@ fn get_deleted_file_output(
 ) -> Result<String, String> {
     let collection = required_option(arguments, "--collection")?;
     let identifier = required_option(arguments, "--id")?;
-    let file = engine
-        .get_deleted_file(collection, identifier)
-        .map_err(|error| error.to_string())?;
+    let actor = access_context(arguments)?;
+    let file = match actor.as_ref() {
+        Some(actor) => engine.get_deleted_file_as(collection, identifier, actor),
+        None => engine.get_deleted_file(collection, identifier),
+    }
+    .map_err(|error| error.to_string())?;
     let mut output = serde_json::to_value(&file).map_err(|error| error.to_string())?;
     output
         .as_object_mut()
@@ -225,6 +235,32 @@ fn required_option<'a>(arguments: &'a [String], name: &str) -> Result<&'a str, S
         .ok_or_else(|| format!("missing value for {name}\n{}", usage()))
 }
 
+fn access_context(arguments: &[String]) -> Result<Option<AccessContext>, String> {
+    if !arguments.iter().any(|argument| argument == "--uid") {
+        if arguments.iter().any(|argument| argument == "--groups") {
+            return Err("--groups requires --uid".into());
+        }
+        return Ok(None);
+    }
+    let uid = required_option(arguments, "--uid")?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid --uid: {error}"))?;
+    let groups = if arguments.iter().any(|argument| argument == "--groups") {
+        required_option(arguments, "--groups")?
+            .split(',')
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .parse::<u32>()
+                    .map_err(|error| format!("invalid --groups: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(Some(AccessContext::new(uid, groups)))
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -238,11 +274,13 @@ fn usage() -> String {
     "Usage:\n  fylo-rust version\n  fylo-rust inspect --root <path> --collection <name>\n  \
      fylo-rust log --root <path> [--limit <1-1000>]\n  \
      fylo-rust verify-history --root <path> [--limit <1-1000>]\n  \
-     fylo-rust get --root <path> --collection <name> --id <ttid>\n  fylo-rust scan-index --root \
+     fylo-rust get --root <path> --collection <name> --id <ttid> [--uid <uid> [--groups \
+     <gid,...>]]\n  fylo-rust scan-index --root \
      <path> --collection <name> --queries <json>\n  fylo-rust get-file --root <path> --collection \
      <name> --id <ttid>\n  fylo-rust get-deleted --root <path> --collection <name> --id <ttid>\n  \
      fylo-rust get-deleted-file --root <path> --collection <name> --id <ttid>\n  fylo-rust find \
-     --root <path> --collection <name> --query <json>\n  fylo-rust verify-index --root <path> \
+     --root <path> --collection <name> --query <json> [--uid <uid> [--groups <gid,...>]]\n  \
+     fylo-rust verify-index --root <path> \
      --collection <name>\n  fylo-rust sql --root <path> --statement <select-sql>\n\nThis preview \
      is strictly read-only."
         .into()

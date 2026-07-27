@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fylo_engine::{EngineErrorCode, ReadOnlyEngine};
-use fylo_query::ScanQuery;
+use fylo_engine::{AccessContext, EngineErrorCode, ReadOnlyEngine};
+use fylo_query::{QueryLimits, ScanQuery, StructuredQuery};
 
 struct TestRoot(PathBuf);
 
@@ -112,6 +112,60 @@ fn fails_closed_on_ciphertext_without_a_schema_root() {
         .unwrap_err();
     assert_eq!(error.code(), EngineErrorCode::Encryption);
     assert!(!error.to_string().contains("v2."));
+}
+
+#[cfg(unix)]
+#[test]
+fn enforces_portable_access_descriptors_for_get_and_find() {
+    let fixture = TestRoot::create();
+    let path = fixture
+        .0
+        .join(".collections/users/docs/4V/4VRNF52JPCO.json");
+    xattr::set(
+        &path,
+        "user.fylo.access",
+        br#"{"version":1,"uid":1000,"gid":100,"mode":416}"#,
+    )
+    .unwrap();
+    let engine = ReadOnlyEngine::open(&fixture.0).unwrap();
+    assert_eq!(
+        engine.get("users", "4VRNF52JPCO").unwrap_err().code(),
+        EngineErrorCode::Access
+    );
+    assert!(
+        engine
+            .get_as(
+                "users",
+                "4VRNF52JPCO",
+                &AccessContext::new(1000, std::iter::empty())
+            )
+            .is_ok()
+    );
+    assert!(
+        engine
+            .get_as("users", "4VRNF52JPCO", &AccessContext::new(2000, [100]))
+            .is_ok()
+    );
+    assert_eq!(
+        engine
+            .get_as("users", "4VRNF52JPCO", &AccessContext::new(2000, [200]))
+            .unwrap_err()
+            .code(),
+        EngineErrorCode::Access
+    );
+    let query = StructuredQuery::parse(
+        br#"{"$ops":[{"score":{"$gte":40}}]}"#,
+        QueryLimits::default(),
+    )
+    .unwrap();
+    assert!(engine.find("users", &query).unwrap().is_empty());
+    assert_eq!(
+        engine
+            .find_as("users", &query, &AccessContext::new(2000, [100]))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 fn snapshot_tree(root: &std::path::Path) -> Vec<(PathBuf, u64)> {
