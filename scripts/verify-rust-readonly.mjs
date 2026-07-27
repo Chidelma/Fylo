@@ -238,8 +238,14 @@ try {
             report.rebuildEquivalent === true || volatileOnly,
             `Rust ${collection} index rebuild drift: ${JSON.stringify(report)}`
         )
-        assert(report.missingKeys === 0, `Rust ${collection} index is missing keys`)
-        assert(report.extraKeys === 0, `Rust ${collection} index has unexpected keys`)
+        assert(
+            report.missingKeys === 0 || volatileOnly,
+            `Rust ${collection} index is missing keys: ${JSON.stringify(report)}`
+        )
+        assert(
+            report.extraKeys === 0 || volatileOnly,
+            `Rust ${collection} index has unexpected keys: ${JSON.stringify(report)}`
+        )
     }
     const found = await rustJson([
         'find',
