@@ -93,7 +93,11 @@ jobs:
               shell: bash
               run: |
                   bun run vendor:install
-                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  if command -v cygpath >/dev/null 2>&1; then
+                      cygpath -w "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  else
+                      echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  fi
 
             - name: Install pinned Rust toolchain
               run: rustup show active-toolchain
@@ -253,7 +257,11 @@ jobs:
               shell: bash
               run: |
                   bun run vendor:install
-                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  if command -v cygpath >/dev/null 2>&1; then
+                      cygpath -w "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  else
+                      echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  fi
 
             - name: Install pinned Rust toolchain
               run: rustup show active-toolchain
@@ -330,7 +338,11 @@ jobs:
               shell: bash
               run: |
                   bun run vendor:install
-                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  if command -v cygpath >/dev/null 2>&1; then
+                      cygpath -w "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  else
+                      echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  fi
 
             - name: Install pinned Rust toolchain
               run: rustup show active-toolchain
