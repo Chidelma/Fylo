@@ -2825,13 +2825,24 @@ mod tests {
         let shard = fixture.0.join(".collections/users/docs/4V");
         fs::create_dir(&external).unwrap();
         fs::remove_dir_all(&shard).unwrap();
-        let status = Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&shard)
-            .arg(&external)
-            .status()
+        // `New-Item -ItemType Junction` needs no privilege and reports a usable
+        // error, unlike `cmd /C mklink`, whose failures this fixture used to
+        // discard. Junctions are the reparse point the security check targets,
+        // so a directory symlink is not an acceptable substitute.
+        let created = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(format!(
+                "New-Item -ItemType Junction -Path '{}' -Target '{}' | Out-Null",
+                shard.display(),
+                external.display()
+            ))
+            .output()
             .unwrap();
-        assert!(status.success(), "failed to create NTFS junction fixture");
+        assert!(
+            created.status.success(),
+            "failed to create NTFS junction fixture: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
         let collection = NativeRoot::open(&fixture.0)
             .unwrap()
             .collection("users")

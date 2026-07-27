@@ -2154,12 +2154,34 @@ fn sync_parent(path: &Path) -> Result<(), NativeStorageError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), NativeStorageError> {
-    let directory = File::open(path).map_err(NativeStorageError::io)?;
+    let directory = open_directory(path).map_err(NativeStorageError::io)?;
     match directory.sync_all() {
         Ok(()) => Ok(()),
+        // Some filesystems refuse to flush a directory handle. The rename that
+        // preceded this call is still atomic, so the operation stands.
         Err(_error) if cfg!(windows) => Ok(()),
         Err(error) => Err(NativeStorageError::io(error)),
     }
+}
+
+/// Windows refuses `CreateFile` on a directory without backup semantics, so a
+/// plain `File::open` fails with "Access is denied" and every durable rename
+/// would lose its parent flush. The flag is the documented way to obtain a
+/// directory handle and is available through safe `std`.
+#[cfg(windows)]
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_directory(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 fn sibling_scratch(path: &Path) -> PathBuf {
