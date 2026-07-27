@@ -512,6 +512,15 @@ impl NativeRoot {
                     "storage path contains a non-normal component",
                 ));
             };
+            if !directory_contains_exact_name(&current, segment)? {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::UnsafePath,
+                    format!(
+                        "storage path component has non-canonical spelling: {}",
+                        current.join(segment).display()
+                    ),
+                ));
+            }
             current.push(segment);
             let metadata = fs::symlink_metadata(&current).map_err(NativeStorageError::io)?;
             if is_link_or_reparse(&metadata) {
@@ -2208,6 +2217,18 @@ fn is_link_or_reparse(metadata: &Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
+fn directory_contains_exact_name(
+    directory: &Path,
+    expected: &std::ffi::OsStr,
+) -> Result<bool, NativeStorageError> {
+    for entry in fs::read_dir(directory).map_err(NativeStorageError::io)? {
+        if entry.map_err(NativeStorageError::io)?.file_name() == expected {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -2221,13 +2242,17 @@ mod tests {
 
     impl TestRoot {
         fn create() -> Self {
+            Self::create_named("fylo-native")
+        }
+
+        fn create_named(prefix: &str) -> Self {
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
             let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "fylo-native-{}-{nonce}-{sequence}",
+                "{prefix}-{}-{nonce}-{sequence}",
                 std::process::id()
             ));
             fs::create_dir_all(path.join(".collections/users/docs/4V")).unwrap();
@@ -2333,6 +2358,56 @@ mod tests {
                 extra_keys: None,
             }
         );
+    }
+
+    #[test]
+    fn reads_from_a_unicode_root() {
+        let fixture = TestRoot::create_named("fylo-native-ü-日本語");
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("users")
+            .unwrap();
+        assert_eq!(
+            collection.read_document("4VRNF52JPCO").unwrap().bytes,
+            br#"{"name":"Ada"}"#
+        );
+    }
+
+    #[test]
+    fn rejects_case_aliases_for_storage_components() {
+        let fixture = TestRoot::create();
+        let original = fixture
+            .0
+            .join(".collections/users/docs/4V/4VRNF52JPCO.json");
+        let case_variant = fixture
+            .0
+            .join(".collections/users/docs/4V/4VRNF52JPCO.JSON");
+        fs::rename(&original, &case_variant).unwrap();
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("users")
+            .unwrap();
+        let error = collection.read_document("4VRNF52JPCO").unwrap_err();
+        assert_eq!(error.code(), NativeStorageErrorCode::UnsafePath);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fails_closed_when_document_permissions_deny_reads() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = TestRoot::create();
+        let path = fixture
+            .0
+            .join(".collections/users/docs/4V/4VRNF52JPCO.json");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("users")
+            .unwrap();
+        let error = collection.read_document("4VRNF52JPCO").unwrap_err();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(error.code(), NativeStorageErrorCode::Io);
     }
 
     #[test]

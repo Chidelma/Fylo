@@ -35,6 +35,7 @@ The preview:
 
 - canonicalizes root identity;
 - rejects symlinks and Windows reparse points below the trusted root;
+- requires exact on-disk component spelling even on case-insensitive filesystems;
 - validates collection names, TTIDs, descriptors, generation state,
   documents, and index snapshots;
 - bounds every file and query read;
@@ -64,6 +65,8 @@ device/inode identity on Unix and volume/file identity on Windows, avoiding the
 unstable standard-library `windows_by_handle` APIs. Raw-file reads repeat that
 comparison after ADS/xattr and body access. Native Windows execution evidence
 for that race boundary, joins, and all mutations remain promotion blockers.
+The native suite also exercises Unicode roots, case-only aliases, and
+fail-closed Unix read permissions.
 
 Historical object verification is deliberately bounded to 1,000,000 unique
 objects, 16 GiB aggregate bytes, 16 MiB per tree node, and 256 MiB per blob in
