@@ -318,6 +318,13 @@ impl NativeWriteRoot {
                     &encoded,
                 )?;
             }
+            // Every attribute write must land before the checksum stamp is
+            // computed. On Windows an alternate-data-stream write updates the
+            // file's last-write time, so a stamp taken earlier would record an
+            // mtime the next reader cannot match, permanently invalidating the
+            // checksum cache and making index rebuilds non-deterministic. POSIX
+            // xattr writes leave mtime alone, so the order is harmless there.
+            apply_access(&target, access)?;
             let metadata = fs::metadata(&target).map_err(NativeStorageError::io)?;
             let checksum = super::sha256_hex(bytes);
             let stamp = format!(
@@ -326,7 +333,6 @@ impl NativeWriteRoot {
                 super::modified_millis(&metadata)?
             );
             write_fylo_attribute(&target, super::CHECKSUM_XATTR, stamp.as_bytes())?;
-            apply_access(&target, access)?;
             transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
             transaction.capture(&collection.path.join("index").join("keys.wal"))?;
             self.rebuild_index(&collection)?;
