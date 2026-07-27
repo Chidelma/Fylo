@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 mod write;
 
-pub use write::{NativeWriteRoot, PutDocumentOptions, WriteAccess, WriteActor};
+pub use write::{NativeWriteRoot, PutDocumentOptions, PutRawFileOptions, WriteAccess, WriteActor};
 
 /// Maximum collection descriptor bytes.
 pub const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;

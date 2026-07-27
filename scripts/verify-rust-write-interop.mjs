@@ -8,11 +8,14 @@ const workspace = await mkdtemp(join(tmpdir(), 'fylo-rust-write-interop-'))
 const root = join(workspace, 'root')
 const collection = 'records'
 const identifier = '4VRNF52JPCO'
+const fileCollection = 'assets'
+const fileIdentifier = '4VRNF52JPCP'
 
 try {
     await mkdir(root, { recursive: true })
     const seed = new Fylo(root, { versioning: { autoCommit: false } })
     await seed[collection].create()
+    await seed[fileCollection].create({ kind: 'file' })
     await seed.close()
 
     await command([
@@ -79,6 +82,38 @@ try {
         '{"name":"Grace","score":50}'
     ])
     await verifyCurrentDocument(root, { name: 'Grace', score: 50 })
+
+    await runRequired(binary, [
+        'put-file',
+        '--root',
+        root,
+        '--collection',
+        fileCollection,
+        '--id',
+        fileIdentifier,
+        '--bytes-hex',
+        '00010203ff',
+        '--key',
+        '/fixtures/sample.bin',
+        '--extension',
+        '.bin',
+        '--metadata',
+        '{"source":"rust","reviewed":true}'
+    ])
+    const fileReader = new Fylo(root, { versioning: { autoCommit: false } })
+    await fileReader.ready()
+    const file = (await fileReader[fileCollection].get(fileIdentifier).once())[fileIdentifier]
+    assert(file.key === '/fixtures/sample.bin', 'JavaScript raw-file key drift')
+    assert(file.contentLength === 5, 'JavaScript raw-file length drift')
+    assert(file.meta.source === 'rust', 'JavaScript raw-file metadata drift')
+    const fileMatches = []
+    for await (const record of fileReader[fileCollection]
+        .find({ $ops: [{ key: { $eq: '/fixtures/sample.bin' } }] })
+        .collect()) {
+        fileMatches.push(record)
+    }
+    assert(fileMatches.length === 1, 'JavaScript could not query the Rust raw-file index')
+    await fileReader.close()
 
     const interruptedDelete = await run(
         binary,

@@ -3,9 +3,11 @@
 The experimental `fylo-write-preview` binary exercises the native transaction
 writer without replacing the production JavaScript CLI.
 
-Implemented document operations:
+Implemented operations:
 
 - create-only `put-document` with an explicit TTID;
+- create-only `put-file` with an explicit TTID, durable key, extension, bytes,
+  and typed custom metadata;
 - full-body `patch-document` while preserving the TTID and inode metadata;
 - retained soft delete;
 - UID/GID/mode projection on POSIX at put time;
@@ -36,6 +38,6 @@ Rust:
 
 JavaScript must roll back the first two states and roll forward the third.
 
-This is not a supported writer. Raw files, metadata mutations, encrypted
-writes, schema/history integration, SQL mutations, exhaustive failpoints, and
-native retained release evidence remain Phase 5 gates.
+This is not a supported writer. Metadata mutations, encrypted writes,
+schema/history integration, SQL mutations, exhaustive failpoints, and native
+retained release evidence remain Phase 5 gates.

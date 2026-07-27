@@ -3,7 +3,9 @@
 use std::env;
 use std::process::ExitCode;
 
-use fylo_storage_native::{NativeWriteRoot, PutDocumentOptions, WriteAccess, WriteActor};
+use fylo_storage_native::{
+    NativeWriteRoot, PutDocumentOptions, PutRawFileOptions, WriteAccess, WriteActor,
+};
 use serde_json::json;
 
 fn main() -> ExitCode {
@@ -38,6 +40,36 @@ fn run(arguments: &[String]) -> Result<String, String> {
                     identifier,
                     document.as_bytes(),
                     PutDocumentOptions {
+                        access: WriteAccess {
+                            uid: optional_u32(arguments, "--uid")?,
+                            gid: optional_u32(arguments, "--gid")?,
+                            mode: optional_mode(arguments, "--mode")?,
+                        },
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            false
+        }
+        "put-file" => {
+            let collection = required_option(arguments, "--collection")?;
+            let identifier = required_option(arguments, "--id")?;
+            let bytes = decode_hex(required_option(arguments, "--bytes-hex")?)?;
+            let metadata = option(arguments, "--metadata")
+                .map(|encoded| {
+                    serde_json::from_str(encoded)
+                        .map_err(|error| format!("invalid --metadata: {error}"))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            writer
+                .put_raw_file(
+                    collection,
+                    identifier,
+                    &bytes,
+                    &PutRawFileOptions {
+                        key: required_option(arguments, "--key")?.into(),
+                        extension: required_option(arguments, "--extension")?.into(),
+                        metadata,
                         access: WriteAccess {
                             uid: optional_u32(arguments, "--uid")?,
                             gid: optional_u32(arguments, "--gid")?,
@@ -138,10 +170,30 @@ fn required_option<'a>(arguments: &'a [String], name: &str) -> Result<&'a str, S
         .ok_or_else(|| format!("missing {name}\n{}", usage()))
 }
 
+fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+    if !value.len().is_multiple_of(2) {
+        return Err("--bytes-hex must contain an even number of digits".into());
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .map_err(|error| format!("invalid --bytes-hex: {error}"))
+                .and_then(|pair| {
+                    u8::from_str_radix(pair, 16)
+                        .map_err(|error| format!("invalid --bytes-hex: {error}"))
+                })
+        })
+        .collect()
+}
+
 fn usage() -> String {
     "Usage:\n  fylo-write-preview recover --root <path> --collection <name>\n  \
      fylo-write-preview put-document --root <path> --collection <name> --id <ttid> --document \
-     <json> [--uid <uid>] [--gid <gid>] [--mode <octal>]\n  fylo-write-preview patch-document \
+     <json> [--uid <uid>] [--gid <gid>] [--mode <octal>]\n  fylo-write-preview put-file --root \
+     <path> --collection <name> --id <ttid> --bytes-hex \
+     <hex> --key <key> --extension <ext> [--metadata <json>]\n  fylo-write-preview patch-document \
      --root <path> --collection <name> --id <ttid> --document <json> [--actor-uid <uid> \
      [--actor-groups <gid,...>]]\n  fylo-write-preview delete-document --root <path> --collection \
      <name> --id <ttid> [--actor-uid <uid> [--actor-groups <gid,...>]]"

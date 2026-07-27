@@ -12,9 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use fylo_format::{Document, DocumentLimits};
+use fylo_format::{Document, DocumentLimits, decode_ttid};
 use fylo_query::{IndexLookupValue, index_entries_for_document};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use super::{
     ACCESS_XATTR, CollectionKind, ExpectedType, MAX_DOCUMENT_BYTES, NativeRoot, NativeStorageError,
@@ -60,6 +61,19 @@ impl WriteAccess {
 /// Options for a create-only native document put.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PutDocumentOptions {
+    /// Optional owner/group/mode projection.
+    pub access: WriteAccess,
+}
+
+/// Options for a create-only native raw-file put.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PutRawFileOptions {
+    /// Durable logical object key.
+    pub key: String,
+    /// Safe lowercase extension including the leading dot.
+    pub extension: String,
+    /// Developer-defined typed metadata.
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
     /// Optional owner/group/mode projection.
     pub access: WriteAccess,
 }
@@ -193,7 +207,7 @@ impl NativeWriteRoot {
             apply_access(&target, access)?;
             transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
             transaction.capture(&collection.path.join("index").join("keys.wal"))?;
-            self.rebuild_document_index(&collection)?;
+            self.rebuild_index(&collection)?;
             transaction.commit()
         })();
         if let Err(error) = outcome {
@@ -201,6 +215,97 @@ impl NativeWriteRoot {
                 return Err(NativeStorageError::new(
                     NativeStorageErrorCode::Io,
                     format!("write failed ({error}) and rollback failed ({rollback})"),
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Create one raw file at an explicitly supplied TTID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identifiers, extension/key/metadata
+    /// bounds, duplicate records, unsafe paths, lock contention, permission
+    /// projection failure, or interrupted durable operation.
+    pub fn put_raw_file(
+        &self,
+        collection_name: &str,
+        identifier: &str,
+        bytes: &[u8],
+        options: &PutRawFileOptions,
+    ) -> Result<(), NativeStorageError> {
+        validate_ttid_shape(identifier)?;
+        if bytes.len() as u64 > super::MAX_RAW_FILE_BYTES {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "raw file exceeds the native write limit",
+            ));
+        }
+        super::validate_raw_extension(&format!("{identifier}{}", options.extension), identifier)?;
+        super::validate_raw_key(&options.key)?;
+        validate_custom_metadata(&options.metadata)?;
+        let access = options.access.validate()?;
+        let collection = self.root.collection(collection_name)?;
+        if collection.kind != CollectionKind::File {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::WrongType,
+                "put_raw_file requires a file collection",
+            ));
+        }
+        let _lock = CollectionWriteLock::acquire(&collection.path)?;
+        self.recover_locked(&collection)?;
+        if collection.raw_file_ids()?.iter().any(|id| id == identifier) {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "raw-file identifier already exists",
+            ));
+        }
+        let target = collection
+            .path
+            .join("docs")
+            .join(&identifier[..2])
+            .join(format!("{identifier}{}", options.extension));
+        let mut transaction = Transaction::begin(self, &collection, "put-file")?;
+        let outcome = (|| {
+            transaction.capture(&target)?;
+            let parent = target.parent().ok_or_else(|| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::UnsafePath,
+                    "raw-file target has no parent",
+                )
+            })?;
+            ensure_directory(&self.root, parent)?;
+            durable_replace(&target, bytes)?;
+            write_fylo_attribute(&target, super::KEY_XATTR, options.key.as_bytes())?;
+            for (name, value) in &options.metadata {
+                let encoded = serde_json::to_vec(value).map_err(|error| json_error(&error))?;
+                write_fylo_attribute(
+                    &target,
+                    &format!("{}{name}", super::META_XATTR_PREFIX),
+                    &encoded,
+                )?;
+            }
+            let metadata = fs::metadata(&target).map_err(NativeStorageError::io)?;
+            let checksum = super::sha256_hex(bytes);
+            let stamp = format!(
+                "{checksum}:{}:{}",
+                metadata.len(),
+                super::modified_millis(&metadata)?
+            );
+            write_fylo_attribute(&target, super::CHECKSUM_XATTR, stamp.as_bytes())?;
+            apply_access(&target, access)?;
+            transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
+            transaction.capture(&collection.path.join("index").join("keys.wal"))?;
+            self.rebuild_index(&collection)?;
+            transaction.commit()
+        })();
+        if let Err(error) = outcome {
+            if let Err(rollback) = transaction.rollback() {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::Io,
+                    format!("raw-file write failed ({error}) and rollback failed ({rollback})"),
                 ));
             }
             return Err(error);
@@ -253,7 +358,7 @@ impl NativeWriteRoot {
             transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
             transaction.capture(&collection.path.join("index").join("keys.wal"))?;
             overwrite_in_place(&target, &canonical)?;
-            self.rebuild_document_index(&collection)?;
+            self.rebuild_index(&collection)?;
             transaction.commit()
         })();
         if let Err(error) = outcome {
@@ -321,7 +426,7 @@ impl NativeWriteRoot {
             sync_parent(&source)?;
             sync_parent(&target)?;
             failpoint("after-delete-rename")?;
-            self.rebuild_document_index(&collection)?;
+            self.rebuild_index(&collection)?;
             transaction.commit()
         })();
         if let Err(error) = outcome {
@@ -361,7 +466,7 @@ impl NativeWriteRoot {
         if manifest.phase == TransactionPhase::Active {
             restore_captures(&collection.path, &root, &captures)?;
         }
-        self.rebuild_document_index(collection)?;
+        self.rebuild_index(collection)?;
         write_generation(
             self,
             collection,
@@ -371,31 +476,40 @@ impl NativeWriteRoot {
         Ok(true)
     }
 
-    fn rebuild_document_index(
+    fn rebuild_index(
         &self,
         collection: &super::NativeCollection,
     ) -> Result<(), NativeStorageError> {
-        if collection.kind != CollectionKind::Document {
-            return Err(NativeStorageError::new(
-                NativeStorageErrorCode::Unsupported,
-                "native file-collection index rebuild is not implemented in this slice",
-            ));
-        }
         let mut keys = BTreeSet::new();
-        for identifier in collection.document_ids()? {
-            let stored = collection.read_document(&identifier)?;
-            let document =
-                Document::parse(&stored.bytes, DocumentLimits::default()).map_err(|error| {
-                    NativeStorageError::new(
-                        NativeStorageErrorCode::CorruptDocument,
-                        format!("document is invalid during index rebuild: {error}"),
-                    )
-                })?;
-            keys.extend(index_entries_for_document(
-                identifier.as_str(),
-                document.fields(),
-                |_, value| Ok::<_, NativeStorageError>(IndexLookupValue::plain(value)),
-            )?);
+        match collection.kind {
+            CollectionKind::Document => {
+                for identifier in collection.document_ids()? {
+                    let stored = collection.read_document(&identifier)?;
+                    let document = Document::parse(&stored.bytes, DocumentLimits::default())
+                        .map_err(|error| {
+                            NativeStorageError::new(
+                                NativeStorageErrorCode::CorruptDocument,
+                                format!("document is invalid during index rebuild: {error}"),
+                            )
+                        })?;
+                    keys.extend(index_entries_for_document(
+                        identifier.as_str(),
+                        document.fields(),
+                        |_, value| Ok::<_, NativeStorageError>(IndexLookupValue::plain(value)),
+                    )?);
+                }
+            }
+            CollectionKind::File => {
+                for identifier in collection.raw_file_ids()? {
+                    let stored = collection.read_raw_file(&identifier)?;
+                    let fields = raw_file_index_fields(&identifier, &stored)?;
+                    keys.extend(index_entries_for_document(
+                        identifier.as_str(),
+                        &fields,
+                        |_, value| Ok::<_, NativeStorageError>(IndexLookupValue::plain(value)),
+                    )?);
+                }
+            }
         }
         let index = collection.path.join("index");
         ensure_directory(&self.root, &index)?;
@@ -637,7 +751,7 @@ impl<'a> Transaction<'a> {
             return Ok(());
         }
         restore_captures(&self.collection.path, &self.root, &self.captures)?;
-        self.writer.rebuild_document_index(self.collection)?;
+        self.writer.rebuild_index(self.collection)?;
         write_generation(
             self.writer,
             self.collection,
@@ -1028,6 +1142,103 @@ fn overwrite_in_place(path: &Path, bytes: &[u8]) -> Result<(), NativeStorageErro
     sync_parent(path)
 }
 
+fn raw_file_index_fields(
+    identifier: &str,
+    stored: &super::StoredRawFile,
+) -> Result<Map<String, Value>, NativeStorageError> {
+    let timestamps = decode_ttid(identifier).map_err(|error| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::InvalidDocumentId,
+            format!("raw-file TTID is invalid: {error}"),
+        )
+    })?;
+    let mut fields = Map::new();
+    fields.insert(
+        "name".into(),
+        Value::String(format!("{identifier}{}", stored.extension)),
+    );
+    fields.insert("key".into(), Value::String(stored.key.clone()));
+    fields.insert("extension".into(), Value::String(stored.extension.clone()));
+    fields.insert(
+        "contentType".into(),
+        Value::String(stored.content_type.clone()),
+    );
+    fields.insert(
+        "contentLength".into(),
+        Value::from(u64::try_from(stored.bytes.len()).map_err(|_| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "raw-file length does not fit the index format",
+            )
+        })?),
+    );
+    fields.insert("etag".into(), Value::String(stored.checksum_sha256.clone()));
+    fields.insert(
+        "checksumSHA256".into(),
+        Value::String(stored.checksum_sha256.clone()),
+    );
+    fields.insert("createdAt".into(), Value::from(timestamps.created_at));
+    fields.insert(
+        "lastModified".into(),
+        Value::from(stored.modified_millis_exact),
+    );
+    if !stored.custom_metadata.is_empty() {
+        fields.insert(
+            "meta".into(),
+            Value::Object(
+                stored
+                    .custom_metadata
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    Ok(fields)
+}
+
+fn validate_custom_metadata(
+    metadata: &std::collections::BTreeMap<String, Value>,
+) -> Result<(), NativeStorageError> {
+    let mut total = 0_usize;
+    for (name, value) in metadata {
+        if name.is_empty()
+            || name.len() > 64
+            || name.contains('\0')
+            || name.contains('/')
+            || name.contains('\\')
+        {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "raw-file custom metadata name is invalid",
+            ));
+        }
+        let encoded = serde_json::to_vec(value).map_err(|error| json_error(&error))?;
+        if encoded.len() > super::MAX_META_VALUE_BYTES {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "raw-file custom metadata value exceeds 60 KiB",
+            ));
+        }
+        total = total
+            .checked_add(name.len())
+            .and_then(|value| value.checked_add(encoded.len()))
+            .ok_or_else(|| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::FileTooLarge,
+                    "raw-file custom metadata size overflow",
+                )
+            })?;
+        if total > super::MAX_FILE_METADATA_BYTES {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "raw-file custom metadata exceeds 1 MiB",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn require_write_access(
     descriptor: Option<super::AccessDescriptor>,
     actor: Option<&WriteActor>,
@@ -1048,6 +1259,63 @@ fn require_write_access(
             "portable FYLO access descriptor denied the mutation",
         ))
     }
+}
+
+#[cfg(unix)]
+fn write_fylo_attribute(path: &Path, name: &str, value: &[u8]) -> Result<(), NativeStorageError> {
+    use xattr::FileExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(NativeStorageError::io)?;
+    file.set_xattr(name, value)
+        .map_err(NativeStorageError::io)?;
+    file.sync_all().map_err(NativeStorageError::io)?;
+    failpoint("after-metadata-write")
+}
+
+#[cfg(windows)]
+fn write_fylo_attribute(path: &Path, name: &str, value: &[u8]) -> Result<(), NativeStorageError> {
+    use std::ffi::OsString;
+
+    let mut stream = OsString::from(path.as_os_str());
+    stream.push(":fylo.xattrs");
+    let stream = PathBuf::from(stream);
+    let mut attributes: std::collections::BTreeMap<String, String> = match fs::read(&stream) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("Windows FYLO ADS manifest is corrupt: {error}"),
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => return Err(NativeStorageError::io(error)),
+    };
+    attributes.insert(name.into(), BASE64.encode(value));
+    let encoded = serde_json::to_vec(&attributes).map_err(|error| json_error(&error))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(stream)
+        .map_err(NativeStorageError::io)?;
+    file.write_all(&encoded).map_err(NativeStorageError::io)?;
+    file.sync_all().map_err(NativeStorageError::io)?;
+    failpoint("after-metadata-write")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write_fylo_attribute(
+    _path: &Path,
+    _name: &str,
+    _value: &[u8],
+) -> Result<(), NativeStorageError> {
+    Err(NativeStorageError::new(
+        NativeStorageErrorCode::Unsupported,
+        "FYLO native metadata is unavailable on this platform",
+    ))
 }
 
 fn copy_durable(source: &Path, target: &Path) -> Result<(), NativeStorageError> {
@@ -1558,5 +1826,52 @@ mod tests {
                 Some(&WriteActor::new(u32::MAX - 1, [gid])),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn puts_raw_bytes_with_key_metadata_checksum_and_index_entries() {
+        let fixture = TestRoot::create();
+        fs::create_dir_all(fixture.0.join(".fylo-catalog/collections")).unwrap();
+        fs::write(
+            fixture.0.join(".fylo-catalog/collections/assets.json"),
+            br#"{"kind":"file"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(fixture.0.join(".buckets/assets/docs")).unwrap();
+        fs::create_dir_all(fixture.0.join(".buckets/assets/.deleted")).unwrap();
+        fs::create_dir_all(fixture.0.join(".buckets/assets/index")).unwrap();
+        fs::write(fixture.0.join(".buckets/assets/index/keys.snapshot"), b"").unwrap();
+        fs::write(fixture.0.join(".buckets/assets/index/keys.wal"), b"").unwrap();
+        let writer = NativeWriteRoot::open(&fixture.0).unwrap();
+        writer
+            .put_raw_file(
+                "assets",
+                "4VRNF52JPCO",
+                &[0, 1, 2, 3, 255],
+                &PutRawFileOptions {
+                    key: "/fixtures/sample.bin".into(),
+                    extension: ".bin".into(),
+                    metadata: [("reviewed".into(), Value::Bool(true))]
+                        .into_iter()
+                        .collect(),
+                    access: WriteAccess::default(),
+                },
+            )
+            .unwrap();
+        let collection = writer.root.collection("assets").unwrap();
+        let stored = collection.read_raw_file("4VRNF52JPCO").unwrap();
+        assert_eq!(stored.bytes, [0, 1, 2, 3, 255]);
+        assert_eq!(stored.key, "/fixtures/sample.bin");
+        assert_eq!(
+            stored.custom_metadata.get("reviewed"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(stored.checksum_sha256, crate::sha256_hex(&stored.bytes));
+        let snapshot = collection.index_snapshot().unwrap();
+        let snapshot = std::str::from_utf8(snapshot.as_bytes()).unwrap();
+        assert!(
+            snapshot.contains("key/eq/%252Ffixtures%252Fsample.bin/4VRNF52JPCO"),
+            "{snapshot}"
+        );
     }
 }
