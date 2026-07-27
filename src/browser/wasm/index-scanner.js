@@ -146,10 +146,18 @@ export class WasmIndexScanner {
                 `FYLO Wasm snapshot exceeds ${MAX_SNAPSHOT_BYTES} bytes`
             )
         }
-        const pointer = this.allocate(bytes.byteLength)
+        const pointer = this.allocateRegion(bytes.byteLength, 'snapshot')
         try {
             if (bytes.byteLength > 0) {
-                new Uint8Array(this.memory.buffer, pointer, bytes.byteLength).set(bytes)
+                try {
+                    new Uint8Array(this.memory.buffer, pointer, bytes.byteLength).set(bytes)
+                } catch (cause) {
+                    throw new FyloWasmError(
+                        'EWASM_MEMORY',
+                        'Unable to copy the FYLO index snapshot into Wasm memory',
+                        { cause }
+                    )
+                }
             }
             if (this.loadSnapshotExport(pointer, bytes.byteLength) === WASM_ERROR) {
                 throw new FyloWasmError(
@@ -167,15 +175,31 @@ export class WasmIndexScanner {
      * @returns {string[]}
      */
     scanQueries(queries) {
-        const input = ENCODER.encode(JSON.stringify(queries))
+        let input
+        try {
+            input = ENCODER.encode(JSON.stringify(queries))
+        } catch (cause) {
+            throw new FyloWasmError('EWASM_QUERY', 'Unable to encode the FYLO Wasm query', {
+                cause
+            })
+        }
         if (input.byteLength > MAX_QUERY_BYTES) {
             throw new FyloWasmError(
                 'EWASM_QUERY',
                 `FYLO Wasm query exceeds ${MAX_QUERY_BYTES} bytes`
             )
         }
-        const inputPointer = this.allocate(input.byteLength)
-        new Uint8Array(this.memory.buffer, inputPointer, input.byteLength).set(input)
+        const inputPointer = this.allocateRegion(input.byteLength, 'query')
+        try {
+            new Uint8Array(this.memory.buffer, inputPointer, input.byteLength).set(input)
+        } catch (cause) {
+            this.deallocate(inputPointer, input.byteLength)
+            throw new FyloWasmError(
+                'EWASM_MEMORY',
+                'Unable to copy the FYLO query into Wasm memory',
+                { cause }
+            )
+        }
         this.ensureOutput(Math.max(this.outputCapacity, INITIAL_OUTPUT_CAPACITY))
         try {
             let required = this.scanQueriesExport(
@@ -218,9 +242,42 @@ export class WasmIndexScanner {
     /** @param {number} capacity */
     ensureOutput(capacity) {
         if (capacity <= this.outputCapacity) return
+        if (capacity > MAX_OUTPUT_BYTES) {
+            throw new FyloWasmError(
+                'EWASM_MEMORY',
+                `FYLO Wasm output allocation exceeds ${MAX_OUTPUT_BYTES} bytes`
+            )
+        }
+        const pointer = this.allocateRegion(capacity, 'output')
         if (this.outputPointer) this.deallocate(this.outputPointer, this.outputCapacity)
         this.outputCapacity = capacity
-        this.outputPointer = this.allocate(capacity)
+        this.outputPointer = pointer
+    }
+
+    /**
+     * @param {number} length
+     * @param {'snapshot' | 'query' | 'output'} purpose
+     * @returns {number}
+     */
+    allocateRegion(length, purpose) {
+        try {
+            const pointer = this.allocate(length)
+            if (
+                !Number.isSafeInteger(pointer) ||
+                pointer < 0 ||
+                pointer + length > this.memory.buffer.byteLength
+            ) {
+                throw new RangeError('allocator returned an invalid linear-memory region')
+            }
+            return pointer
+        } catch (cause) {
+            if (cause instanceof FyloWasmError) throw cause
+            throw new FyloWasmError(
+                'EWASM_MEMORY',
+                `Unable to allocate Wasm memory for the FYLO ${purpose}`,
+                { cause }
+            )
+        }
     }
 
     close() {

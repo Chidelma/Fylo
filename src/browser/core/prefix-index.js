@@ -170,6 +170,78 @@ async function queryLookupValue(collection, fieldPath, value) {
 }
 
 /**
+ * Plans index prefixes for a SQL LIKE pattern. Returns null when no index can
+ * answer the pattern safely, leaving the caller on the in-memory matcher.
+ * @param {string} collection
+ * @param {string} fieldPath
+ * @param {string} pattern
+ * @returns {Promise<Array<{ kind: string, valuePrefix: string }> | null>}
+ */
+async function likeQueryPrefixes(collection, fieldPath, pattern) {
+    // `_` is a one-character wildcard. Existing prefix/reverse/ngram indexes
+    // cannot encode that positional constraint safely, so use the bounded
+    // in-memory matcher rather than risk false negatives.
+    if (pattern.includes('_')) return null
+    const wildcards = (pattern.match(/%/g) ?? []).length
+    if (wildcards === 0) {
+        return [
+            {
+                kind: 'eq',
+                valuePrefix: `${await queryLookupValue(collection, fieldPath, pattern)}/`
+            }
+        ]
+    }
+    if (wildcards === 1 && pattern.endsWith('%')) {
+        return [{ kind: 'f', valuePrefix: encodeSegment(pattern.slice(0, -1)) }]
+    }
+    if (wildcards === 1 && pattern.startsWith('%')) {
+        return [{ kind: 'r', valuePrefix: encodeSegment(reverseString(pattern.slice(1))) }]
+    }
+    return containsQueryPrefixes(pattern, wildcards)
+}
+
+/**
+ * `%needle%` can use the trigram index, but only when the needle is long
+ * enough to produce one.
+ * @param {string} pattern
+ * @param {number} wildcards
+ * @returns {Array<{ kind: string, valuePrefix: string }> | null}
+ */
+function containsQueryPrefixes(pattern, wildcards) {
+    if (wildcards !== 2 || !pattern.startsWith('%') || !pattern.endsWith('%')) return null
+    if (pattern.length <= 2) return null
+    const needle = pattern.slice(1, -1)
+    if (Array.from(needle).length < NGRAM_SIZE) return null
+    const planned = trigrams(needle)[0]
+    return [{ kind: 'g3', valuePrefix: `${encodeSegment(planned ?? needle.slice(0, 3))}/` }]
+}
+
+/**
+ * Plans forward and reverse numeric range scans. A non-numeric bound cannot be
+ * served by the index at all.
+ * @param {Record<string, any>} operand
+ * @returns {Array<{ kind: string, valuePrefix: string, range: { op: '$gt' | '$gte' | '$lt' | '$lte', value: string } }> | null}
+ */
+function rangeQueryPrefixes(operand) {
+    /** @type {Array<{ kind: string, valuePrefix: string, range: { op: '$gt' | '$gte' | '$lt' | '$lte', value: string } }>} */
+    const rangeEntries = []
+    for (const operator of /** @type {const} */ (['$gt', '$gte', '$lt', '$lte'])) {
+        const raw = operand[operator]
+        if (raw === undefined) continue
+        const numeric = numericValue(raw)
+        const sortable = numeric === null ? '' : sortableFloat64(numeric)
+        if (!sortable) return null
+        const ascending = operator === '$gt' || operator === '$gte'
+        rangeEntries.push({
+            kind: ascending ? 'n' : 'nr',
+            valuePrefix: '',
+            range: { op: operator, value: ascending ? sortable : reverseSortable(sortable) }
+        })
+    }
+    return rangeEntries.length ? rangeEntries : null
+}
+
+/**
  * Encodes document field values into prefix-searchable index keys and query
  * lookup prefixes. Algorithmically identical to the server `PrefixIndexCodec`,
  * but uses the Web Crypto `sha256Hex` so it runs everywhere.
@@ -298,78 +370,9 @@ export class BrowserPrefixIndexCodec {
             ]
         }
         if (operand.$like !== undefined) {
-            const pattern = operand.$like
-            // `_` is a one-character wildcard. Existing prefix/reverse/ngram
-            // indexes cannot encode that positional constraint safely, so use
-            // the bounded in-memory matcher rather than risk false negatives.
-            if (pattern.includes('_')) return null
-            const wildcards = (pattern.match(/%/g) ?? []).length
-            if (wildcards === 0) {
-                return [
-                    {
-                        kind: 'eq',
-                        valuePrefix: `${await queryLookupValue(collection, fieldPath, pattern)}/`
-                    }
-                ]
-            }
-            if (wildcards === 1 && pattern.endsWith('%')) {
-                return [
-                    {
-                        kind: 'f',
-                        valuePrefix: encodeSegment(pattern.slice(0, -1))
-                    }
-                ]
-            }
-            if (wildcards === 1 && pattern.startsWith('%')) {
-                return [
-                    {
-                        kind: 'r',
-                        valuePrefix: encodeSegment(reverseString(pattern.slice(1)))
-                    }
-                ]
-            }
-            if (
-                wildcards === 2 &&
-                pattern.startsWith('%') &&
-                pattern.endsWith('%') &&
-                pattern.length > 2
-            ) {
-                const needle = pattern.slice(1, -1)
-                if (Array.from(needle).length >= NGRAM_SIZE) {
-                    const planned = trigrams(needle)[0]
-                    return [
-                        {
-                            kind: 'g3',
-                            valuePrefix: `${encodeSegment(planned ?? needle.slice(0, 3))}/`
-                        }
-                    ]
-                }
-            }
-            return null
+            return await likeQueryPrefixes(collection, fieldPath, operand.$like)
         }
-        /** @type {Array<{ kind: string, valuePrefix: string, range: { op: '$gt' | '$gte' | '$lt' | '$lte', value: string } }>} */
-        const rangeEntries = []
-        for (const operator of /** @type {const} */ (['$gt', '$gte', '$lt', '$lte'])) {
-            const raw = operand[operator]
-            if (raw === undefined) continue
-            const numeric = numericValue(raw)
-            const sortable = numeric === null ? '' : sortableFloat64(numeric)
-            if (!sortable) return null
-            if (operator === '$gt' || operator === '$gte') {
-                rangeEntries.push({
-                    kind: 'n',
-                    valuePrefix: '',
-                    range: { op: operator, value: sortable }
-                })
-            } else {
-                rangeEntries.push({
-                    kind: 'nr',
-                    valuePrefix: '',
-                    range: { op: operator, value: reverseSortable(sortable) }
-                })
-            }
-        }
-        return rangeEntries.length ? rangeEntries : null
+        return rangeQueryPrefixes(operand)
     }
 
     /**
@@ -472,10 +475,26 @@ export class BrowserPrefixIndex {
         this.scanners = new Map()
         /** @type {Map<string, Uint8Array>} */
         this.scannerSnapshots = new Map()
+        /** @type {Map<string, { added: Set<string>, removed: Set<string> }>} */
+        this.walOverlayCache = new Map()
         /** @type {'loading' | 'active' | 'fallback'} */
         this.accelerationState = 'loading'
         /** @type {string | null} */
         this.accelerationError = null
+        /** @type {string | null} */
+        this.accelerationReasonCode = null
+        this.accelerationMetrics = {
+            snapshotReads: 0,
+            snapshotReadMs: 0,
+            snapshotBytes: 0,
+            walReads: 0,
+            walReadMs: 0,
+            walBytes: 0,
+            snapshotLoads: 0,
+            snapshotLoadMs: 0,
+            scans: 0,
+            scanMs: 0
+        }
     }
 
     /** @returns {Promise<void>} */
@@ -485,7 +504,7 @@ export class BrowserPrefixIndex {
             await this.indexScannerFactory.ready()
             this.accelerationState = 'active'
         } catch (error) {
-            await this.disableAcceleration(error)
+            await this.disableAcceleration(error, 'EWASM_INSTANTIATE')
         }
     }
 
@@ -503,18 +522,35 @@ export class BrowserPrefixIndex {
     }
 
     /**
-     * @returns {{ mode: 'javascript', state: 'off' } | { mode: 'wasm', state: 'loading' | 'active' | 'fallback', error?: string }}
+     * @returns {{ mode: 'javascript', state: 'off' } | { mode: 'wasm', state: 'loading' | 'active' | 'fallback', reasonCode?: string, error?: string, metrics: { snapshotReads: number, snapshotReadMs: number, snapshotBytes: number, walReads: number, walReadMs: number, walBytes: number, snapshotLoads: number, snapshotLoadMs: number, scans: number, scanMs: number } }}
      */
     accelerationStatus() {
         if (!this.indexScannerFactory) return { mode: 'javascript', state: 'off' }
-        const status = { mode: /** @type {const} */ ('wasm'), state: this.accelerationState }
-        return this.accelerationError ? { ...status, error: this.accelerationError } : status
+        const status = {
+            mode: /** @type {const} */ ('wasm'),
+            state: this.accelerationState,
+            metrics: { ...this.accelerationMetrics }
+        }
+        return this.accelerationError
+            ? {
+                  ...status,
+                  reasonCode: this.accelerationReasonCode ?? 'EWASM_INSTANTIATE',
+                  error: this.accelerationError
+              }
+            : status
     }
 
-    /** @param {unknown} error @returns {Promise<void>} */
-    async disableAcceleration(error) {
+    /**
+     * @param {unknown} error
+     * @param {string} defaultCode
+     * @returns {Promise<void>}
+     */
+    async disableAcceleration(error, defaultCode) {
         this.accelerationState = 'fallback'
         this.accelerationError = error instanceof Error ? error.message : String(error)
+        const code = /** @type {{ code?: unknown }} */ (error)?.code
+        this.accelerationReasonCode =
+            typeof code === 'string' && code.startsWith('EWASM_') ? code : defaultCode
         await this.close()
     }
 
@@ -531,7 +567,7 @@ export class BrowserPrefixIndex {
         try {
             return await scanner
         } catch (error) {
-            await this.disableAcceleration(error)
+            await this.disableAcceleration(error, 'EWASM_INSTANTIATE')
             return null
         }
     }
@@ -540,6 +576,7 @@ export class BrowserPrefixIndex {
     async forgetCollection(collection) {
         this.snapshotCache.delete(collection)
         this.scannerSnapshots.delete(collection)
+        this.walOverlayCache.delete(collection)
         const scanner = this.scanners.get(collection)
         this.scanners.delete(collection)
         if (!scanner) return
@@ -604,9 +641,13 @@ export class BrowserPrefixIndex {
         const cached = this.snapshotCache.get(collection)
         if (cached) return cached
         const path = this.snapshotPath(collection)
+        const startedAt = monotonicNow()
         const bytes = (await this.fs.exists(path))
             ? await this.fs.readBytes(path)
             : new Uint8Array(0)
+        this.accelerationMetrics.snapshotReads++
+        this.accelerationMetrics.snapshotReadMs += monotonicNow() - startedAt
+        this.accelerationMetrics.snapshotBytes += bytes.byteLength
         this.snapshotCache.set(collection, bytes)
         return bytes
     }
@@ -668,6 +709,18 @@ export class BrowserPrefixIndex {
         if (mutations.length === 0) return
         await this.ensureCollection(collection)
         await this.fs.appendText(this.walPath(collection), serializeWal(mutations))
+        const overlay = this.walOverlayCache.get(collection)
+        if (overlay) {
+            for (const mutation of mutations) {
+                if (mutation.op === '+') {
+                    overlay.added.add(mutation.key)
+                    overlay.removed.delete(mutation.key)
+                } else {
+                    overlay.added.delete(mutation.key)
+                    overlay.removed.add(mutation.key)
+                }
+            }
+        }
         await this.compactIfNeeded(collection)
     }
 
@@ -692,6 +745,7 @@ export class BrowserPrefixIndex {
         await this.fs.writeText(this.walPath(collection), '')
         this.snapshotCache.delete(collection)
         this.scannerSnapshots.delete(collection)
+        this.walOverlayCache.set(collection, { added: new Set(), removed: new Set() })
     }
 
     /**
@@ -765,9 +819,13 @@ export class BrowserPrefixIndex {
             if (scanner) {
                 try {
                     if (this.scannerSnapshots.get(collection) !== bytes) {
+                        const loadStartedAt = monotonicNow()
                         await scanner.loadSnapshot(bytes)
+                        this.accelerationMetrics.snapshotLoads++
+                        this.accelerationMetrics.snapshotLoadMs += monotonicNow() - loadStartedAt
                         this.scannerSnapshots.set(collection, bytes)
                     }
+                    const scanStartedAt = monotonicNow()
                     for (const encodedDocId of await scanner.scanQueries([
                         { prefix: fullPrefix, range: entry.range }
                     ])) {
@@ -775,8 +833,10 @@ export class BrowserPrefixIndex {
                         if (!TTID.isTTID(docId)) throw new Error(`Invalid document ID: ${docId}`)
                         next.add(docId)
                     }
+                    this.accelerationMetrics.scans++
+                    this.accelerationMetrics.scanMs += monotonicNow() - scanStartedAt
                 } catch (error) {
-                    await this.disableAcceleration(error)
+                    await this.disableAcceleration(error, 'EWASM_QUERY')
                     next.clear()
                     this.scanSnapshotWithJavaScript(
                         bytes,
@@ -825,11 +885,16 @@ export class BrowserPrefixIndex {
      * @returns {Promise<{ added: Set<string>, removed: Set<string> }>}
      */
     async loadWalOverlay(collection) {
+        const cached = this.walOverlayCache.get(collection)
+        if (cached) return cached
         const added = new Set()
         const removed = new Set()
-        for (const line of completeLines(
-            await readTextIfExists(this.fs, this.walPath(collection))
-        )) {
+        const startedAt = monotonicNow()
+        const wal = await readTextIfExists(this.fs, this.walPath(collection))
+        this.accelerationMetrics.walReads++
+        this.accelerationMetrics.walReadMs += monotonicNow() - startedAt
+        this.accelerationMetrics.walBytes += ENCODER.encode(wal).byteLength
+        for (const line of completeLines(wal)) {
             const mutation = parseWalMutation(line)
             if (!mutation) continue
             if (mutation.op === '+') {
@@ -840,8 +905,15 @@ export class BrowserPrefixIndex {
                 removed.add(mutation.key)
             }
         }
-        return { added, removed }
+        const overlay = { added, removed }
+        this.walOverlayCache.set(collection, overlay)
+        return overlay
     }
+}
+
+/** @returns {number} */
+function monotonicNow() {
+    return globalThis.performance?.now() ?? Date.now()
 }
 
 /**

@@ -12,6 +12,8 @@
         "build:exe": "bun ./scripts/build-executable.mjs",
         "build:web": "bun ./scripts/build-browser.mjs",
         "build:web:wasm": "bun ./scripts/build-browser.mjs --wasm",
+        "browser:wasm:budgets": "bun ./scripts/verify-browser-wasm-budgets.mjs",
+        "browser:wasm:e2e": "node ./node_modules/@playwright/test/cli.js test",
         "contracts:verify": "bun ./scripts/verify-rust-contracts.mjs",
         "golden:generate": "bun ./scripts/generate-rust-golden-root.mjs",
         "golden:smoke": "bun ./scripts/smoke-rust-golden-root.mjs",
@@ -38,6 +40,7 @@
         "format": "prettier --write src tests"
     },
     "devDependencies": {
+        "@playwright/test": "1.62.0",
         "@types/bun": "^1.2.19",
         "@types/node": "^20.19.39",
         "@typescript-eslint/eslint-plugin": "^8.0.0",

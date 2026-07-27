@@ -49,9 +49,41 @@ over 64 MiB. Applications approaching those bounds should compact, narrow the
 query, or use the native engine rather than increasing limits without a memory
 budget.
 
+`accelerationStatus()` exposes separate cumulative measurements for OPFS
+snapshot reads, snapshot copies/validation, and Wasm scans. A fallback also
+includes its stable `reasonCode`. These values are diagnostics, not a
+cross-browser high-resolution profiler.
+
+## Payload and initialization budgets
+
+The release build is gated by these uncompressed transfer budgets:
+
+| Asset                  |  Budget |
+| ---------------------- | ------: |
+| `fylo-index.wasm`      | 128 KiB |
+| gzip `fylo-index.wasm` |  64 KiB |
+| `fylo.mjs` host        | 192 KiB |
+
+Cold fetch, compilation, instantiation, and `BrowserCore.ready()` have a 100 ms
+budget on the CI browser reference runners. The retained browser evidence
+records the measured initialization time rather than inferring it from
+individual API availability.
+
+The accepted portable-kernel workload reads a 500-key snapshot from OPFS,
+loads it into Wasm, and scans a 100-key range. I/O and snapshot-load time are
+recorded separately; three alternating warm JavaScript and Wasm scans after one
+warmups must show at least a 1.2x median speedup in Chromium. A separate
+120-document workload resolving five IDs records full-query and integrated-index timings without
+using them as the kernel promotion threshold because OPFS document reads are
+outside the portable index kernel.
+
 ## Qualification status
 
-Chromium-compatible execution, restart, compaction, WAL reconciliation,
-invalid snapshot rejection, and fallback are covered by the repository corpus.
-Firefox and WebKit remain preview until their browser jobs run the same corpus;
-the existence of WebAssembly support alone is not a FYLO support claim.
+The repository attempts the same real-OPFS corpus in Chromium, Firefox, and
+WebKit: exact/prefix/range/reverse/intersection parity, WAL
+additions/removals, compaction, restart, CSP, payload, initialization,
+memory-pressure, and fetch fallback. The fixture first opens the OPFS root; a
+browser that exposes the API but rejects that operation records
+`EOPFS_UNAVAILABLE` and is not counted as qualified. A browser is promoted only
+when the retained job for the exact commit passes; the existence of
+WebAssembly or OPFS APIs alone is not a FYLO support claim.

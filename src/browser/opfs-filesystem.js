@@ -208,7 +208,7 @@ export class OpfsFilesystem {
     /** @param {string} path @param {string} data @returns {Promise<void>} */
     async appendText(path, data) {
         const handle = await this.fileHandle(path, true)
-        if ('createSyncAccessHandle' in handle) {
+        if (typeof globalThis.document === 'undefined' && 'createSyncAccessHandle' in handle) {
             const access =
                 await /** @type {FileSystemFileHandle & { createSyncAccessHandle: () => Promise<{ getSize: () => number, write: (bytes: Uint8Array, options?: { at?: number }) => number, flush: () => void, close: () => void }> }} */ (
                     handle
