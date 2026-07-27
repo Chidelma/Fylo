@@ -241,8 +241,8 @@ impl NativeRoot {
         })
     }
 
-    /// Verify the content-addressed trees and blobs referenced by the active
-    /// branch's bounded first-parent history.
+    /// Verify every commit, tree, and blob reachable from the active branch
+    /// head, bounded by the requested commit limit.
     ///
     /// Objects are hashed through verified file descriptors and tree nodes are
     /// schema-, ordering-, type-, and path-validated. No historical version is
@@ -257,30 +257,55 @@ impl NativeRoot {
         &self,
         limit: usize,
     ) -> Result<VersionVerification, NativeStorageError> {
-        let history = self.version_history(limit)?;
+        if limit == 0 || limit > 1000 {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "version verification commit limit must be between 1 and 1000",
+            ));
+        }
+        let history = self.version_history(1)?;
         let mut state = VersionVerificationState::default();
-        for commit in &history.commits {
-            let tree_path = self
-                .canonical
-                .join(".fylo-vcs")
-                .join("commits")
-                .join(&commit.id)
-                .join("tree.json");
-            let pointer: VersionTreePointer =
-                serde_json::from_slice(&self.read_file(&tree_path, MAX_VERSION_METADATA_BYTES)?)
-                    .map_err(|error| {
-                        NativeStorageError::new(
+        let mut pending = history
+            .head
+            .iter()
+            .cloned()
+            .map(VersionTraversal::Enter)
+            .collect::<Vec<_>>();
+        let mut active = BTreeSet::new();
+        let mut verified = BTreeSet::new();
+        let mut graph_complete = true;
+        while let Some(event) = pending.pop() {
+            match event {
+                VersionTraversal::Exit(identifier) => {
+                    active.remove(&identifier);
+                    verified.insert(identifier);
+                }
+                VersionTraversal::Enter(identifier) => {
+                    if verified.contains(&identifier) {
+                        continue;
+                    }
+                    if !active.insert(identifier.clone()) {
+                        return Err(NativeStorageError::new(
                             NativeStorageErrorCode::CorruptMetadata,
-                            format!("FYLO commit tree pointer is corrupt: {error}"),
-                        )
-                    })?;
-            if let Some(root) = pointer.root {
-                self.verify_version_tree_node(
-                    root.as_str(),
-                    VersionTreeLevel::Collection,
-                    None,
-                    &mut state,
-                )?;
+                            "FYLO commit graph contains a cycle",
+                        ));
+                    }
+                    if state.commits_verified >= limit {
+                        graph_complete = false;
+                        break;
+                    }
+                    let commit = self.read_version_commit(&identifier)?;
+                    self.verify_version_commit_tree(&identifier, &mut state)?;
+                    state.commits_verified += 1;
+                    pending.push(VersionTraversal::Exit(identifier));
+                    pending.extend(
+                        commit
+                            .parents
+                            .into_iter()
+                            .rev()
+                            .map(VersionTraversal::Enter),
+                    );
+                }
             }
         }
         let tree_objects = state
@@ -293,13 +318,69 @@ impl NativeRoot {
             enabled: history.enabled,
             branch: history.branch,
             head: history.head,
-            commits_verified: history.commits.len(),
-            history_complete: !history.truncated,
+            commits_verified: state.commits_verified,
+            history_complete: graph_complete,
             tree_objects,
             blob_objects,
             verified_bytes: state.verified_bytes,
             content_integrity: true,
         })
+    }
+
+    fn read_version_commit(&self, identifier: &str) -> Result<VersionCommit, NativeStorageError> {
+        validate_ttid_shape(identifier).map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO commit identifier is invalid: {error}"),
+            )
+        })?;
+        let path = self
+            .canonical
+            .join(".fylo-vcs")
+            .join("commits")
+            .join(identifier)
+            .join("manifest.json");
+        let commit: VersionCommit = serde_json::from_slice(
+            &self.read_file(&path, MAX_VERSION_METADATA_BYTES)?,
+        )
+        .map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO commit manifest is corrupt: {error}"),
+            )
+        })?;
+        commit.validate(identifier)?;
+        Ok(commit)
+    }
+
+    fn verify_version_commit_tree(
+        &self,
+        identifier: &str,
+        state: &mut VersionVerificationState,
+    ) -> Result<(), NativeStorageError> {
+        let tree_path = self
+            .canonical
+            .join(".fylo-vcs")
+            .join("commits")
+            .join(identifier)
+            .join("tree.json");
+        let pointer: VersionTreePointer =
+            serde_json::from_slice(&self.read_file(&tree_path, MAX_VERSION_METADATA_BYTES)?)
+                .map_err(|error| {
+                    NativeStorageError::new(
+                        NativeStorageErrorCode::CorruptMetadata,
+                        format!("FYLO commit tree pointer is corrupt: {error}"),
+                    )
+                })?;
+        if let Some(root) = pointer.root {
+            self.verify_version_tree_node(
+                root.as_str(),
+                VersionTreeLevel::Collection,
+                None,
+                state,
+            )?;
+        }
+        Ok(())
     }
 
     fn verify_version_tree_node(
@@ -609,10 +690,16 @@ enum VersionObjectKind {
     Blob,
 }
 
+enum VersionTraversal {
+    Enter(String),
+    Exit(String),
+}
+
 #[derive(Default)]
 struct VersionVerificationState {
     objects: BTreeMap<String, VersionObjectKind>,
     verified_bytes: u64,
+    commits_verified: usize,
 }
 
 impl VersionVerificationState {
@@ -1320,7 +1407,7 @@ pub struct RepositoryHistory {
     pub truncated: bool,
 }
 
-/// Bounded content-integrity report for active first-parent history.
+/// Bounded content-integrity report for the active head's reachable graph.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionVerification {
@@ -1330,9 +1417,9 @@ pub struct VersionVerification {
     pub branch: Option<String>,
     /// Active branch head commit.
     pub head: Option<String>,
-    /// Number of first-parent commits whose trees were traversed.
+    /// Number of reachable commits whose trees were traversed.
     pub commits_verified: usize,
-    /// Whether the requested bound covered the complete first-parent chain.
+    /// Whether the requested bound covered the complete reachable graph.
     pub history_complete: bool,
     /// Number of unique content-addressed tree objects verified.
     pub tree_objects: usize,
@@ -2143,6 +2230,24 @@ mod tests {
             hash
         }
 
+        fn write_version_commit(&self, identifier: &str, parents: &[&str], root: &str) {
+            let commit_root = self.0.join(".fylo-vcs/commits").join(identifier);
+            fs::create_dir_all(&commit_root).unwrap();
+            fs::write(
+                commit_root.join("manifest.json"),
+                format!(
+                    r#"{{"id":"{identifier}","branch":"main","parents":{},"message":"history","createdAt":"2026-07-26T00:00:00.000Z","root":".fylo-vcs/commits/{identifier}"}}"#,
+                    serde_json::to_string(parents).unwrap()
+                ),
+            )
+            .unwrap();
+            fs::write(
+                commit_root.join("tree.json"),
+                format!(r#"{{"root":"{root}"}}"#),
+            )
+            .unwrap();
+        }
+
         #[cfg(unix)]
         fn create_raw_file(&self) -> PathBuf {
             use std::os::unix::fs::PermissionsExt;
@@ -2286,12 +2391,21 @@ mod tests {
             format!(r#"{{"root":"{root}"}}"#),
         )
         .unwrap();
+        let second_parent = "4VRNF52JPCP";
+        let merge = "4VRNF52JPCQ";
+        fixture.write_version_commit(second_parent, &[], &root);
+        fixture.write_version_commit(merge, &[commit, second_parent], &root);
+        fs::write(
+            fixture.0.join(".fylo-vcs/refs/heads/main.json"),
+            format!(r#"{{"name":"main","head":"{merge}"}}"#),
+        )
+        .unwrap();
 
         let native = NativeRoot::open(&fixture.0).unwrap();
         let report = native.verify_version_history(50).unwrap();
         assert!(report.content_integrity);
         assert!(report.history_complete);
-        assert_eq!(report.commits_verified, 1);
+        assert_eq!(report.commits_verified, 3);
         assert_eq!(report.tree_objects, 4);
         assert_eq!(report.blob_objects, 1);
 

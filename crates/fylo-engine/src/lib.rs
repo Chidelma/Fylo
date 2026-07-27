@@ -105,7 +105,7 @@ impl ReadOnlyEngine {
             .map_err(EngineError::storage)
     }
 
-    /// Verify active first-parent historical tree and blob integrity.
+    /// Verify the active head's reachable commit, tree, and blob integrity.
     ///
     /// # Errors
     ///

@@ -53,12 +53,12 @@ manifests, and reports exact missing/extra key counts. Its portable builder
 covers ECMAScript number formatting/coercion, URI encoding, numeric sort keys,
 reverse strings, trigrams, and schema-encrypted blind-index tokens. `log`
 validates and reads the active branch’s bounded first-parent commit manifests
-without materializing a version. `verify-history` additionally hashes and
-structurally validates every unique content-addressed tree and blob reachable
-from that bounded first-parent slice. It reports whether the limit covered the
-whole first-parent chain and never materializes historical data. Full
-reachable-DAG qualification, native Windows race-hardening evidence, joins,
-and all mutations remain promotion blockers.
+without materializing a version. `verify-history` traverses every parent in the
+active head’s reachable commit DAG and hashes and structurally validates every
+unique content-addressed tree and blob. It rejects cycles, reports whether the
+commit limit covered the whole graph, and never materializes historical data.
+Native Windows race-hardening evidence, joins, and all mutations remain
+promotion blockers.
 
 Historical object verification is deliberately bounded to 1,000,000 unique
 objects, 16 GiB aggregate bytes, 16 MiB per tree node, and 256 MiB per blob in
