@@ -34,14 +34,15 @@ cargo run -p fylo-cli --bin fylo-rust -- \
 The preview:
 
 - canonicalizes root identity;
-- rejects symlinks below the trusted root;
+- rejects symlinks and Windows reparse points below the trusted root;
 - validates collection names, TTIDs, descriptors, generation state,
   documents, and index snapshots;
 - bounds every file and query read;
 - reads the collection generation before and after the operation;
 - retries only stable generations and fails if a writer remains active;
-- exposes only `version`, `inspect`, `get`, `scan-index`, `find`, and read-only
-  `sql`, plus `get-file`, `get-deleted`, and `get-deleted-file`.
+- exposes only `version`, `inspect`, `get`, `scan-index`, `verify-index`,
+  `find`, `log`, `verify-history`, and read-only `sql`, plus `get-file`,
+  `get-deleted`, and `get-deleted-file`.
 
 It currently supports live and retained-deleted JSON documents and raw files,
 canonical/custom metadata, Unix xattrs and UID/GID/mode, the existing Windows
@@ -57,8 +58,11 @@ without materializing a version. `verify-history` traverses every parent in the
 active head’s reachable commit DAG and hashes and structurally validates every
 unique content-addressed tree and blob. It rejects cycles, reports whether the
 commit limit covered the whole graph, and never materializes historical data.
-Native Windows race-hardening evidence, joins, and all mutations remain
-promotion blockers.
+Windows raw-file reads revalidate the base path before and after ADS/body
+access using stable metadata fingerprints. True handle/file-ID comparison is
+still blocked on either reviewed Win32 adapter code or stabilization of Rust’s
+`windows_by_handle` APIs. Native Windows evidence for that race boundary,
+joins, and all mutations remain promotion blockers.
 
 Historical object verification is deliberately bounded to 1,000,000 unique
 objects, 16 GiB aggregate bytes, 16 MiB per tree node, and 256 MiB per blob in

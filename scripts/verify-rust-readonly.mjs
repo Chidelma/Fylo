@@ -7,14 +7,23 @@ import Fylo from '../src/index.js'
 import { BrowserPrefixIndexCodec } from '../src/browser/core/prefix-index.js'
 import { VersionRepository } from '../src/versioning/repository.js'
 
-const root = await mkdtemp(join(tmpdir(), 'fylo-rust-readonly-'))
-const schemaRoot = `${root}-schema`
+const workspace = await mkdtemp(join(tmpdir(), 'fylo-rust-readonly-'))
+const root = join(
+    workspace,
+    'FYLO Root ü日本語',
+    ...Array.from(
+        { length: 8 },
+        (_, index) => `long-path-segment-${String(index).padStart(2, '0')}`
+    )
+)
+const schemaRoot = join(workspace, 'Schema Root ü日本語')
 const previousEncryption = {
     schema: process.env.FYLO_SCHEMA,
     key: process.env.FYLO_ENCRYPTION_KEY,
     salt: process.env.FYLO_CIPHER_SALT
 }
 try {
+    await mkdir(root, { recursive: true })
     const encryptionKey = 'rust-readonly-interop-key-32-bytes-minimum'
     const cipherSalt = 'rust-readonly-interop-salt'
     await mkdir(join(schemaRoot, 'secrets', 'history'), { recursive: true })
@@ -77,13 +86,7 @@ try {
     assert(history.head === versionCommit.id, 'Rust version-history head drift')
     assert(history.commits[0].message === 'Rust read-only fixture', 'Rust commit-message drift')
     assert(history.truncated === false, 'Rust version-history truncation drift')
-    const versionVerification = await rustJson([
-        'verify-history',
-        '--root',
-        root,
-        '--limit',
-        '10'
-    ])
+    const versionVerification = await rustJson(['verify-history', '--root', root, '--limit', '10'])
     assert(versionVerification.contentIntegrity === true, 'Rust version-object integrity drift')
     assert(versionVerification.historyComplete === true, 'Rust version-history coverage drift')
     assert(versionVerification.commitsVerified === 1, 'Rust verified commit count drift')
@@ -122,13 +125,7 @@ try {
     assert(raw.customMetadata.source === 'rust-readonly', 'Rust raw-file metadata drift')
     assert(raw.customMetadata.reviewed === true, 'Rust typed raw-file metadata drift')
     assert(raw.file.etag === raw.file.checksumSHA256, 'Rust raw-file checksum/etag drift')
-    const fileInspection = await rustJson([
-        'inspect',
-        '--root',
-        root,
-        '--collection',
-        'assets'
-    ])
+    const fileInspection = await rustJson(['inspect', '--root', root, '--collection', 'assets'])
     assert(fileInspection.fileCount === 1, 'Rust raw-file inspection count drift')
     assert(fileInspection.deletedCount === 1, 'Rust raw-file tombstone count drift')
 
@@ -223,13 +220,7 @@ try {
     assert(indexVerification.missingKeys === 0, 'Rust index rebuild is missing keys')
     assert(indexVerification.extraKeys === 0, 'Rust index contains unexpected keys')
     for (const collection of ['assets', 'secrets', 'indexedge']) {
-        const report = await rustJson([
-            'verify-index',
-            '--root',
-            root,
-            '--collection',
-            collection
-        ])
+        const report = await rustJson(['verify-index', '--root', root, '--collection', collection])
         assert(
             report.rebuildEquivalent === true,
             `Rust ${collection} index rebuild drift: ${JSON.stringify(report)}`
@@ -270,8 +261,7 @@ try {
     restoreEnvironment('FYLO_SCHEMA', previousEncryption.schema)
     restoreEnvironment('FYLO_ENCRYPTION_KEY', previousEncryption.key)
     restoreEnvironment('FYLO_CIPHER_SALT', previousEncryption.salt)
-    await rm(root, { recursive: true, force: true })
-    await rm(schemaRoot, { recursive: true, force: true })
+    await rm(workspace, { recursive: true, force: true })
 }
 process.exit(0)
 

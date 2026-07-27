@@ -513,11 +513,11 @@ impl NativeRoot {
             };
             current.push(segment);
             let metadata = fs::symlink_metadata(&current).map_err(NativeStorageError::io)?;
-            if metadata.file_type().is_symlink() {
+            if is_link_or_reparse(&metadata) {
                 return Err(NativeStorageError::new(
                     NativeStorageErrorCode::UnsafePath,
                     format!(
-                        "storage path contains a symbolic link: {}",
+                        "storage path contains a symbolic link or reparse point: {}",
                         current.display()
                     ),
                 ));
@@ -574,6 +574,23 @@ impl NativeRoot {
             ));
         }
         Ok((file, opened))
+    }
+
+    fn verify_open_file_identity(
+        &self,
+        path: &Path,
+        file: &File,
+    ) -> Result<(), NativeStorageError> {
+        let current = self.verify_path(path, ExpectedType::File)?;
+        let opened = file.metadata().map_err(NativeStorageError::io)?;
+        if same_file(&current, &opened) {
+            Ok(())
+        } else {
+            Err(NativeStorageError::new(
+                NativeStorageErrorCode::UnsafePath,
+                "storage path changed while an open file was being read",
+            ))
+        }
     }
 }
 
@@ -1088,15 +1105,17 @@ impl NativeCollection {
         let path = self.find_raw_file_path(namespace, identifier)?;
         let filename = path_utf8_name(&path, "raw-file")?;
         let extension = validate_raw_extension(filename, identifier)?.to_owned();
-        let (file, metadata) = self.root.open_file(&path, MAX_RAW_FILE_BYTES)?;
+        let (mut file, metadata) = self.root.open_file(&path, MAX_RAW_FILE_BYTES)?;
         let attributes = read_fylo_attributes(&file, &path)?;
+        self.root.verify_open_file_identity(&path, &file)?;
         let key = required_utf8_attribute(&attributes, KEY_XATTR, identifier)?;
         validate_raw_key(&key)?;
         let custom_metadata = decode_custom_metadata(&attributes)?;
         let bytes = read_bounded(
-            file.take(MAX_RAW_FILE_BYTES.saturating_add(1)),
+            (&mut file).take(MAX_RAW_FILE_BYTES.saturating_add(1)),
             MAX_RAW_FILE_BYTES,
         )?;
+        self.root.verify_open_file_identity(&path, &file)?;
         let computed_checksum = sha256_hex(&bytes);
         let modified_millis = modified_millis(&metadata)?;
         let modified_millis_exact = modified_millis_f64(&metadata)?;
@@ -2167,17 +2186,39 @@ fn modified_millis_f64(metadata: &Metadata) -> Result<f64, NativeStorageError> {
     Ok(duration.as_secs() as f64 * 1000.0 + f64::from(duration.subsec_nanos()) / 1_000_000.0)
 }
 
+#[cfg(windows)]
+fn is_link_or_reparse(metadata: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_link_or_reparse(metadata: &Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
 #[cfg(unix)]
 fn same_file(left: &Metadata, right: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn same_file(left: &Metadata, right: &Metadata) -> bool {
-    left.len() == right.len()
-        && left.modified().ok() == right.modified().ok()
-        && left.file_type() == right.file_type()
+    use std::os::windows::fs::MetadataExt;
+
+    left.file_attributes() == right.file_attributes()
+        && left.creation_time() == right.creation_time()
+        && left.last_write_time() == right.last_write_time()
+        && left.file_size() == right.file_size()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file(left: &Metadata, right: &Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }
 
 #[cfg(test)]
@@ -2562,6 +2603,33 @@ mod tests {
         fs::create_dir(&external).unwrap();
         fs::remove_dir_all(fixture.0.join(".collections/users/docs/4V")).unwrap();
         symlink(&external, fixture.0.join(".collections/users/docs/4V")).unwrap();
+        let collection = NativeRoot::open(&fixture.0)
+            .unwrap()
+            .collection("users")
+            .unwrap();
+        assert_eq!(
+            collection.document_ids().unwrap_err().code(),
+            NativeStorageErrorCode::UnsafePath
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_reparse_point_document_shards() {
+        use std::process::Command;
+
+        let fixture = TestRoot::create();
+        let external = fixture.0.join("external");
+        let shard = fixture.0.join(".collections/users/docs/4V");
+        fs::create_dir(&external).unwrap();
+        fs::remove_dir_all(&shard).unwrap();
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&shard)
+            .arg(&external)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create NTFS junction fixture");
         let collection = NativeRoot::open(&fixture.0)
             .unwrap()
             .collection("users")
