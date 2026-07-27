@@ -1391,6 +1391,8 @@ impl NativeCollection {
             rebuild_equivalent: false,
             expected_key_count: None,
             missing_keys: None,
+            missing_key_sample: Vec::new(),
+            extra_key_sample: Vec::new(),
             extra_keys: None,
         })
     }
@@ -1464,7 +1466,7 @@ pub struct AccessDescriptor {
 }
 
 /// Read-only prefix-index reference verification.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexVerification {
     /// Number of merged snapshot/WAL keys checked.
@@ -1486,6 +1488,12 @@ pub struct IndexVerification {
     /// Merged snapshot/WAL keys absent from the independent rebuild.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_keys: Option<usize>,
+    /// Bounded sample of expected keys the merged state is missing.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_key_sample: Vec<String>,
+    /// Bounded sample of merged keys the rebuild did not derive.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_key_sample: Vec<String>,
 }
 
 /// Active first-parent FYLO repository history.
@@ -2475,6 +2483,8 @@ mod tests {
                 rebuild_equivalent: false,
                 expected_key_count: None,
                 missing_keys: None,
+                missing_key_sample: Vec::new(),
+                extra_key_sample: Vec::new(),
                 extra_keys: None,
             }
         );

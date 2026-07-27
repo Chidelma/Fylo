@@ -27,6 +27,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 const MAX_STABLE_READ_ATTEMPTS: usize = 3;
+/// Drifted index keys reported by one verification.
+const MAX_DRIFT_SAMPLE: usize = 12;
 
 /// Read-only native FYLO engine.
 #[derive(Clone)]
@@ -743,6 +745,19 @@ impl ReadOnlyEngine {
             verification.missing_keys = Some(expected.difference(&actual).count());
             verification.extra_keys = Some(actual.difference(&expected).count());
             verification.rebuild_equivalent = actual == expected;
+            // A count alone cannot be acted on: an operator, and a failing CI
+            // job, need to see which keys drifted. The sample is bounded so a
+            // wholesale mismatch cannot produce an unbounded report.
+            verification.missing_key_sample = expected
+                .difference(&actual)
+                .take(MAX_DRIFT_SAMPLE)
+                .cloned()
+                .collect();
+            verification.extra_key_sample = actual
+                .difference(&expected)
+                .take(MAX_DRIFT_SAMPLE)
+                .cloned()
+                .collect();
             Ok(verification)
         })
     }
