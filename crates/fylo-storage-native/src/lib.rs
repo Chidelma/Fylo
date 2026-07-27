@@ -1543,6 +1543,11 @@ pub struct VersionCommit {
     /// ISO timestamp emitted by the JavaScript engine.
     pub created_at: String,
     /// Repository-relative immutable commit directory.
+    ///
+    /// The JavaScript engine writes this with `path.relative`, so a repository
+    /// created on Windows stores backslashes. Both spellings name the same
+    /// directory and are accepted; the native writer always emits the
+    /// forward-slash form so a Rust-written repository stays portable.
     pub root: String,
 }
 
@@ -1569,7 +1574,7 @@ impl VersionCommit {
             || self.message.trim().is_empty()
             || self.message.len() > 64 * 1024
             || self.created_at.is_empty()
-            || self.root != format!(".fylo-vcs/commits/{}", self.id)
+            || self.root.replace('\\', "/") != format!(".fylo-vcs/commits/{}", self.id)
         {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::CorruptMetadata,
