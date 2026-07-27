@@ -10,6 +10,11 @@ if (!input) throw new Error('Usage: verify-rust-golden-root.mjs --input <fixture
 
 const directory = resolve(input)
 const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
+const previousEnvironment = {
+    schema: process.env.FYLO_SCHEMA,
+    key: process.env.FYLO_ENCRYPTION_KEY,
+    salt: process.env.FYLO_CIPHER_SALT
+}
 const supportedFormats = ['fylo.rust-golden-root.v1', 'fylo.released-oracle.v1']
 if (!supportedFormats.includes(manifest.format)) {
     throw new Error(`Unsupported golden-root manifest: ${manifest.format}`)
@@ -27,6 +32,19 @@ if (manifest.format === 'fylo.released-oracle.v1') {
         manifest.root.nativeMetadataSha256,
         'native metadata digest'
     )
+    const schemaRoot = join(directory, manifest.schema.path)
+    const schemaTree = await hashRoot(schemaRoot)
+    assertEqual(schemaTree.digest, manifest.schema.digest, 'schema root digest')
+    process.env.FYLO_SCHEMA = schemaRoot
+    process.env.FYLO_ENCRYPTION_KEY = manifest.schema.testCredentials.key
+    process.env.FYLO_CIPHER_SALT = manifest.schema.testCredentials.salt
+    for (const [caseName, testCase] of Object.entries(manifest.cases)) {
+        const caseTree = await hashRoot(join(directory, testCase.path))
+        assertEqual(caseTree.digest, testCase.digest, `${caseName} digest`)
+        if (typeof testCase.expectedError?.code !== 'string') {
+            throw new Error(`${caseName} has no released error code`)
+        }
+    }
 }
 const operationFrames = (await readFile(join(directory, manifest.operations), 'utf8'))
     .trim()
@@ -48,10 +66,11 @@ try {
         document.value,
         'document probe'
     )
-    assertEqual(
+    assertMetadataEqual(
         await database[document.collection].get(document.id).metadata(),
         document.metadata,
-        'document metadata probe'
+        'document metadata probe',
+        manifest.format
     )
 
     const protectedDocument = manifest.probes.protectedDocument
@@ -79,22 +98,39 @@ try {
     )
 
     const file = manifest.probes.file
-    assertEqual(await database[file.collection].get(file.id).once(), file.value, 'file probe')
-    assertEqual(
+    assertFileValueEqual(
+        await database[file.collection].get(file.id).once(),
+        file.value,
+        file.id,
+        manifest.format
+    )
+    assertMetadataEqual(
         await database[file.collection].get(file.id).metadata(),
         file.metadata,
-        'file metadata probe'
+        'file metadata probe',
+        manifest.format
     )
     assertEqual(
         Buffer.from(await database[file.collection].get(file.id).bytes()).toString('base64'),
         file.bytesBase64,
         'file bytes probe'
     )
+    if (manifest.probes.encrypted) {
+        const encrypted = manifest.probes.encrypted
+        assertEqual(
+            await database[encrypted.collection].get(encrypted.id).once(),
+            encrypted.value,
+            'encrypted document probe'
+        )
+    }
 } finally {
     await database.close()
 }
 const after = await hashRoot(root)
 assertEqual(after.digest, manifest.root.digest, 'root digest after verification')
+restoreEnvironment('FYLO_SCHEMA', previousEnvironment.schema)
+restoreEnvironment('FYLO_ENCRYPTION_KEY', previousEnvironment.key)
+restoreEnvironment('FYLO_CIPHER_SALT', previousEnvironment.salt)
 
 console.log(
     `Verified ${manifest.format} from FYLO ${manifest.producer.version} with ${operationFrames.length} operations`
@@ -113,4 +149,50 @@ function option(name) {
 
 function sha256(value) {
     return createHash('sha256').update(value).digest('hex')
+}
+
+function assertMetadataEqual(actual, expected, label, format) {
+    if (format !== 'fylo.released-oracle.v1') {
+        assertEqual(actual, expected, label)
+        return
+    }
+    const timestampFields = ['mtime', 'updatedAt', 'lastModified']
+    const actualStable = { ...actual }
+    const expectedStable = { ...expected }
+    for (const field of timestampFields) {
+        if (Object.hasOwn(expectedStable, field)) {
+            const drift = Math.abs(Number(actualStable[field]) - Number(expectedStable[field]))
+            if (!Number.isFinite(drift) || drift > 1) {
+                throw new Error(`${label} ${field} drift exceeds 1ms: ${drift}`)
+            }
+        }
+        delete actualStable[field]
+        delete expectedStable[field]
+    }
+    assertEqual(actualStable, expectedStable, label)
+}
+
+function assertFileValueEqual(actual, expected, id, format) {
+    if (format !== 'fylo.released-oracle.v1') {
+        assertEqual(actual, expected, 'file probe')
+        return
+    }
+    const actualRecord = actual[id]
+    const expectedRecord = expected[id]
+    const drift = Math.abs(
+        Number(actualRecord?.lastModified) - Number(expectedRecord?.lastModified)
+    )
+    if (!Number.isFinite(drift) || drift > 1) {
+        throw new Error(`file probe lastModified drift exceeds 1ms: ${drift}`)
+    }
+    assertEqual(
+        { ...actual, [id]: { ...actualRecord, lastModified: 0 } },
+        { ...expected, [id]: { ...expectedRecord, lastModified: 0 } },
+        'file probe'
+    )
+}
+
+function restoreEnvironment(name, value) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
 }

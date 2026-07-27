@@ -1,0 +1,18 @@
+{
+    "format": "fylo.released-oracle-error-map.v1",
+    "cases": {
+        "corruptDocument": {
+            "releasedMachineV1": "EUNKNOWN",
+            "rustPreview": "EENGINE_FORMAT"
+        },
+        "interruptedTransaction": {
+            "releasedMachineV1": "EUNKNOWN",
+            "rustPreview": "EENGINE_CONCURRENT_WRITE"
+        },
+        "corruptVersion": {
+            "releasedMachineV1": "EUNKNOWN",
+            "rustPreview": "EENGINE_STORAGE"
+        }
+    },
+    "replacementProtocolRule": "Rust machine protocol v1 maps preview-internal errors to releasedMachineV1 until an accepted protocol contract changes the public code."
+}

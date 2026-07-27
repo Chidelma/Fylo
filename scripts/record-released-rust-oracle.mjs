@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
     chmod,
+    cp,
     lstat,
     mkdir,
     mkdtemp,
@@ -22,7 +23,17 @@ const releaseTag = requiredOption('--release')
 const expectedBinarySha256 = option('--expected-sha256')
 const workspace = await mkdtemp(join(tmpdir(), 'fylo-released-oracle-'))
 const root = join(output, 'root')
+const schemaRoot = join(output, 'schema')
 const operations = []
+const encryption = {
+    key: 'released-oracle-encryption-key-at-least-32-bytes',
+    salt: 'released-oracle-encryption-salt'
+}
+const previousEnvironment = {
+    schema: process.env.FYLO_SCHEMA,
+    key: process.env.FYLO_ENCRYPTION_KEY,
+    salt: process.env.FYLO_CIPHER_SALT
+}
 
 try {
     await mkdir(dirname(output), { recursive: true })
@@ -37,10 +48,23 @@ try {
     }
     assert(identity.buildKind === 'release', 'oracle binary is not a release build')
     assert(identity.runtimeVersion === releaseTag.replace(/^v/, ''), 'release tag/version drift')
+    await mkdir(join(schemaRoot, 'secrets', 'history'), { recursive: true })
+    await writeFile(
+        join(schemaRoot, 'secrets', 'manifest.json'),
+        JSON.stringify({ current: 'v1', versions: [{ v: 'v1' }] })
+    )
+    await writeFile(
+        join(schemaRoot, 'secrets', 'history', 'v1.schema.json'),
+        JSON.stringify({ $encrypted: ['secret', 'nested/verifier'] })
+    )
+    process.env.FYLO_SCHEMA = schemaRoot
+    process.env.FYLO_ENCRYPTION_KEY = encryption.key
+    process.env.FYLO_CIPHER_SALT = encryption.salt
 
     await record({ op: 'handshake' })
     await record({ op: 'createCollection', root, collection: 'people', kind: 'document' })
     await record({ op: 'createCollection', root, collection: 'assets', kind: 'file' })
+    await record({ op: 'createCollection', root, collection: 'secrets', kind: 'document' })
 
     const adaId = await record({
         op: 'putData',
@@ -82,6 +106,16 @@ try {
         collection: 'assets',
         file: { path: rawInput, key: '/fixtures/sample.bin' },
         meta: { source: 'released-oracle-v1', reviewed: true }
+    })
+    const encryptedId = await record({
+        op: 'putData',
+        root,
+        collection: 'secrets',
+        data: {
+            kind: 'security-event',
+            secret: 'correct horse battery staple',
+            nested: { verifier: 42 }
+        }
     })
     await record({ op: 'rebuildCollection', root, collection: 'people' })
     await record({ op: 'rebuildCollection', root, collection: 'assets' })
@@ -139,10 +173,79 @@ try {
         },
         version: {
             commit
+        },
+        encrypted: {
+            collection: 'secrets',
+            id: encryptedId,
+            value: await request({
+                op: 'getDoc',
+                root,
+                collection: 'secrets',
+                id: encryptedId
+            })
         }
     }
 
     const tree = await hashRoot(root)
+    const schemaTree = await hashRoot(schemaRoot)
+    const cases = {
+        corruptDocument: await recordNegativeCase({
+            name: 'corrupt-document',
+            mutate: async (caseRoot) => {
+                await writeFile(
+                    join(
+                        caseRoot,
+                        '.collections',
+                        'people',
+                        'docs',
+                        adaId.slice(0, 2),
+                        `${adaId}.json`
+                    ),
+                    '{"name":'
+                )
+            },
+            request: { op: 'getDoc', collection: 'people', id: adaId }
+        }),
+        interruptedTransaction: await recordNegativeCase({
+            name: 'interrupted-transaction',
+            mutate: async (caseRoot) => {
+                const state = join(
+                    caseRoot,
+                    '.fylo-transactions',
+                    '.collections',
+                    'people',
+                    'state.json'
+                )
+                await mkdir(dirname(state), { recursive: true })
+                await writeFile(
+                    state,
+                    JSON.stringify({
+                        format: 'fylo.collection-generation.v1',
+                        generation: 999,
+                        state: 'writing',
+                        transactionId: 'released-oracle-interrupted'
+                    })
+                )
+            },
+            request: { op: 'getDoc', collection: 'people', id: adaId }
+        }),
+        corruptVersion: await recordNegativeCase({
+            name: 'corrupt-version',
+            mutate: async (caseRoot) => {
+                await writeFile(
+                    join(
+                        caseRoot,
+                        '.fylo-vcs',
+                        'commits',
+                        commit.id,
+                        'manifest.json'
+                    ),
+                    '{"id":'
+                )
+            },
+            request: { op: 'log' }
+        })
+    }
     const nativeMetadata = await captureNativeMetadata(root)
     const nativeMetadataText = `${nativeMetadata.map((entry) => JSON.stringify(entry)).join('\n')}\n`
     await writeFile(join(output, 'native-metadata.ndjson'), nativeMetadataText)
@@ -180,8 +283,16 @@ try {
             nativeMetadata: 'native-metadata.ndjson',
             nativeMetadataSha256: sha256(nativeMetadataText)
         },
+        schema: {
+            path: 'schema',
+            digestAlgorithm: schemaTree.algorithm,
+            digest: schemaTree.digest,
+            entries: schemaTree.entries.length,
+            testCredentials: encryption
+        },
         operations: 'operations.ndjson',
-        probes
+        probes,
+        cases
     }
     await writeFile(join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
     console.log(
@@ -194,6 +305,9 @@ try {
         })
     )
 } finally {
+    restoreEnvironment('FYLO_SCHEMA', previousEnvironment.schema)
+    restoreEnvironment('FYLO_ENCRYPTION_KEY', previousEnvironment.key)
+    restoreEnvironment('FYLO_CIPHER_SALT', previousEnvironment.salt)
     await rm(workspace, { recursive: true, force: true })
 }
 
@@ -213,7 +327,44 @@ async function request(requestFrame) {
     return response.result
 }
 
+async function requestOutcome(requestFrame) {
+    const { stdout, stderr } = await runBinary([
+        'exec',
+        '--request',
+        JSON.stringify(requestFrame)
+    ])
+    if (!stdout.trim()) throw new Error(stderr.trim() || 'released binary returned no response')
+    return JSON.parse(stdout)
+}
+
+async function recordNegativeCase({ name, mutate, request: requestFrame }) {
+    const caseDirectory = join(output, 'cases', name)
+    const caseRoot = join(caseDirectory, 'root')
+    await mkdir(caseDirectory, { recursive: true })
+    await cp(root, caseRoot, { recursive: true, force: false, preserveTimestamps: true })
+    await mutate(caseRoot)
+    const response = await requestOutcome({ ...requestFrame, root: caseRoot })
+    if (response.ok !== false || typeof response.error?.code !== 'string') {
+        throw new Error(`released binary unexpectedly accepted negative case ${name}`)
+    }
+    const tree = await hashRoot(caseRoot)
+    return {
+        path: `cases/${name}/root`,
+        digestAlgorithm: tree.algorithm,
+        digest: tree.digest,
+        entries: tree.entries.length,
+        request: requestFrame,
+        expectedError: response.error
+    }
+}
+
 async function binaryJson(argumentsList) {
+    const { stdout, stderr, exitCode } = await runBinary(argumentsList)
+    if (exitCode !== 0) throw new Error(stderr.trim() || `binary exited with ${exitCode}`)
+    return JSON.parse(stdout)
+}
+
+async function runBinary(argumentsList) {
     const subprocess = Bun.spawn([binary, ...argumentsList], {
         cwd: process.cwd(),
         env: process.env,
@@ -225,8 +376,7 @@ async function binaryJson(argumentsList) {
         new Response(subprocess.stderr).text(),
         subprocess.exited
     ])
-    if (exitCode !== 0) throw new Error(stderr.trim() || `binary exited with ${exitCode}`)
-    return JSON.parse(stdout)
+    return { stdout, stderr, exitCode }
 }
 
 async function captureNativeMetadata(rootPath) {
@@ -301,4 +451,9 @@ function sha256(value) {
 
 function assert(value, message) {
     if (!value) throw new Error(message)
+}
+
+function restoreEnvironment(name, value) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
 }

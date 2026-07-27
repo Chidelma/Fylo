@@ -9,9 +9,21 @@ const rustBinary = resolve(
         join('target', 'debug', process.platform === 'win32' ? 'fylo-rust.exe' : 'fylo-rust')
 )
 const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))
+const errorMap = JSON.parse(await readFile('api/oracle/v1/error-map.json', 'utf8'))
 if (manifest.format !== 'fylo.released-oracle.v1') {
     throw new Error(`Unsupported released oracle: ${manifest.format}`)
 }
+const previousEnvironment = {
+    schema: process.env.FYLO_SCHEMA,
+    key: process.env.FYLO_ENCRYPTION_KEY,
+    salt: process.env.FYLO_CIPHER_SALT
+}
+const schemaRoot = join(directory, manifest.schema.path)
+const schemaTree = await hashRoot(schemaRoot)
+assertEqual(schemaTree.digest, manifest.schema.digest, 'released schema root digest')
+process.env.FYLO_SCHEMA = schemaRoot
+process.env.FYLO_ENCRYPTION_KEY = manifest.schema.testCredentials.key
+process.env.FYLO_CIPHER_SALT = manifest.schema.testCredentials.salt
 const root = join(directory, manifest.root.path)
 const before = await hashRoot(root)
 assertEqual(before.digest, manifest.root.digest, 'released root digest before Rust reads')
@@ -107,6 +119,36 @@ assertEqual(
 )
 assertEqual(rustFile.customMetadata, expectedFile.meta, 'released raw-file metadata in Rust')
 
+const encrypted = manifest.probes.encrypted
+const rustEncrypted = await rustJson([
+    'get',
+    '--root',
+    root,
+    '--collection',
+    encrypted.collection,
+    '--id',
+    encrypted.id
+])
+assertEqual(
+    rustEncrypted.document,
+    encrypted.value[encrypted.id],
+    'released encrypted document in Rust'
+)
+process.env.FYLO_ENCRYPTION_KEY = 'wrong-released-oracle-key-material-at-least-32-bytes'
+const wrongKey = await rustFailure([
+    'get',
+    '--root',
+    root,
+    '--collection',
+    encrypted.collection,
+    '--id',
+    encrypted.id
+])
+if (!wrongKey.includes('EENGINE_ENCRYPTION') || wrongKey.includes('v2.')) {
+    throw new Error('Rust encrypted released-root failure did not fail closed')
+}
+process.env.FYLO_ENCRYPTION_KEY = manifest.schema.testCredentials.key
+
 const history = await rustJson(['log', '--root', root, '--limit', '100'])
 assertEqual(
     history.commits[0].id,
@@ -118,8 +160,40 @@ if (!versionVerification.contentIntegrity || !versionVerification.historyComplet
     throw new Error('Rust did not verify the released version DAG')
 }
 
+for (const [caseName, testCase] of Object.entries(manifest.cases)) {
+    const caseRoot = join(directory, testCase.path)
+    const caseBefore = await hashRoot(caseRoot)
+    assertEqual(caseBefore.digest, testCase.digest, `${caseName} root digest`)
+    assertEqual(
+        testCase.expectedError.code,
+        errorMap.cases[caseName].releasedMachineV1,
+        `${caseName} released error code`
+    )
+    const argumentsList =
+        testCase.request.op === 'log'
+            ? ['log', '--root', caseRoot, '--limit', '100']
+            : [
+                  'get',
+                  '--root',
+                  caseRoot,
+                  '--collection',
+                  testCase.request.collection,
+                  '--id',
+                  testCase.request.id
+              ]
+    const failure = await rustFailure(argumentsList)
+    if (!failure.includes(errorMap.cases[caseName].rustPreview)) {
+        throw new Error(`${caseName} Rust error mapping drift: ${failure}`)
+    }
+    const caseAfter = await hashRoot(caseRoot)
+    assertEqual(caseAfter.digest, caseBefore.digest, `${caseName} no-mutation digest`)
+}
+
 const after = await hashRoot(root)
 assertEqual(after.digest, before.digest, 'released root digest after Rust reads')
+restoreEnvironment('FYLO_SCHEMA', previousEnvironment.schema)
+restoreEnvironment('FYLO_ENCRYPTION_KEY', previousEnvironment.key)
+restoreEnvironment('FYLO_CIPHER_SALT', previousEnvironment.salt)
 console.log(
     `Verified released FYLO ${manifest.producer.version} ${manifest.producer.buildTarget} root with Rust`
 )
@@ -164,4 +238,9 @@ function option(name) {
         throw new Error(`missing value for ${name}`)
     }
     return value
+}
+
+function restoreEnvironment(name, value) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
 }
