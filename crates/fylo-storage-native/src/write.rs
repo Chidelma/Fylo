@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{
-    ACCESS_XATTR, CollectionKind, ExpectedType, MAX_DOCUMENT_BYTES, NativeRoot, NativeStorageError,
+    CollectionKind, ExpectedType, MAX_DOCUMENT_BYTES, NativeRoot, NativeStorageError,
     NativeStorageErrorCode, path_exists_no_follow, validate_ttid_shape,
 };
 
@@ -30,9 +30,10 @@ const GENERATION_FORMAT: &str = "fylo.collection-generation.v1";
 const MAX_TRANSACTION_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
 const LOCK_TTL_MILLIS: u64 = 5 * 60 * 1000;
+#[cfg(unix)]
 const DEFAULT_ACCESS_MODE: u32 = 0o600;
 
-mod version;
+pub(crate) mod version;
 
 static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static TTID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1559,80 +1560,18 @@ fn lock_owner_alive(record: &LockRecord) -> bool {
     }
 }
 
-/// Live exclusive owner of a FYLO root, as recorded by the JavaScript lease.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RootOwner {
-    /// Canonical root the lease covers.
-    pub root: String,
-    /// Owner generation written by the lease holder.
-    pub owner: String,
-    /// Owning process identifier.
-    pub pid: u32,
-    /// Host that wrote the lease.
-    pub host: String,
-}
-
-/// Report the live exclusive owner of `root`, if another process holds it.
-///
-/// This reads the JavaScript lease sidecar and verifies the recorded process
-/// is still alive. A lease written on another host is treated as held, because
-/// its process identifier cannot be checked from here.
-///
-/// This is a fail-closed *detection*, not a kernel-held lease: it prevents a
-/// native process from opening a root a live JavaScript owner holds, but two
-/// native processes are still serialized only by the per-collection lock.
-///
-/// # Errors
-///
-/// Returns an error when the root path cannot be resolved.
-pub fn live_root_owner(root: &Path) -> Result<Option<RootOwner>, NativeStorageError> {
-    let canonical = fs::canonicalize(root).map_err(NativeStorageError::io)?;
-    let parent = canonical.parent().ok_or_else(|| {
-        NativeStorageError::new(
-            NativeStorageErrorCode::UnsafePath,
-            "FYLO root has no parent directory",
-        )
-    })?;
-    let basename = canonical.file_name().map_or_else(
-        || "root".to_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    let metadata = parent.join(format!(".{basename}.fylo-root-owner.lock.json"));
-    let Ok(owner) = read_bounded_json::<RootOwner>(&metadata, 4096) else {
-        return Ok(None);
-    };
-    if owner.pid == std::process::id() {
-        return Ok(None);
-    }
-    if host_name().is_some_and(|host| host != owner.host) {
-        return Ok(Some(owner));
-    }
-    if process_identity(owner.pid).is_some() {
-        return Ok(Some(owner));
-    }
-    Ok(None)
-}
-
-#[cfg(unix)]
-fn host_name() -> Option<String> {
-    command_output("hostname", &[])
-}
-
-#[cfg(not(unix))]
-fn host_name() -> Option<String> {
-    std::env::var("COMPUTERNAME").ok()
-}
-
 #[cfg(target_os = "linux")]
 fn process_identity(pid: u32) -> Option<String> {
     let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields = stat
-        .get(stat.rfind(')')?.saturating_add(2)..)?
-        .split_whitespace();
-    let start = fields.skip(19).next()?;
-    Some(format!("linux:{}:{start}", boot.trim()))
+    let status_line = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 22 of /proc/<pid>/stat is the process start time in clock ticks.
+    // Everything before the last ')' is the comm field, which may itself
+    // contain spaces, so the scan starts after it.
+    let started_ticks = status_line
+        .get(status_line.rfind(')')?.saturating_add(2)..)?
+        .split_whitespace()
+        .nth(19)?;
+    Some(format!("linux:{}:{started_ticks}", boot.trim()))
 }
 
 #[cfg(target_os = "windows")]
@@ -1658,6 +1597,9 @@ fn process_identity(pid: u32) -> Option<String> {
         .map(|value| format!("{platform}:{value}"))
 }
 
+// Only the Windows and generic-Unix process-identity probes shell out; Linux
+// reads /proc directly.
+#[cfg(not(target_os = "linux"))]
 fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
     let output = std::process::Command::new(program)
         .args(arguments)
@@ -2083,7 +2025,9 @@ fn write_fylo_attribute(path: &Path, name: &str, value: &[u8]) -> Result<(), Nat
                 format!("Windows FYLO ADS manifest is corrupt: {error}"),
             )
         })?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::collections::BTreeMap::default()
+        }
         Err(error) => return Err(NativeStorageError::io(error)),
     };
     attributes.insert(name.into(), BASE64.encode(value));
@@ -2226,7 +2170,7 @@ fn sibling_scratch(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}.{}.tmp", unique_name("rust")))
 }
 
-fn unique_name(prefix: &str) -> String {
+pub(crate) fn unique_name(prefix: &str) -> String {
     let sequence = UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2235,7 +2179,7 @@ fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{}-{nanos:x}-{sequence:x}", std::process::id())
 }
 
-fn unix_millis() -> Result<u64, NativeStorageError> {
+pub(crate) fn unix_millis() -> Result<u64, NativeStorageError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
@@ -2352,6 +2296,8 @@ fn capture_attributes(path: &Path) -> Result<Vec<CapturedAttribute>, NativeStora
     Ok(attributes)
 }
 
+// The signature mirrors the Unix implementation so callers stay platform-free.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(unix))]
 fn capture_attributes(_path: &Path) -> Result<Vec<CapturedAttribute>, NativeStorageError> {
     Ok(Vec::new())
@@ -2430,7 +2376,7 @@ fn apply_access(path: &Path, access: WriteAccess) -> Result<(), NativeStorageErr
         mode,
     };
     let encoded = serde_json::to_vec(&descriptor).map_err(|error| json_error(&error))?;
-    file.set_xattr(ACCESS_XATTR, &encoded)
+    file.set_xattr(super::ACCESS_XATTR, &encoded)
         .map_err(NativeStorageError::io)?;
     failpoint("after-access-marker")?;
     chown(path, Some(uid), Some(gid)).map_err(NativeStorageError::io)?;
@@ -2458,6 +2404,8 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), NativeStorageError> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(NativeStorageError::io)
 }
 
+// The signature mirrors the Unix implementation so callers stay platform-free.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> Result<(), NativeStorageError> {
     Ok(())

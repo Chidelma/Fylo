@@ -58,12 +58,18 @@ a single row that cannot fit is reported as `EQUERYITEMTOOLARGE`.
 
 ## Root ownership
 
-Opening a root whose JavaScript lease sidecar names a live process fails with
-`EROOTLOCKED`, and the check is memoised per session. This is fail-closed
-_detection_, not a kernel-held lease: it stops a native process from opening a
-root a live JavaScript owner holds, but two native processes are still
-serialized only by the per-collection lock. Holding the kernel lease itself
-needs `flock`/`LockFileEx`, which is an ADR-gated `unsafe` boundary.
+The session takes a real kernel-held lease on the first request that names a
+root and holds it until the session ends. `std::fs::File::try_lock` is `flock`
+on Unix and `LockFileEx` on Windows in safe Rust, which is the same primitive
+the JavaScript lease uses, so the two engines contend for one lock and no
+platform `unsafe` boundary is needed.
+
+Exclusion therefore works in both directions: a native session refuses a root a
+live JavaScript owner holds, and `acquireRootLease` refuses a root a live
+native session holds — both with `EROOTLOCKED`. The kernel releases the lock on
+close, crash, or `SIGKILL`, so a dead owner never blocks a successor. The
+recorded owner generation is re-checked per frame and reports
+`EROOTLEASELOST` if a successor replaced the sentinel.
 
 ## Schema validation
 
@@ -97,7 +103,6 @@ Cancellation, timeouts, signal handling, and stderr back-pressure are open
 Phase 7 gates, as are the ten operations this preview still answers with
 `EUNSUPPORTEDOP`: collection creation and drop, joins, bulk import, repository
 checkout/diff/restore/merge, `schemaMaterialize`, and S3 backup
-reconciliation. `status` reports branch and head identity only; a clean/dirty
-answer needs the working-tree diff. Until the kernel lease and the client
-corpus land, this is not a substitute for the JavaScript server in a client's
-binary selection.
+reconciliation. Until the client corpus runs against exact compiled binaries,
+this is not a substitute for the JavaScript server in a client's binary
+selection.

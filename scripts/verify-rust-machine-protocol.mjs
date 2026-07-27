@@ -315,6 +315,25 @@ try {
         'Rust schemaValidate accepted a document CHEX rejects'
     )
 
+    // Rust now holds a kernel lease, so exclusion works in both directions.
+    const held = interactive(binary)
+    try {
+        const frame = await held.send({ op: 'inspectCollection', collection })
+        assert(frame.ok === true, 'Rust could not take its own root lease')
+        let javascriptRefused = false
+        try {
+            const contended = await acquireRootLease(root)
+            await contended.release()
+        } catch (error) {
+            javascriptRefused = error?.code === 'EROOTLOCKED'
+        }
+        assert(javascriptRefused, 'JavaScript opened a root the Rust session holds')
+    } finally {
+        await held.close()
+    }
+    const reclaimed = await acquireRootLease(root)
+    await reclaimed.release()
+
     const lease = await acquireRootLease(root)
     const locked = (
         await session(binary, [JSON.stringify({ op: 'getDoc', collection, id: identifier })])

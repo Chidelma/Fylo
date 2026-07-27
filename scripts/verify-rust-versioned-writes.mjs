@@ -101,12 +101,68 @@ try {
     )
     assert(verified.head === created, 'Rust verification does not see its own commit as head')
 
+    await command([
+        process.execPath,
+        './scripts/run-rust.mjs',
+        'cargo',
+        'build',
+        '--locked',
+        '-p',
+        'fylo-cli',
+        '--bin',
+        'fylo-machine-preview'
+    ])
+    const machine = join(
+        process.cwd(),
+        'target',
+        'debug',
+        platform() === 'win32' ? 'fylo-machine-preview.exe' : 'fylo-machine-preview'
+    )
+    const cleanStatus = await machineStatus(machine)
+    assert(cleanStatus.clean === true, 'Rust status reported a committed tree as dirty')
+    assert(cleanStatus.head === created, 'Rust status head drift')
+
+    // autoCommit would advance HEAD and leave the tree clean again.
+    const dirty = new Fylo(root, { versioning: { autoCommit: false } })
+    await dirty.ready()
+    await dirty[collection].put({ name: 'Uncommitted' })
+    await dirty.close()
+    const dirtyStatus = await machineStatus(machine)
+    assert(dirtyStatus.clean === false, 'Rust status reported an uncommitted write as clean')
+    const javascriptStatus = await repository.status()
+    assert(
+        javascriptStatus.clean === dirtyStatus.clean,
+        'Rust and JavaScript disagree about working-tree cleanliness'
+    )
+    await commit(binary, 'commit the uncommitted write')
+
     const repeated = await commit(binary, 'native document patch')
     assert(repeated === null, 'Rust auto-commit is not idempotent')
 
     console.log('Verified Rust content-addressed commits against the JavaScript repository')
 } finally {
     await rm(workspace, { recursive: true, force: true })
+}
+
+async function machineStatus(binary) {
+    const subprocess = Bun.spawn([binary, '--root', root], {
+        cwd: process.cwd(),
+        env: process.env,
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe'
+    })
+    subprocess.stdin.write(`${JSON.stringify({ op: 'status' })}\n`)
+    await subprocess.stdin.end()
+    const [stdout, , exitCode] = await Promise.all([
+        new Response(subprocess.stdout).text(),
+        new Response(subprocess.stderr).text(),
+        subprocess.exited
+    ])
+    if (exitCode !== 0) throw new Error('fylo-machine-preview failed')
+    const frame = JSON.parse(stdout.trim().split('\n')[0])
+    if (!frame.ok) throw new Error(`status failed: ${JSON.stringify(frame.error)}`)
+    return frame.result
 }
 
 async function commit(binary, message) {

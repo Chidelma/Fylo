@@ -64,6 +64,9 @@ drives, and — like the JavaScript writer — only when `FYLO_STRICT` is set to
 non-empty value; that is also when `_v` is stamped. Reading a document written
 under an older schema version still requires the JavaScript upgraders.
 
+`repository_status` hashes the same tree without persisting a single object, so
+a clean/dirty answer never mutates the object store.
+
 `commit` reproduces `commitIfDirty`'s full-scan path: blobs, four-level tree
 objects, an immutable commit, and a ref update, but only when the root hash
 moved. It supports the default branch worktree only; other branches live in

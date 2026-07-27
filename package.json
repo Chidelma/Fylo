@@ -26,6 +26,7 @@
         "sql:verify": "bun ./scripts/verify-rust-sql-fixture.mjs",
         "rust:check": "bun ./scripts/run-rust.mjs cargo check --workspace --all-targets",
         "rust:clippy": "bun ./scripts/run-rust.mjs cargo clippy --workspace --all-targets --all-features -- -D warnings",
+        "rust:clippy:cross": "bun ./scripts/clippy-cross-targets.mjs",
         "rust:deny": "bun ./scripts/run-rust.mjs cargo deny check",
         "rust:fmt": "bun ./scripts/run-rust.mjs cargo fmt --all --check",
         "rust:interop:readonly": "bun ./scripts/verify-rust-readonly.mjs",

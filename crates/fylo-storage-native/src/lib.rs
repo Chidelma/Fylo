@@ -17,10 +17,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+mod lease;
 mod write;
 
+pub use lease::RootLease;
+pub use write::version::RepositoryStatus;
 pub use write::{NativeWriteRoot, PutDocumentOptions, PutRawFileOptions, WriteAccess, WriteActor};
-pub use write::{RootOwner, live_root_owner};
 pub use write::{SqlMutationResult, SqlMutationResultKind};
 
 /// Maximum collection descriptor bytes.
@@ -1656,6 +1658,10 @@ pub enum NativeStorageErrorCode {
     ConcurrentWrite,
     /// A portable access descriptor denied the operation.
     PermissionDenied,
+    /// Another live process owns this root.
+    RootLocked,
+    /// This process's exclusive ownership of the root was lost.
+    RootLeaseLost,
     /// A SQL mutation was malformed or used an unsupported execution shape.
     InvalidQuery,
     /// The preview does not support the requested collection/operation.
@@ -1679,6 +1685,8 @@ impl NativeStorageErrorCode {
             Self::NotFound => "ENATIVE_NOT_FOUND",
             Self::ConcurrentWrite => "ENATIVE_CONCURRENT_WRITE",
             Self::PermissionDenied => "EACCES",
+            Self::RootLocked => "EROOTLOCKED",
+            Self::RootLeaseLost => "EROOTLEASELOST",
             Self::InvalidQuery => "EQUERY_INVALID",
             Self::Unsupported => "ENATIVE_UNSUPPORTED",
         }
@@ -2111,7 +2119,7 @@ fn native_access(_metadata: &Metadata) -> NativeAccess {
 
 #[cfg(windows)]
 fn decode_base64(encoded: &str) -> Result<Vec<u8>, &'static str> {
-    if encoded.len() % 4 != 0 {
+    if !encoded.len().is_multiple_of(4) {
         return Err("Windows FYLO ADS manifest contains invalid base64");
     }
     let mut output = Vec::with_capacity(encoded.len() / 4 * 3);

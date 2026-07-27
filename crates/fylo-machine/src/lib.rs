@@ -13,7 +13,7 @@ use std::time::Instant;
 use fylo_engine::{AccessContext, EngineError, ReadOnlyEngine, WriteEngine};
 use fylo_query::{QueryLimits, SqlOperation, StructuredQuery, prepare_sql};
 use fylo_storage_native::{
-    NativeStorageError, NativeWriteRoot, WriteAccess, WriteActor, live_root_owner,
+    NativeStorageError, NativeWriteRoot, RootLease, WriteAccess, WriteActor,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -107,7 +107,7 @@ pub fn serve<R: BufRead, W: Write>(
     let mut session = Session {
         default_root,
         limits,
-        checked_roots: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+        leases: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         cursors: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         cursor_sequence: std::cell::Cell::new(0),
     };
@@ -122,7 +122,7 @@ pub fn serve<R: BufRead, W: Write>(
 struct Session {
     default_root: Option<PathBuf>,
     limits: FrameLimits,
-    checked_roots: std::cell::RefCell<std::collections::BTreeSet<PathBuf>>,
+    leases: std::cell::RefCell<std::collections::BTreeMap<PathBuf, RootLease>>,
     cursors: std::cell::RefCell<std::collections::BTreeMap<String, CursorState>>,
     cursor_sequence: std::cell::Cell<u64>,
 }
@@ -305,6 +305,7 @@ impl Session {
             "capabilities": {
                 "handshake": true,
                 "exclusiveRoot": true,
+                "rootLease": "kernel-held",
                 "writes": true,
                 "queryPagination": {
                     "version": 1,
@@ -321,11 +322,13 @@ impl Session {
         })
     }
 
-    /// Resolve the request's root and refuse one a live foreign process owns.
+    /// Resolve the request's root, taking an exclusive kernel lease the first
+    /// time this session touches it.
     ///
-    /// The check is memoised per session: verifying a process identity shells
-    /// out on some platforms, and re-running it per frame would dominate the
-    /// latency of every read.
+    /// The lease is held for the life of the session, so a JavaScript owner
+    /// cannot open the root underneath us and we cannot open one it holds. The
+    /// recorded generation is re-checked per frame, which is a cheap read of a
+    /// resident file.
     fn root(&self, request: &Value) -> Result<PathBuf, MachineError> {
         let root = request
             .get("root")
@@ -335,19 +338,15 @@ impl Session {
             .ok_or_else(|| {
                 MachineError::new("EBADREQUEST", "machine request requires a FYLO root")
             })?;
-        let mut checked = self.checked_roots.borrow_mut();
-        if !checked.contains(&root) {
-            if let Some(owner) = live_root_owner(&root).map_err(|error| storage_error(&error))? {
-                return Err(MachineError::new(
-                    "EROOTLOCKED",
-                    format!(
-                        "FYLO root already has a live exclusive owner (pid {} on {})",
-                        owner.pid, owner.host
-                    ),
-                ));
-            }
-            checked.insert(root.clone());
+        let mut leases = self.leases.borrow_mut();
+        if let Some(lease) = leases.get(&root) {
+            lease
+                .assert_owned()
+                .map_err(|error| storage_error(&error))?;
+            return Ok(root);
         }
+        let lease = RootLease::acquire(&root).map_err(|error| storage_error(&error))?;
+        leases.insert(root.clone(), lease);
         Ok(root)
     }
 
@@ -862,21 +861,20 @@ impl Session {
     }
 
     fn status(&self, request: &Value) -> Result<Value, MachineError> {
-        let history = self
-            .engine(request)?
-            .history(1)
-            .map_err(|error| engine_error(&error))?;
-        if !history.enabled {
+        let status = self
+            .writer(request)?
+            .repository_status()
+            .map_err(|error| storage_error(&error))?;
+        if !status.enabled {
             return Err(MachineError::new(
                 "EUNSUPPORTEDOP",
                 "this FYLO root has no version repository",
             ));
         }
-        // A clean check compares the working tree against HEAD, which is a
-        // write-side snapshot; the preview reports identity only.
         Ok(json!({
-            "branch": history.branch,
-            "head": history.head,
+            "branch": status.branch,
+            "head": status.head,
+            "clean": status.clean,
         }))
     }
 

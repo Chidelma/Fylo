@@ -10,8 +10,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -70,6 +68,20 @@ struct CommitManifest {
     root: String,
 }
 
+/// Branch identity plus whether the working tree matches `HEAD`.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryStatus {
+    /// Whether this root has a version repository at all.
+    pub enabled: bool,
+    /// Checked-out branch name.
+    pub branch: Option<String>,
+    /// Branch head commit identifier.
+    pub head: Option<String>,
+    /// True when the working tree hashes to the head commit's root tree.
+    pub clean: bool,
+}
+
 /// One working-tree file captured as a content-addressed blob.
 struct SnapshotEntry {
     collection: String,
@@ -125,8 +137,8 @@ impl NativeWriteRoot {
                 "FYLO branch ref name does not match HEAD",
             ));
         }
-        let entries = self.snapshot_working_tree(&repository)?;
-        let root_hash = write_tree(&repository, &entries)?;
+        let entries = self.snapshot_working_tree(&repository, true)?;
+        let root_hash = write_tree(&repository, &entries, true)?;
         let parent_root = match reference.head.as_deref() {
             Some(head) => read_commit_root(&repository, head)?,
             None => None,
@@ -167,9 +179,62 @@ impl NativeWriteRoot {
         Ok(Some(identifier))
     }
 
+    /// Report branch identity and whether the working tree matches `HEAD`.
+    ///
+    /// This hashes the same four-level tree `commit_if_dirty` would build but
+    /// persists nothing, so a status check never mutates the object store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a corrupt repository, an unsafe path, or an
+    /// unreadable working tree.
+    pub fn repository_status(&self) -> Result<RepositoryStatus, NativeStorageError> {
+        let repository = self.path().join(".fylo-vcs");
+        if !repository.join("HEAD").is_file() {
+            return Ok(RepositoryStatus {
+                enabled: false,
+                branch: None,
+                head: None,
+                clean: true,
+            });
+        }
+        let branch = read_head_branch(&repository)?;
+        let reference: BranchReference = read_bounded_json(
+            &repository
+                .join("refs")
+                .join("heads")
+                .join(format!("{branch}.json")),
+            MAX_METADATA_BYTES,
+        )?;
+        let head = reference.head.clone();
+        let clean = if branch == DEFAULT_BRANCH {
+            let entries = self.snapshot_working_tree(&repository, false)?;
+            let root_hash = write_tree(&repository, &entries, false)?;
+            let parent_root = match head.as_deref() {
+                Some(head) => read_commit_root(&repository, head)?,
+                None => None,
+            };
+            root_hash == parent_root
+        } else {
+            // Another branch's worktree is materialized elsewhere, so this
+            // root's files say nothing about it.
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::Unsupported,
+                "native status supports only the default branch worktree",
+            ));
+        };
+        Ok(RepositoryStatus {
+            enabled: true,
+            branch: Some(branch),
+            head,
+            clean,
+        })
+    }
+
     fn snapshot_working_tree(
         &self,
         repository: &Path,
+        persist: bool,
     ) -> Result<Vec<SnapshotEntry>, NativeStorageError> {
         let mut entries = Vec::new();
         for data_directory in DATA_DIRECTORIES {
@@ -193,6 +258,7 @@ impl NativeWriteRoot {
                 for (namespace, kind) in [("docs", "active"), (".deleted", "deleted")] {
                     Self::snapshot_namespace(
                         repository,
+                        persist,
                         &collection_root.join(namespace),
                         &collection,
                         kind,
@@ -212,6 +278,7 @@ impl NativeWriteRoot {
 
     fn snapshot_namespace(
         repository: &Path,
+        persist: bool,
         namespace_root: &Path,
         collection: &str,
         kind: &'static str,
@@ -254,7 +321,9 @@ impl NativeWriteRoot {
                 }
                 let bytes = fs::read(record.path()).map_err(NativeStorageError::io)?;
                 let hash = crate::sha256_hex(&bytes);
-                write_object(repository, &hash, &bytes)?;
+                if persist {
+                    write_object(repository, &hash, &bytes)?;
+                }
                 entries.push(SnapshotEntry {
                     collection: collection.to_owned(),
                     namespace: kind,
@@ -264,7 +333,9 @@ impl NativeWriteRoot {
                 });
                 if let Some(blob) = metadata_blob(&record.path())? {
                     let hash = crate::sha256_hex(&blob);
-                    write_object(repository, &hash, &blob)?;
+                    if persist {
+                        write_object(repository, &hash, &blob)?;
+                    }
                     entries.push(SnapshotEntry {
                         collection: collection.to_owned(),
                         namespace: "metadata",
@@ -296,6 +367,8 @@ impl NativeWriteRoot {
 /// checksum, sorted, base64-encoded, in a version-2 envelope.
 #[cfg(unix)]
 fn metadata_blob(path: &Path) -> Result<Option<Vec<u8>>, NativeStorageError> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use xattr::FileExt;
 
     let file = fs::File::open(path).map_err(NativeStorageError::io)?;
@@ -356,6 +429,7 @@ fn encode_metadata_blob(
 fn write_tree(
     repository: &Path,
     entries: &[SnapshotEntry],
+    persist: bool,
 ) -> Result<Option<String>, NativeStorageError> {
     type Shards = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -390,22 +464,22 @@ fn write_tree(
                 namespace_entries.push(TreeEntry {
                     name: shard,
                     kind: "tree",
-                    hash: write_tree_node(repository, blobs)?,
+                    hash: write_tree_node(repository, blobs, persist)?,
                 });
             }
             collection_entries.push(TreeEntry {
                 name: namespace.to_owned(),
                 kind: "tree",
-                hash: write_tree_node(repository, namespace_entries)?,
+                hash: write_tree_node(repository, namespace_entries, persist)?,
             });
         }
         root_entries.push(TreeEntry {
             name: collection,
             kind: "tree",
-            hash: write_tree_node(repository, collection_entries)?,
+            hash: write_tree_node(repository, collection_entries, persist)?,
         });
     }
-    write_tree_node(repository, root_entries).map(Some)
+    write_tree_node(repository, root_entries, persist).map(Some)
 }
 
 fn namespace_directory(kind: &str) -> &'static str {
@@ -419,12 +493,15 @@ fn namespace_directory(kind: &str) -> &'static str {
 fn write_tree_node(
     repository: &Path,
     mut entries: Vec<TreeEntry>,
+    persist: bool,
 ) -> Result<String, NativeStorageError> {
     entries.sort_by(|left, right| left.name.cmp(&right.name));
     let serialized =
         serde_json::to_string(&TreeNode { entries }).map_err(|error| super::json_error(&error))?;
     let hash = crate::sha256_hex(serialized.as_bytes());
-    write_object(repository, &hash, serialized.as_bytes())?;
+    if persist {
+        write_object(repository, &hash, serialized.as_bytes())?;
+    }
     Ok(hash)
 }
 

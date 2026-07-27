@@ -89,6 +89,12 @@ jobs:
             - name: Install JavaScript dependencies
               run: bun install --frozen-lockfile
 
+            - name: Install pinned TTID and CHEX binaries
+              shell: bash
+              run: |
+                  bun run vendor:install
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
             - name: Install pinned Rust toolchain
               run: rustup show active-toolchain
 
@@ -243,6 +249,12 @@ jobs:
             - name: Install dependencies
               run: bun install --frozen-lockfile
 
+            - name: Install pinned TTID and CHEX binaries
+              shell: bash
+              run: |
+                  bun run vendor:install
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
             - name: Install pinned Rust toolchain
               run: rustup show active-toolchain
 
@@ -313,6 +325,12 @@ jobs:
 
             - name: Install dependencies
               run: bun install --frozen-lockfile
+
+            - name: Install pinned TTID and CHEX binaries
+              shell: bash
+              run: |
+                  bun run vendor:install
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
             - name: Install pinned Rust toolchain
               run: rustup show active-toolchain
