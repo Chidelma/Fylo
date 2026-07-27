@@ -1012,6 +1012,7 @@ impl NativeCollection {
         )?;
         let computed_checksum = sha256_hex(&bytes);
         let modified_millis = modified_millis(&metadata)?;
+        let modified_millis_exact = modified_millis_f64(&metadata)?;
         let checksum_sha256 = cached_checksum(
             attributes.get(CHECKSUM_XATTR),
             metadata.len(),
@@ -1026,6 +1027,7 @@ impl NativeCollection {
             checksum_sha256,
             custom_metadata,
             modified_millis,
+            modified_millis_exact,
             access: native_access(&metadata),
             path,
         })
@@ -1221,6 +1223,9 @@ impl NativeCollection {
             live_documents: live.len(),
             reference_integrity: true,
             rebuild_equivalent: false,
+            expected_key_count: None,
+            missing_keys: None,
+            extra_keys: None,
         })
     }
 }
@@ -1253,6 +1258,9 @@ pub struct StoredRawFile {
     pub custom_metadata: BTreeMap<String, Value>,
     /// Filesystem modification time in Unix milliseconds.
     pub modified_millis: u64,
+    /// Filesystem modification time with the sub-millisecond precision exposed
+    /// by JavaScript `fs.stat().mtimeMs`.
+    pub modified_millis_exact: f64,
     /// Native owner, group, and mode where the platform exposes them.
     pub access: NativeAccess,
     /// Verified native path.
@@ -1283,8 +1291,17 @@ pub struct IndexVerification {
     pub live_documents: usize,
     /// Always true when this report is returned.
     pub reference_integrity: bool,
-    /// False until exact independent rebuild comparison is implemented.
+    /// Whether merged index state exactly matches an independent rebuild.
     pub rebuild_equivalent: bool,
+    /// Independently derived key count when rebuild comparison ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_key_count: Option<usize>,
+    /// Expected keys absent from merged snapshot/WAL state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_keys: Option<usize>,
+    /// Merged snapshot/WAL keys absent from the independent rebuild.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_keys: Option<usize>,
 }
 
 /// Active first-parent FYLO repository history.
@@ -2048,6 +2065,21 @@ fn modified_millis(metadata: &Metadata) -> Result<u64, NativeStorageError> {
     })
 }
 
+#[allow(clippy::cast_precision_loss)] // JavaScript fs.stat().mtimeMs is an f64.
+fn modified_millis_f64(metadata: &Metadata) -> Result<f64, NativeStorageError> {
+    let duration = metadata
+        .modified()
+        .map_err(NativeStorageError::io)?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("file modification time predates the Unix epoch: {error}"),
+            )
+        })?;
+    Ok(duration.as_secs() as f64 * 1000.0 + f64::from(duration.subsec_nanos()) / 1_000_000.0)
+}
+
 #[cfg(unix)]
 fn same_file(left: &Metadata, right: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -2163,6 +2195,9 @@ mod tests {
                 live_documents: 1,
                 reference_integrity: true,
                 rebuild_equivalent: false,
+                expected_key_count: None,
+                missing_keys: None,
+                extra_keys: None,
             }
         );
     }

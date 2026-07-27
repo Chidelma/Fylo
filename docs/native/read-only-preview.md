@@ -47,17 +47,18 @@ It currently supports live and retained-deleted JSON documents and raw files,
 canonical/custom metadata, Unix xattrs and UID/GID/mode, the existing Windows
 ADS manifest representation, schema-driven encrypted-field reads, portable
 structured predicates, SQL SELECT projection/grouping, and prefix-index scans
-with WAL overlays. `verify-index` checks merged key structure and rejects
-references to records absent from the authoritative tree; its
-`rebuildEquivalent: false` field deliberately records that exact independent
-rebuild comparison is not implemented yet. `log` validates and reads the
-active branch’s bounded first-parent commit manifests without materializing a
-version. `verify-history` additionally hashes and structurally validates every
-unique content-addressed tree and blob reachable from that bounded first-parent
-slice. It reports whether the limit covered the whole first-parent chain and
-never materializes historical data. Full reachable-DAG qualification, native
-Windows race-hardening evidence, full rebuild equivalence, joins, and all
-mutations remain promotion blockers.
+with WAL overlays. `verify-index` rejects orphaned references, independently
+rebuilds JavaScript-compatible keys from authoritative documents/raw-file
+manifests, and reports exact missing/extra key counts. Its portable builder
+covers ECMAScript number formatting/coercion, URI encoding, numeric sort keys,
+reverse strings, trigrams, and schema-encrypted blind-index tokens. `log`
+validates and reads the active branch’s bounded first-parent commit manifests
+without materializing a version. `verify-history` additionally hashes and
+structurally validates every unique content-addressed tree and blob reachable
+from that bounded first-parent slice. It reports whether the limit covered the
+whole first-parent chain and never materializes historical data. Full
+reachable-DAG qualification, native Windows race-hardening evidence, joins,
+and all mutations remain promotion blockers.
 
 Historical object verification is deliberately bounded to 1,000,000 unique
 objects, 16 GiB aggregate bytes, 16 MiB per tree node, and 256 MiB per blob in

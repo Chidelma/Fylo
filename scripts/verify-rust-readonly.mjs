@@ -35,6 +35,7 @@ try {
     await database.users.create()
     await database.assets.create({ kind: 'file' })
     await database.secrets.create()
+    await database.indexedge.create()
     const id = await database.users.put({ name: 'Ada', score: 42, role: 'admin' })
     const graceId = await database.users.put({ name: 'Grace', score: 50, role: 'editor' })
     const rawId = await database.assets
@@ -54,8 +55,17 @@ try {
         secret: 'correct horse battery staple',
         nested: { verifier: 42 }
     })
+    await database.indexedge.put({
+        large: 100_000_000_000_000_000_000,
+        negativeZero: -0,
+        numericString: '0x10',
+        unicode: '😀ab',
+        slash: 'a/b',
+        tags: ['duplicate', 'duplicate']
+    })
     await database.users.rebuild()
     await database.assets.rebuild()
+    await database.indexedge.rebuild()
     await database.close()
     const versionCommit = await new VersionRepository(root).commit('Rust read-only fixture')
 
@@ -209,10 +219,24 @@ try {
     assert(indexVerification.referenceIntegrity === true, 'Rust index reference verification drift')
     assert(indexVerification.liveDocuments === 2, 'Rust index live-document count drift')
     assert(indexVerification.indexedDocuments === 2, 'Rust indexed-document count drift')
-    assert(
-        indexVerification.rebuildEquivalent === false,
-        'Rust preview must not overclaim full rebuild equivalence'
-    )
+    assert(indexVerification.rebuildEquivalent === true, 'Rust index rebuild-equivalence drift')
+    assert(indexVerification.missingKeys === 0, 'Rust index rebuild is missing keys')
+    assert(indexVerification.extraKeys === 0, 'Rust index contains unexpected keys')
+    for (const collection of ['assets', 'secrets', 'indexedge']) {
+        const report = await rustJson([
+            'verify-index',
+            '--root',
+            root,
+            '--collection',
+            collection
+        ])
+        assert(
+            report.rebuildEquivalent === true,
+            `Rust ${collection} index rebuild drift: ${JSON.stringify(report)}`
+        )
+        assert(report.missingKeys === 0, `Rust ${collection} index is missing keys`)
+        assert(report.extraKeys === 0, `Rust ${collection} index has unexpected keys`)
+    }
     const found = await rustJson([
         'find',
         '--root',

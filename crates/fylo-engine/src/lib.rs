@@ -6,12 +6,16 @@
 
 mod encryption;
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
 
-use encryption::{EncryptionReader, reject_undeclared_ciphertext};
+use encryption::{EncryptionReader, is_encrypted_field, reject_undeclared_ciphertext};
 use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, decode_ttid};
-use fylo_query::{QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery};
+use fylo_query::{
+    IndexLookupValue, QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery,
+    index_entries_for_document,
+};
 use fylo_storage_native::{
     CollectionKind, GenerationStatus, IndexVerification, NativeAccess, NativeCollection,
     NativeRoot, NativeStorageError, RepositoryHistory, StoredRawFile, VersionVerification,
@@ -272,9 +276,80 @@ impl ReadOnlyEngine {
             .collection(collection)
             .map_err(EngineError::storage)?;
         Self::read_stable(&collection, || {
-            collection
+            let mut verification = collection
                 .verify_index_references()
-                .map_err(EngineError::storage)
+                .map_err(EngineError::storage)?;
+            let encrypted_fields = self
+                .encryption
+                .as_ref()
+                .map(|encryption| encryption.encrypted_fields(collection.name()))
+                .transpose()
+                .map_err(EngineError::encryption)?
+                .unwrap_or_default();
+            let mut expected = BTreeSet::new();
+            let identifiers = match collection.kind() {
+                CollectionKind::Document => {
+                    collection.document_ids().map_err(EngineError::storage)?
+                }
+                CollectionKind::File => collection.raw_file_ids().map_err(EngineError::storage)?,
+            };
+            for identifier in identifiers {
+                let fields = match collection.kind() {
+                    CollectionKind::Document => {
+                        let stored = collection
+                            .read_document(&identifier)
+                            .map_err(EngineError::storage)?;
+                        self.decode_document(
+                            collection.name(),
+                            Document::parse(&stored.bytes, DocumentLimits::default())
+                                .map_err(EngineError::format)?,
+                        )?
+                        .into_fields()
+                    }
+                    CollectionKind::File => {
+                        let stored = collection
+                            .read_raw_file(&identifier)
+                            .map_err(EngineError::storage)?;
+                        raw_file_index_fields(&identifier, stored)?
+                    }
+                };
+                expected.extend(
+                    index_entries_for_document(&identifier, &fields, |field, value| {
+                        if is_encrypted_field(field, &encrypted_fields) {
+                            let encryption = self.encryption.as_ref().ok_or_else(|| {
+                                "encrypted index field has no schema/key context".to_owned()
+                            })?;
+                            encryption
+                                .blind_index(value)
+                                .map(IndexLookupValue::encrypted)
+                        } else {
+                            Ok(IndexLookupValue::plain(value))
+                        }
+                    })
+                    .map_err(EngineError::encryption)?,
+                );
+            }
+            let snapshot = collection.index_snapshot().map_err(EngineError::storage)?;
+            let actual: BTreeSet<String> = snapshot
+                .as_bytes()
+                .split(|byte| *byte == b'\n')
+                .filter(|key| !key.is_empty())
+                .map(|key| {
+                    std::str::from_utf8(key)
+                        .map(str::to_owned)
+                        .map_err(|error| {
+                            EngineError::new(
+                                EngineErrorCode::Storage,
+                                format!("prefix index key is not valid UTF-8: {error}"),
+                            )
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            verification.expected_key_count = Some(expected.len());
+            verification.missing_keys = Some(expected.difference(&actual).count());
+            verification.extra_keys = Some(actual.difference(&expected).count());
+            verification.rebuild_equivalent = actual == expected;
+            Ok(verification)
         })
     }
 
@@ -486,6 +561,32 @@ fn build_read_file(identifier: &str, stored: StoredRawFile) -> Result<ReadFile, 
         access: stored.access,
         bytes: stored.bytes,
     })
+}
+
+fn raw_file_index_fields(
+    identifier: &str,
+    stored: StoredRawFile,
+) -> Result<Map<String, Value>, EngineError> {
+    let custom_metadata = stored.custom_metadata.clone();
+    let last_modified = stored.modified_millis_exact;
+    let manifest = build_read_file(identifier, stored)?.file;
+    let Value::Object(mut fields) = serde_json::to_value(manifest).map_err(|error| {
+        EngineError::new(
+            EngineErrorCode::Storage,
+            format!("cannot encode raw-file index manifest: {error}"),
+        )
+    })?
+    else {
+        unreachable!("RawFileManifest serializes as an object");
+    };
+    fields.insert("lastModified".into(), Value::from(last_modified));
+    if !custom_metadata.is_empty() {
+        fields.insert(
+            "meta".into(),
+            Value::Object(custom_metadata.into_iter().collect()),
+        );
+    }
+    Ok(fields)
 }
 
 fn shape_select_results(records: Vec<ReadDocument>, ast: &Value) -> Value {

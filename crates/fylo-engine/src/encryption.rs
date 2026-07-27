@@ -6,6 +6,7 @@ use aes_gcm::{
     Aes256Gcm,
     aead::{Aead, KeyInit},
 };
+use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac_array;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -15,11 +16,13 @@ use zeroize::Zeroizing;
 const MAX_SCHEMA_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_SCHEMA_BYTES: u64 = 16 * 1024 * 1024;
 const PBKDF2_ITERATIONS: u32 = 100_000;
+type SecretKey = Zeroizing<[u8; 32]>;
 
 #[derive(Clone)]
 pub(crate) struct EncryptionReader {
     schema_root: PathBuf,
-    key: Option<Zeroizing<[u8; 32]>>,
+    key: Option<SecretKey>,
+    hmac_key: Option<SecretKey>,
 }
 
 pub(crate) fn reject_undeclared_ciphertext(
@@ -48,10 +51,16 @@ impl EncryptionReader {
         {
             return Err("FYLO schema root is not a directory".into());
         }
-        let key = credentials
-            .map(|(secret, salt)| derive_key(secret, salt))
+        let keys = credentials
+            .map(|(secret, salt)| derive_keys(secret, salt))
             .transpose()?;
-        Ok(Self { schema_root, key })
+        let (key, hmac_key) =
+            keys.map_or((None, None), |(key, hmac_key)| (Some(key), Some(hmac_key)));
+        Ok(Self {
+            schema_root,
+            key,
+            hmac_key,
+        })
     }
 
     pub(crate) fn decode_document(
@@ -81,7 +90,7 @@ impl EncryptionReader {
         Ok(fields)
     }
 
-    fn encrypted_fields(&self, collection: &str) -> Result<Vec<String>, String> {
+    pub(crate) fn encrypted_fields(&self, collection: &str) -> Result<Vec<String>, String> {
         let manifest_path = PathBuf::from(collection).join("manifest.json");
         if !self.path_exists(&manifest_path)? {
             return Ok(Vec::new());
@@ -112,6 +121,19 @@ impl EncryptionReader {
                 Ok(field.to_owned())
             })
             .collect()
+    }
+
+    pub(crate) fn blind_index(&self, value: &str) -> Result<String, String> {
+        let key = self.hmac_key.as_ref().ok_or_else(|| {
+            "FYLO_ENCRYPTION_KEY and FYLO_CIPHER_SALT are required for blind indexes".to_owned()
+        })?;
+        let mut hmac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key.as_slice())
+            .map_err(|_| "invalid HMAC-SHA256 key".to_owned())?;
+        hmac.update(value.as_bytes());
+        Ok(format!(
+            "idx1.{}",
+            encode_base64_url(&hmac.finalize().into_bytes())
+        ))
     }
 
     fn path_exists(&self, relative: &Path) -> Result<bool, String> {
@@ -161,7 +183,7 @@ struct SchemaManifest {
     current: String,
 }
 
-fn derive_key(secret: &str, salt: &str) -> Result<Zeroizing<[u8; 32]>, String> {
+fn derive_keys(secret: &str, salt: &str) -> Result<(SecretKey, SecretKey), String> {
     if secret.len() < 32 {
         return Err("FYLO_ENCRYPTION_KEY must be at least 32 characters long".into());
     }
@@ -175,7 +197,9 @@ fn derive_key(secret: &str, salt: &str) -> Result<Zeroizing<[u8; 32]>, String> {
     ));
     let mut key = Zeroizing::new([0_u8; 32]);
     key.copy_from_slice(&material[..32]);
-    Ok(key)
+    let mut hmac_key = Zeroizing::new([0_u8; 32]);
+    hmac_key.copy_from_slice(&material[32..]);
+    Ok((key, hmac_key))
 }
 
 fn decode_value(
@@ -203,10 +227,33 @@ fn decode_value(
     Ok(())
 }
 
-fn is_encrypted_field(field: &str, encrypted: &[String]) -> bool {
+pub(crate) fn is_encrypted_field(field: &str, encrypted: &[String]) -> bool {
     encrypted
         .iter()
         .any(|pattern| field == pattern || field.starts_with(&format!("{pattern}/")))
+}
+
+fn encode_base64_url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        output.push(char::from(ALPHABET[usize::from(first >> 2)]));
+        output.push(char::from(
+            ALPHABET[usize::from(((first & 0x03) << 4) | (second >> 4))],
+        ));
+        if chunk.len() > 1 {
+            output.push(char::from(
+                ALPHABET[usize::from(((second & 0x0f) << 2) | (third >> 6))],
+            ));
+        }
+        if chunk.len() > 2 {
+            output.push(char::from(ALPHABET[usize::from(third & 0x3f)]));
+        }
+    }
+    output
 }
 
 fn decrypt(encoded: &str, key: &[u8; 32]) -> Result<String, String> {

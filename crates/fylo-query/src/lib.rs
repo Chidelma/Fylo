@@ -10,8 +10,10 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+mod index;
 mod sql;
 
+pub use index::{IndexLookupValue, index_entries_for_document};
 pub use sql::{AccessPath, SqlOperation, SqlPlan, prepare_sql};
 
 /// Current portable query contract.
