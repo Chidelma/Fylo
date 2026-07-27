@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use fylo_format::decode_ttid;
 use fylo_query::{IndexSnapshot, QueryLimits};
+use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -567,12 +568,17 @@ impl NativeRoot {
         }
         let file = File::open(path).map_err(NativeStorageError::io)?;
         let opened = file.metadata().map_err(NativeStorageError::io)?;
-        if !same_file(&before, &opened) {
+        if opened.len() > max_bytes {
             return Err(NativeStorageError::new(
-                NativeStorageErrorCode::UnsafePath,
-                "storage path changed while it was being opened",
+                NativeStorageErrorCode::FileTooLarge,
+                format!(
+                    "{} contains {} bytes; limit is {max_bytes}",
+                    path.display(),
+                    opened.len()
+                ),
             ));
         }
+        self.verify_open_file_identity(path, &file)?;
         Ok((file, opened))
     }
 
@@ -581,9 +587,11 @@ impl NativeRoot {
         path: &Path,
         file: &File,
     ) -> Result<(), NativeStorageError> {
-        let current = self.verify_path(path, ExpectedType::File)?;
-        let opened = file.metadata().map_err(NativeStorageError::io)?;
-        if same_file(&current, &opened) {
+        self.verify_path(path, ExpectedType::File)?;
+        let opened = FileIdentity::from_file(file.try_clone().map_err(NativeStorageError::io)?)
+            .map_err(NativeStorageError::io)?;
+        let current = FileIdentity::from_path(path).map_err(NativeStorageError::io)?;
+        if opened == current {
             Ok(())
         } else {
             Err(NativeStorageError::new(
@@ -2200,27 +2208,6 @@ fn is_link_or_reparse(metadata: &Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-#[cfg(unix)]
-fn same_file(left: &Metadata, right: &Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(windows)]
-fn same_file(left: &Metadata, right: &Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    left.file_attributes() == right.file_attributes()
-        && left.creation_time() == right.creation_time()
-        && left.last_write_time() == right.last_write_time()
-        && left.file_size() == right.file_size()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn same_file(left: &Metadata, right: &Metadata) -> bool {
-    left.len() == right.len() && left.modified().ok() == right.modified().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -2591,6 +2578,22 @@ mod tests {
         let stored = collection.read_deleted_raw_file("4VRNF52JPCO").unwrap();
         assert_eq!(stored.bytes, [0, 1, 2, 3, 255]);
         assert_eq!(stored.key, "/fixtures/sample.bin");
+    }
+
+    #[test]
+    fn rejects_path_replacement_while_original_handle_is_open() {
+        let fixture = TestRoot::create();
+        let root = NativeRoot::open(&fixture.0).unwrap();
+        let path = root
+            .path()
+            .join(".collections/users/docs/4V/4VRNF52JPCO.json");
+        let original = File::open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, br#"{"name":"replacement"}"#).unwrap();
+        let error = root
+            .verify_open_file_identity(&path, &original)
+            .unwrap_err();
+        assert_eq!(error.code(), NativeStorageErrorCode::UnsafePath);
     }
 
     #[cfg(unix)]

@@ -58,11 +58,12 @@ without materializing a version. `verify-history` traverses every parent in the
 active head’s reachable commit DAG and hashes and structurally validates every
 unique content-addressed tree and blob. It rejects cycles, reports whether the
 commit limit covered the whole graph, and never materializes historical data.
-Windows raw-file reads revalidate the base path before and after ADS/body
-access using stable metadata fingerprints. True handle/file-ID comparison is
-still blocked on either reviewed Win32 adapter code or stabilization of Rust’s
-`windows_by_handle` APIs. Native Windows evidence for that race boundary,
-joins, and all mutations remain promotion blockers.
+Every native file read compares the opened handle with a newly opened identity
+for the validated path before consuming bytes. The reviewed safe adapter uses
+device/inode identity on Unix and volume/file identity on Windows, avoiding the
+unstable standard-library `windows_by_handle` APIs. Raw-file reads repeat that
+comparison after ADS/xattr and body access. Native Windows execution evidence
+for that race boundary, joins, and all mutations remain promotion blockers.
 
 Historical object verification is deliberately bounded to 1,000,000 unique
 objects, 16 GiB aggregate bytes, 16 MiB per tree node, and 256 MiB per blob in

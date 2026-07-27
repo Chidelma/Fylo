@@ -9,7 +9,7 @@ it completes against the exact commit/artifact.
 | Portable format/query corpus                    | CI required     | Local pass + CI required             | CI required                                   | Buildable     |
 | Native read-only unit tests                     | CI required     | Local pass + CI required             | CI required                                   | Buildable     |
 | JavaScript-root differential read               | CI required     | Unicode/long-path local pass + CI    | Unicode/long-path CI required                 | Buildable     |
-| Symlink/reparse/case/Unicode/long path          | CI required     | Symlink/Unicode/long-path local pass | Junction/reparse test configured; CI required | Unqualified   |
+| Link/reparse/identity/case/Unicode/long path    | CI required     | Link replacement/Unicode/long-path local pass | Handle identity + junction tests configured; CI required | Unqualified   |
 | Raw-file/custom metadata/permissions/encryption | CI required     | Local pass + CI required             | ADS/metadata/encryption CI required           | Buildable     |
 | Native writes/recovery                          | Not implemented | Not implemented                      | Not implemented                               | Unsupported   |
 
