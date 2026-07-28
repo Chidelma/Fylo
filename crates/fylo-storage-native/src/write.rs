@@ -2180,6 +2180,12 @@ fn copy_durable(source: &Path, target: &Path) -> Result<(), NativeStorageError> 
         .map_err(NativeStorageError::io)?;
     output.sync_all().map_err(NativeStorageError::io)?;
     drop(output);
+    // Windows replaces an existing destination only when it is writable, and a
+    // retained tombstone is not, so restoring a before-image over one fails
+    // with "Access is denied" where POSIX simply renames.
+    if let Ok(existing) = fs::symlink_metadata(target) {
+        clear_readonly(target, &existing)?;
+    }
     fs::rename(scratch, target).map_err(NativeStorageError::io)?;
     sync_parent(target)
 }
