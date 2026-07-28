@@ -38,24 +38,27 @@ const rustDocument = await rustJson([
     '--id',
     document.id
 ])
-assertEqual(
-    rustDocument.document,
-    document.value[document.id],
-    'released document body in Rust'
-)
+assertEqual(rustDocument.document, document.value[document.id], 'released document body in Rust')
 assertEqual(rustDocument.metadata.id, document.id, 'released document ID in Rust')
 
 const protectedDocument = manifest.probes.protectedDocument
-const denied = await rustFailure([
-    'get',
-    '--root',
-    root,
-    '--collection',
-    protectedDocument.collection,
-    '--id',
-    protectedDocument.id
-])
-if (!denied.includes('EACCES')) throw new Error('Rust did not deny an unscoped protected read')
+// The recorder can only protect a record on a platform that has POSIX
+// ownership, so it stores the descriptor it applied — or nothing. Asserting a
+// denial the recording platform could not create would be asserting POSIX
+// ownership on Windows, which the storage contract explicitly refuses to
+// claim. Where no descriptor was applied, the read must instead succeed.
+if (protectedDocument.access) {
+    const denied = await rustFailure([
+        'get',
+        '--root',
+        root,
+        '--collection',
+        protectedDocument.collection,
+        '--id',
+        protectedDocument.id
+    ])
+    if (!denied.includes('EACCES')) throw new Error('Rust did not deny an unscoped protected read')
+}
 const protectedRecord = await rustJson([
     'get',
     '--root',
@@ -64,10 +67,14 @@ const protectedRecord = await rustJson([
     protectedDocument.collection,
     '--id',
     protectedDocument.id,
-    '--uid',
-    String(protectedDocument.access.uid),
-    '--groups',
-    String(protectedDocument.access.gid)
+    ...(protectedDocument.access
+        ? [
+              '--uid',
+              String(protectedDocument.access.uid),
+              '--groups',
+              String(protectedDocument.access.gid)
+          ]
+        : [])
 ])
 assertEqual(
     protectedRecord.document,
