@@ -148,6 +148,24 @@ function sha256(value) {
     return createHash('sha256').update(value).digest('hex')
 }
 
+/**
+ * A released binary predating the checksum-stamp fix recorded a record's mtime
+ * before writing its alternate data stream, and that write moved the time
+ * forward. The current engine reports what the file actually says, so on
+ * Windows the recorded value may legitimately be earlier. Only that direction
+ * is tolerated, and only there: an earlier actual, or any drift on a platform
+ * whose xattr writes leave mtime alone, is still a failure.
+ *
+ * @param {number} actual @param {number} expected @param {string} label
+ */
+function assertTimestampDrift(actual, expected, label) {
+    const drift = actual - expected
+    const releasedWindowsStamp = process.platform === 'win32' && drift > 0
+    if (!Number.isFinite(drift) || (Math.abs(drift) > 1 && !releasedWindowsStamp)) {
+        throw new Error(`${label} drift exceeds 1ms: ${drift}`)
+    }
+}
+
 function assertMetadataEqual(actual, expected, label, format) {
     if (format !== 'fylo.released-oracle.v1') {
         assertEqual(actual, expected, label)
@@ -158,10 +176,11 @@ function assertMetadataEqual(actual, expected, label, format) {
     const expectedStable = { ...expected }
     for (const field of timestampFields) {
         if (Object.hasOwn(expectedStable, field)) {
-            const drift = Math.abs(Number(actualStable[field]) - Number(expectedStable[field]))
-            if (!Number.isFinite(drift) || drift > 1) {
-                throw new Error(`${label} ${field} drift exceeds 1ms: ${drift}`)
-            }
+            assertTimestampDrift(
+                Number(actualStable[field]),
+                Number(expectedStable[field]),
+                `${label} ${field}`
+            )
         }
         delete actualStable[field]
         delete expectedStable[field]
@@ -176,17 +195,11 @@ function assertFileValueEqual(actual, expected, id, format) {
     }
     const actualRecord = actual[id]
     const expectedRecord = expected[id]
-    // A released binary predating the checksum-stamp fix recorded a raw file's
-    // mtime before writing its alternate data stream, and that write moved the
-    // time forward. The current engine reports what the file actually says, so
-    // on Windows the recorded value may legitimately be earlier. Only that
-    // direction is tolerated, and only there: an earlier actual, or any drift
-    // on a platform whose xattr writes leave mtime alone, is still a failure.
-    const drift = Number(actualRecord?.lastModified) - Number(expectedRecord?.lastModified)
-    const releasedWindowsStamp = process.platform === 'win32' && drift > 0
-    if (!Number.isFinite(drift) || (Math.abs(drift) > 1 && !releasedWindowsStamp)) {
-        throw new Error(`file probe lastModified drift exceeds 1ms: ${drift}`)
-    }
+    assertTimestampDrift(
+        Number(actualRecord?.lastModified),
+        Number(expectedRecord?.lastModified),
+        'file probe lastModified'
+    )
     assertEqual(
         { ...actual, [id]: { ...actualRecord, lastModified: 0 } },
         { ...expected, [id]: { ...expectedRecord, lastModified: 0 } },
