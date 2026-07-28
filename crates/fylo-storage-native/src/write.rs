@@ -1429,15 +1429,23 @@ impl<'a> Transaction<'a> {
         if self.finished {
             return Ok(());
         }
-        restore_captures(&self.collection.path, &self.root, &self.captures)?;
-        self.writer.rebuild_index(self.collection)?;
+        // A failed recovery is worse than the crash it recovers from, so each
+        // step names itself: an operator seeing only the platform's message has
+        // no way to tell which durable operation refused.
+        restore_captures(&self.collection.path, &self.root, &self.captures)
+            .map_err(|error| rollback_step("restoring captures", &error))?;
+        self.writer
+            .rebuild_index(self.collection)
+            .map_err(|error| rollback_step("rebuilding the index", &error))?;
         write_generation(
             self.writer,
             self.collection,
             &GenerationRecord::stable(self.manifest.generation_before.saturating_add(2)),
-        )?;
+        )
+        .map_err(|error| rollback_step("publishing the recovered generation", &error))?;
         self.finished = true;
         remove_dir_durable(&self.root)
+            .map_err(|error| rollback_step("removing the transaction directory", &error))
     }
 }
 
@@ -1750,6 +1758,13 @@ fn remove_capture_target(target: &Path) -> Result<bool, NativeStorageError> {
     Ok(true)
 }
 
+fn rollback_step(step: &str, error: &NativeStorageError) -> NativeStorageError {
+    NativeStorageError::new(
+        error.code(),
+        format!("recovery failed while {step}: {error}"),
+    )
+}
+
 fn restore_captures(
     collection_root: &Path,
     transaction_root: &Path,
@@ -1773,16 +1788,25 @@ fn restore_captures(
             )
         })?;
         let backup = transaction_root.join(safe_relative_path(backup)?);
+        let step = |name: &str, error: &NativeStorageError| {
+            NativeStorageError::new(
+                error.code(),
+                format!("{name} {}: {error}", target.to_string_lossy()),
+            )
+        };
         ensure_plain_parent(
             collection_root,
             target.parent().expect("capture has parent"),
-        )?;
-        copy_durable(&backup, &target)?;
-        restore_attributes(&target, capture.xattrs.as_deref().unwrap_or_default())?;
+        )
+        .map_err(|error| step("preparing the parent of", &error))?;
+        copy_durable(&backup, &target)
+            .map_err(|error| step("restoring the before-image of", &error))?;
+        restore_attributes(&target, capture.xattrs.as_deref().unwrap_or_default())
+            .map_err(|error| step("restoring the attributes of", &error))?;
         if let Some(mode) = capture.mode {
-            set_mode(&target, mode)?;
+            set_mode(&target, mode).map_err(|error| step("restoring the mode of", &error))?;
         }
-        sync_parent(&target)?;
+        sync_parent(&target).map_err(|error| step("flushing the parent of", &error))?;
     }
     Ok(())
 }
