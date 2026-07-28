@@ -1685,6 +1685,71 @@ fn read_captures(root: &Path) -> Result<Vec<Capture>, NativeStorageError> {
         .collect()
 }
 
+/// Clear the Windows read-only attribute so a rolled-back path can be deleted.
+///
+/// `set_readonly(false)` means something entirely different on Unix, where it
+/// widens the mode to world-writable, so this is deliberately not shared.
+// Clippy warns that this widens a Unix mode to world-writable. On Windows it
+// only clears FILE_ATTRIBUTE_READONLY and carries none of that meaning, which
+// is why the function exists per platform rather than shared.
+#[allow(clippy::permissions_set_readonly_false)]
+#[cfg(windows)]
+fn clear_readonly(target: &Path, metadata: &fs::Metadata) -> Result<(), NativeStorageError> {
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(target, permissions).map_err(NativeStorageError::io)?;
+    }
+    Ok(())
+}
+
+// The signature mirrors the Windows implementation so the caller stays
+// platform-free.
+#[allow(clippy::unnecessary_wraps)]
+#[cfg(not(windows))]
+fn clear_readonly(_target: &Path, _metadata: &fs::Metadata) -> Result<(), NativeStorageError> {
+    Ok(())
+}
+
+/// Delete a path a rolled-back transaction created, reporting whether it was
+/// there.
+///
+/// Windows refuses to delete a file carrying the read-only attribute and
+/// refuses `remove_file` on a directory, and reports both as "Access is
+/// denied", where POSIX needs only write permission on the parent. Recovery
+/// must not be stopped by either, so the read-only attribute is cleared and a
+/// directory is removed as one.
+fn remove_capture_target(target: &Path) -> Result<bool, NativeStorageError> {
+    match fs::remove_file(target) {
+        Ok(()) => return Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() != std::io::ErrorKind::PermissionDenied => {
+            return Err(NativeStorageError::io(error));
+        }
+        Err(_) => {}
+    }
+    let metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(NativeStorageError::io(error)),
+    };
+    if metadata.is_dir() {
+        fs::remove_dir(target).map_err(NativeStorageError::io)?;
+        return Ok(true);
+    }
+    clear_readonly(target, &metadata)?;
+    fs::remove_file(target).map_err(|error| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::Io,
+            format!(
+                "cannot remove rolled-back path {}: {error}",
+                target.to_string_lossy()
+            ),
+        )
+    })?;
+    Ok(true)
+}
+
 fn restore_captures(
     collection_root: &Path,
     transaction_root: &Path,
@@ -1694,10 +1759,10 @@ fn restore_captures(
         let relative = safe_relative_path(&capture.path)?;
         let target = collection_root.join(&relative);
         if !capture.present {
-            match fs::remove_file(&target) {
-                Ok(()) => sync_parent(&target)?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(NativeStorageError::io(error)),
+            match remove_capture_target(&target) {
+                Ok(true) => sync_parent(&target)?,
+                Ok(false) => {}
+                Err(error) => return Err(error),
             }
             continue;
         }
