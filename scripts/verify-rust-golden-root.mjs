@@ -89,10 +89,7 @@ try {
     )
     const deleted = manifest.probes.deleted
     assertEqual(
-        await collect(
-            database[deleted.collection].find.deleted(deleted.query),
-            manifest.format
-        ),
+        await collect(database[deleted.collection].find.deleted(deleted.query), manifest.format),
         deleted.value,
         'deleted-document probe'
     )
@@ -179,10 +176,15 @@ function assertFileValueEqual(actual, expected, id, format) {
     }
     const actualRecord = actual[id]
     const expectedRecord = expected[id]
-    const drift = Math.abs(
-        Number(actualRecord?.lastModified) - Number(expectedRecord?.lastModified)
-    )
-    if (!Number.isFinite(drift) || drift > 1) {
+    // A released binary predating the checksum-stamp fix recorded a raw file's
+    // mtime before writing its alternate data stream, and that write moved the
+    // time forward. The current engine reports what the file actually says, so
+    // on Windows the recorded value may legitimately be earlier. Only that
+    // direction is tolerated, and only there: an earlier actual, or any drift
+    // on a platform whose xattr writes leave mtime alone, is still a failure.
+    const drift = Number(actualRecord?.lastModified) - Number(expectedRecord?.lastModified)
+    const releasedWindowsStamp = process.platform === 'win32' && drift > 0
+    if (!Number.isFinite(drift) || (Math.abs(drift) > 1 && !releasedWindowsStamp)) {
         throw new Error(`file probe lastModified drift exceeds 1ms: ${drift}`)
     }
     assertEqual(
