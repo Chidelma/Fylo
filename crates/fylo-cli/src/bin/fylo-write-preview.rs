@@ -26,6 +26,11 @@ fn main() -> ExitCode {
 
 fn run(arguments: &[String]) -> Result<String, String> {
     let command = arguments.first().map(String::as_str).ok_or_else(usage)?;
+    if command == "failpoints" {
+        // The crash matrix enumerates this rather than keeping its own list.
+        return serde_json::to_string(&json!({ "failpoints": fylo_storage_native::FAILPOINTS }))
+            .map_err(|error| error.to_string());
+    }
     let root = required_option(arguments, "--root")?;
     let writer = NativeWriteRoot::open(root).map_err(|error| error.to_string())?;
     let mut result = Value::Null;
@@ -61,6 +66,15 @@ fn run(arguments: &[String]) -> Result<String, String> {
         }
         "set-metadata" | "set-access" => {
             run_metadata(command, arguments, &writer)?;
+            false
+        }
+        "restore-document" => {
+            let collection = required_option(arguments, "--collection")?;
+            let identifier = required_option(arguments, "--id")?;
+            let actor = actor(arguments)?;
+            writer
+                .restore_document(collection, identifier, actor.as_ref())
+                .map_err(|error| error.to_string())?;
             false
         }
         "delete-document" => {
@@ -337,7 +351,9 @@ fn usage() -> String {
      <name> --id <ttid> --record <json> [--actor-uid <uid> [--actor-groups <gid,...>]]\n  \
      fylo-write-preview set-access --root <path> --collection <name> --id <ttid> [--uid <uid>] \
      [--gid <gid>] [--mode <octal>] [--actor-uid <uid> [--actor-groups <gid,...>]]\n  \
-     fylo-write-preview commit --root <path> --message <message>"
+     fylo-write-preview commit --root <path> --message <message>\n  fylo-write-preview \
+     restore-document --root <path> --collection <name> --id <ttid> [--actor-uid <uid> \
+     [--actor-groups <gid,...>]]\n  fylo-write-preview failpoints"
         .into()
 }
 

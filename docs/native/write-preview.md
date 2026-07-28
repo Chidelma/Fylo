@@ -82,6 +82,21 @@ and the stamp stays self-consistent. A root written by an older release still
 carries a stamp taken before its stream write, so its mtime-derived index keys
 legitimately differ from a rebuild.
 
-This is not a supported writer. Exhaustive failpoints, disk-full and quota
-cases, Windows semantics, cloned-root replay, and native retained release
-evidence remain Phase 5 gates.
+## Crash matrix
+
+`bun run rust:crash:matrix` aborts the writer at every durable transition the
+binary declares and proves the root still recovers. The failpoint list comes
+from `fylo-write-preview failpoints`, not from the harness, and every declared
+point must be reached by some scenario — so a new failpoint cannot be added
+without either being exercised or failing this gate.
+
+For each interrupted mutation the gate asserts that recovery succeeds, that a
+second recovery reports no remaining work, that both collections read back with
+an index matching their documents, and that an untouched document survived.
+Whether the mutation applied or rolled back is deliberately not asserted: both
+are valid outcomes of a crash, and only the recovered state has to be one of
+them.
+
+This is not a supported writer. Disk-full and quota cases, Windows
+before-image streams, cloned-root replay, and native retained release evidence
+remain Phase 5 gates.

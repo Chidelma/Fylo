@@ -21,6 +21,7 @@ mod lease;
 mod write;
 
 pub use lease::RootLease;
+pub use write::FAILPOINTS;
 pub use write::version::RepositoryStatus;
 pub use write::{NativeWriteRoot, PutDocumentOptions, PutRawFileOptions, WriteAccess, WriteActor};
 pub use write::{SqlMutationResult, SqlMutationResultKind};

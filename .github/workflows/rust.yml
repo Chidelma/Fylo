@@ -272,6 +272,9 @@ jobs:
             - name: Verify native machine protocol conformance
               run: bun run rust:interop:machine
 
+            - name: Recover every interrupted native durable transition
+              run: bun run rust:crash:matrix
+
             - name: Benchmark current and native read-only engines
               run: >-
                   bun ./scripts/benchmark-rust-readonly.mjs

@@ -2458,7 +2458,33 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), NativeStorageError> {
     Ok(())
 }
 
+/// Every durable transition a crash test may interrupt.
+///
+/// The list is the contract the crash matrix enumerates, so a new failpoint
+/// must be declared here to be injectable — which is also what stops it from
+/// being added without coverage.
+pub const FAILPOINTS: [&str; 14] = [
+    "before-file-write",
+    "after-file-rename",
+    "after-file-sync",
+    "after-capture",
+    "after-state-writing",
+    "after-metadata-write",
+    "after-access-marker",
+    "after-chown",
+    "after-chmod",
+    "after-delete-rename",
+    "after-restore-rename",
+    "before-commit-marker",
+    "after-commit-marker",
+    "after-commit-object",
+];
+
 fn failpoint(name: &str) -> Result<(), NativeStorageError> {
+    debug_assert!(
+        FAILPOINTS.contains(&name),
+        "undeclared failpoint: {name}; add it to FAILPOINTS so the crash matrix covers it"
+    );
     if std::env::var("FYLO_RUST_FAILPOINT").ok().as_deref() != Some(name) {
         return Ok(());
     }
