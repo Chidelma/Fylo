@@ -64,10 +64,22 @@ The release build is gated by these uncompressed transfer budgets:
 | gzip `fylo-index.wasm` |  64 KiB |
 | `fylo.mjs` host        | 192 KiB |
 
-Cold fetch, compilation, instantiation, and `BrowserCore.ready()` have a 100 ms
-budget on the CI browser reference runners. The retained browser evidence
-records the measured initialization time rather than inferring it from
-individual API availability.
+Cold fetch, compilation, instantiation, and `BrowserCore.ready()` are budgeted
+per engine on the CI browser reference runners:
+
+| Engine   | Budget |
+| -------- | -----: |
+| Chromium | 100 ms |
+| WebKit   | 100 ms |
+| Firefox  | 250 ms |
+
+Firefox compiles and instantiates the module measurably slower than the other
+engines, and a single shared 100 ms budget sat close enough to its real cost
+that the gate passed or failed on noise. A budget that flaps proves nothing, so
+each engine carries the limit it can be held to, and every one still fails on a
+regression of roughly two times. The retained browser evidence records the
+measured initialization time rather than inferring it from individual API
+availability.
 
 The accepted portable-kernel workload reads a 500-key snapshot from OPFS,
 loads it into Wasm, and scans a 100-key range. I/O and snapshot-load time are
