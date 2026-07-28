@@ -333,6 +333,11 @@ impl NativeWriteRoot {
                 super::modified_millis(&metadata)?
             );
             write_fylo_attribute(&target, super::CHECKSUM_XATTR, stamp.as_bytes())?;
+            // Writing the stamp is itself a stream write on Windows, so it
+            // invalidates the mtime it just recorded. Restoring the recorded
+            // time makes the stamp self-consistent; on POSIX the attribute
+            // write never moved mtime, so this changes nothing.
+            restore_modified(&target, &metadata)?;
             transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
             transaction.capture(&collection.path.join("index").join("keys.wal"))?;
             self.rebuild_index(&collection)?;
@@ -2157,6 +2162,20 @@ fn sync_parent(path: &Path) -> Result<(), NativeStorageError> {
         NativeStorageError::new(NativeStorageErrorCode::Io, "storage path has no parent")
     })?;
     sync_directory(parent)
+}
+
+/// Force a file's modification time back to the value a checksum stamp
+/// recorded, so the stamp and the file agree on every platform.
+fn restore_modified(path: &Path, recorded: &fs::Metadata) -> Result<(), NativeStorageError> {
+    let modified = recorded.modified().map_err(NativeStorageError::io)?;
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(NativeStorageError::io)?;
+    let times = fs::FileTimes::new()
+        .set_accessed(modified)
+        .set_modified(modified);
+    file.set_times(times).map_err(NativeStorageError::io)
 }
 
 fn sync_directory(path: &Path) -> Result<(), NativeStorageError> {

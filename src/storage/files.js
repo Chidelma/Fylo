@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { utimesSync } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises'
 import TTID from '../vendor/ttid.js'
 import { assertPathInside, validateDocId } from '../core/doc-id.js'
@@ -408,6 +409,19 @@ export class FilesystemFiles {
      */
     stampChecksum(target, sha256, metadata) {
         setXattr(target, CHECKSUM_XATTR, `${sha256}:${metadata.size}:${metadata.mtimeMs}`)
+        // On Windows an alternate-data-stream write updates the file's
+        // last-write time, so writing this stamp invalidates the very mtime it
+        // just recorded: the cache would never hit, every read would rehash the
+        // whole file, and an index rebuild would derive a different
+        // `lastModified` than the one indexed. Restoring the recorded time
+        // makes the stamp self-consistent. A POSIX xattr write leaves mtime
+        // alone, so this is a no-op there.
+        const seconds = metadata.mtimeMs / 1000
+        try {
+            utimesSync(target, seconds, seconds)
+        } catch {
+            // Read-only target; the stamp is simply not cached.
+        }
     }
 
     /**

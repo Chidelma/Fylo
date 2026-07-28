@@ -76,10 +76,11 @@ On Windows, writing an alternate data stream updates the file's last-write
 time, where a POSIX xattr write leaves it alone. The native writer therefore
 writes every attribute before computing the checksum stamp, so the recorded
 mtime matches the file a later reader stats: otherwise the checksum cache would
-be permanently invalid and every read would rehash the whole file. A raw file
-written by the current JavaScript engine on Windows still carries a stamp taken
-before its stream write, so its mtime-derived index keys legitimately differ
-from a rebuild.
+be permanently invalid and every read would rehash the whole file. Writing the stamp is itself a stream write on
+Windows, so both engines now restore the recorded modification time afterwards
+and the stamp stays self-consistent. A root written by an older release still
+carries a stamp taken before its stream write, so its mtime-derived index keys
+legitimately differ from a rebuild.
 
 This is not a supported writer. Exhaustive failpoints, disk-full and quota
 cases, Windows semantics, cloned-root replay, and native retained release
