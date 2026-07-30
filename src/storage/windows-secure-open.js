@@ -262,14 +262,62 @@ function isMissingStatus(status) {
 }
 
 /**
- * Opens one name relative to a pinned directory. FILE_OPEN_REPARSE_POINT is
- * mandatory: a junction or symlink is returned as the reparse object itself,
- * and FILE_DIRECTORY_FILE/NON_DIRECTORY_FILE then rejects it fail-closed.
- * @param {any} parentFd
- * @param {string} name
- * @param {{ directory?: boolean, create?: boolean, flags?: number, mode?: number, deleteAccess?: boolean }} options
+ * Translates POSIX open flags into an NT access mask. A directory handle only
+ * ever needs read access.
+ * @param {{ directory?: boolean, deleteAccess?: boolean }} options
+ * @param {number} flags
+ * @returns {number}
  */
-function ntOpenRelative(parentFd, name, options = {}) {
+function ntAccessMask(options, flags) {
+    let access =
+        WINDOWS_NATIVE_CONSTANTS.FILE_READ_ATTRIBUTES | WINDOWS_NATIVE_CONSTANTS.SYNCHRONIZE
+    if (options.directory) access |= WINDOWS_NATIVE_CONSTANTS.FILE_READ_DATA
+    else if (flags & constants.O_RDWR) {
+        access |=
+            WINDOWS_NATIVE_CONSTANTS.FILE_READ_DATA |
+            WINDOWS_NATIVE_CONSTANTS.FILE_WRITE_DATA |
+            WINDOWS_NATIVE_CONSTANTS.FILE_WRITE_ATTRIBUTES
+    } else if (flags & constants.O_WRONLY) {
+        access |=
+            WINDOWS_NATIVE_CONSTANTS.FILE_WRITE_DATA |
+            WINDOWS_NATIVE_CONSTANTS.FILE_WRITE_ATTRIBUTES
+    } else access |= WINDOWS_NATIVE_CONSTANTS.FILE_READ_DATA
+    if (options.deleteAccess) access |= WINDOWS_NATIVE_CONSTANTS.DELETE
+    return access
+}
+
+/**
+ * `O_EXCL` demands creation, plain create opens-or-creates, and otherwise the
+ * file must already exist.
+ * @param {{ create?: boolean }} options
+ * @param {number} flags
+ * @returns {number}
+ */
+function ntDisposition(options, flags) {
+    if (options.create && flags & constants.O_EXCL) return WINDOWS_NATIVE_CONSTANTS.FILE_CREATE
+    if (options.create) return WINDOWS_NATIVE_CONSTANTS.FILE_OPEN_IF
+    return WINDOWS_NATIVE_CONSTANTS.FILE_OPEN
+}
+
+/**
+ * Always opens the reparse point itself rather than its target, so a junction
+ * cannot redirect a rooted open outside the root.
+ * @param {{ directory?: boolean }} options
+ * @returns {number}
+ */
+function ntCreateOptions(options) {
+    let createOptions =
+        WINDOWS_NATIVE_CONSTANTS.FILE_SYNCHRONOUS_IO_NONALERT |
+        WINDOWS_NATIVE_CONSTANTS.FILE_OPEN_REPARSE_POINT
+    if (options.directory === true) createOptions |= WINDOWS_NATIVE_CONSTANTS.FILE_DIRECTORY_FILE
+    if (options.directory === false) {
+        createOptions |= WINDOWS_NATIVE_CONSTANTS.FILE_NON_DIRECTORY_FILE
+    }
+    return createOptions
+}
+
+/** @param {string} name */
+function assertSafePathComponent(name) {
     if (
         !name ||
         name === '.' ||
@@ -280,6 +328,18 @@ function ntOpenRelative(parentFd, name, options = {}) {
     ) {
         throw new Error(`Unsafe rooted path component: ${name}`)
     }
+}
+
+/**
+ * Opens one name relative to a pinned directory. FILE_OPEN_REPARSE_POINT is
+ * mandatory: a junction or symlink is returned as the reparse object itself,
+ * and FILE_DIRECTORY_FILE/NON_DIRECTORY_FILE then rejects it fail-closed.
+ * @param {any} parentFd
+ * @param {string} name
+ * @param {{ directory?: boolean, create?: boolean, flags?: number, mode?: number, deleteAccess?: boolean }} options
+ */
+function ntOpenRelative(parentFd, name, options = {}) {
+    assertSafePathComponent(name)
     const api = symbols()
     const encoded = wide(name)
     const unicode = Buffer.alloc(WINDOWS_NATIVE_LAYOUT.unicodeStringBytes)
@@ -303,32 +363,9 @@ function ntOpenRelative(parentFd, name, options = {}) {
     const output = Buffer.alloc(8)
     const io = Buffer.alloc(WINDOWS_NATIVE_LAYOUT.ioStatusBlockBytes)
     const flags = options.flags ?? constants.O_RDONLY
-    let access =
-        WINDOWS_NATIVE_CONSTANTS.FILE_READ_ATTRIBUTES | WINDOWS_NATIVE_CONSTANTS.SYNCHRONIZE
-    if (options.directory) access |= WINDOWS_NATIVE_CONSTANTS.FILE_READ_DATA
-    else if (flags & constants.O_RDWR) {
-        access |=
-            WINDOWS_NATIVE_CONSTANTS.FILE_READ_DATA |
-            WINDOWS_NATIVE_CONSTANTS.FILE_WRITE_DATA |
-            WINDOWS_NATIVE_CONSTANTS.FILE_WRITE_ATTRIBUTES
-    } else if (flags & constants.O_WRONLY) {
-        access |=
-            WINDOWS_NATIVE_CONSTANTS.FILE_WRITE_DATA |
-            WINDOWS_NATIVE_CONSTANTS.FILE_WRITE_ATTRIBUTES
-    } else access |= WINDOWS_NATIVE_CONSTANTS.FILE_READ_DATA
-    if (options.deleteAccess) access |= WINDOWS_NATIVE_CONSTANTS.DELETE
-
-    /** @type {number} */
-    let disposition = WINDOWS_NATIVE_CONSTANTS.FILE_OPEN
-    if (options.create && flags & constants.O_EXCL)
-        disposition = WINDOWS_NATIVE_CONSTANTS.FILE_CREATE
-    else if (options.create) disposition = WINDOWS_NATIVE_CONSTANTS.FILE_OPEN_IF
-    let createOptions =
-        WINDOWS_NATIVE_CONSTANTS.FILE_SYNCHRONOUS_IO_NONALERT |
-        WINDOWS_NATIVE_CONSTANTS.FILE_OPEN_REPARSE_POINT
-    if (options.directory === true) createOptions |= WINDOWS_NATIVE_CONSTANTS.FILE_DIRECTORY_FILE
-    if (options.directory === false)
-        createOptions |= WINDOWS_NATIVE_CONSTANTS.FILE_NON_DIRECTORY_FILE
+    const access = ntAccessMask(options, flags)
+    const disposition = ntDisposition(options, flags)
+    const createOptions = ntCreateOptions(options)
     const status = api.NtCreateFile(
         ptr(output),
         access,
@@ -585,8 +622,34 @@ export function windowsOpenRenameableFileAtRootWithFlags(rootFd, relative, flags
 }
 
 /** @param {any} rootFd @param {string} relative @param {boolean} directory */
+/**
+ * Whether a secure-open failure means the path simply is not there.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isMissingError(error) {
+    const code = /** @type {NodeJS.ErrnoException} */ (error)?.code
+    if (code === 'ENOENT') return true
+    const message = error instanceof Error ? error.message : ''
+    // STATUS_OBJECT_NAME_NOT_FOUND / STATUS_OBJECT_PATH_NOT_FOUND.
+    return message.includes('0xc0000034') || message.includes('0xc000003a')
+}
+
 export function windowsUnlinkAtRoot(rootFd, relative, directory = false) {
-    const parent = openParent(rootFd, relative, false)
+    let parent
+    try {
+        parent = openParent(rootFd, relative, false)
+    } catch (error) {
+        // A missing parent directory means the entry is already absent, the
+        // same outcome `isMissingStatus` handles for the entry itself below.
+        // Records shard by their trailing creation characters, so a shard
+        // directory may never have been created; the previous layout put
+        // everything written in a four-month window in one directory, which
+        // always existed and hid this case.
+        if (isMissingError(error)) return
+        throw error
+    }
     let descriptor = null
     try {
         const opened = ntOpenRelative(parent.fd, parent.name, { directory, deleteAccess: true })
