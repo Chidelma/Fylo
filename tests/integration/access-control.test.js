@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import Fylo, { FyloPermissionError } from '../../src/index.js'
@@ -21,7 +22,7 @@ const fylo = new Fylo(root, {
 })
 
 function documentPath(collection, id) {
-    return path.join(root, '.collections', collection, 'docs', id.slice(0, 2), `${id}.json`)
+    return path.join(root, '.collections', collection, 'docs', shardOf(id), `${id}.json`)
 }
 
 describe.skipIf(uid === undefined)('per-document POSIX access control', () => {
@@ -208,7 +209,7 @@ describe.skipIf(uid === undefined)('per-document POSIX access control', () => {
         const id = await fylo.files
             .put(new File(['private bytes'], 'private.txt', { type: 'text/plain' }))
             .as({ uid, mode: 0o600 })
-        const target = path.join(root, '.buckets', 'files', 'docs', id.slice(0, 2), `${id}.txt`)
+        const target = path.join(root, '.buckets', 'files', 'docs', shardOf(id), `${id}.txt`)
         const metadata = await stat(target)
 
         expect(metadata.uid).toBe(uid)
@@ -392,7 +393,7 @@ describe.skipIf(uid === undefined)('per-document POSIX access control', () => {
                 '.collections',
                 'documents',
                 'docs',
-                id.slice(0, 2),
+                shardOf(id),
                 `${id}.json`
             )
             const info = await stat(target)

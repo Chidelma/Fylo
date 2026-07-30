@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { appendFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -140,7 +141,7 @@ describe('crash recovery and concurrency', () => {
             // target is never half-written.
             expect(docFiles.length).toBeGreaterThan(0)
             for (const file of docFiles) {
-                const bucket = file.slice(0, 2)
+                const bucket = shardOf(path.parse(file).name)
                 const raw = await Bun.file(path.join(docsRoot, bucket, file)).text()
                 const parsed = JSON.parse(raw)
                 expect(typeof parsed).toBe('object')

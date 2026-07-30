@@ -97,6 +97,15 @@ local window because the process remained asleep on the synchronized Dropbox
 filesystem. No TypeScript error was emitted; this is an environmental
 non-result and must be rerun on ordinary CI storage.
 
+## Open format work
+
+ADR 0006 changed record sharding from the leading to the trailing characters of
+an identifier's creation segment. Measured: 4000 consecutive TTIDs produced one
+leading-pair bucket and 646 trailing-pair buckets. Both engines write the
+canonical shard and read either, so an existing root stays readable and
+converges as records are rewritten. The bulk `migrate-shards` command, its
+interrupted-migration crash case, and the downgrade path are outstanding.
+
 ## Promotion discipline
 
 Later phases may accumulate additive contracts and harnesses, but the native

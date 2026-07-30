@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { rm, stat, writeFile } from 'node:fs/promises'
 import { readdirSync } from 'node:fs'
 import path from 'node:path'
@@ -43,14 +44,7 @@ describe('filesystem engine', () => {
             tags: ['bun', 'storage'],
             meta: { score: 1 }
         })
-        const activePath = path.join(
-            root,
-            '.collections',
-            POSTS,
-            'docs',
-            id.slice(0, 2),
-            `${id}.json`
-        )
+        const activePath = path.join(root, '.collections', POSTS, 'docs', shardOf(id), `${id}.json`)
         const createdTime = (await stat(activePath)).mtimeMs
         const created = await fylo[POSTS].get(id).once()
         expect(created[id].title).toBe('Hello')
@@ -72,7 +66,7 @@ describe('filesystem engine', () => {
             '.collections',
             POSTS,
             '.deleted',
-            id.slice(0, 2),
+            shardOf(id),
             `${id}.json`
         )
         expect(await Bun.file(activePath).exists()).toBe(false)
@@ -357,7 +351,7 @@ describe('filesystem engine', () => {
         const id = await fylo[POSTS].put({ title: 'Timestamp v1' })
         await Bun.sleep(10)
         await fylo[POSTS].patch(id, { title: 'Timestamp v2' })
-        const target = path.join(root, '.collections', POSTS, 'docs', id.slice(0, 2), `${id}.json`)
+        const target = path.join(root, '.collections', POSTS, 'docs', shardOf(id), `${id}.json`)
         const updatedAt = (await stat(target)).mtimeMs
         const results = []
         for await (const doc of fylo[POSTS].find({ $updated: { $gte: updatedAt } }).collect()) {
@@ -367,7 +361,7 @@ describe('filesystem engine', () => {
     })
     test('delete listeners filter using stored document timestamps', async () => {
         const id = await fylo[POSTS].put({ title: 'Deleted timestamp' })
-        const target = path.join(root, '.collections', POSTS, 'docs', id.slice(0, 2), `${id}.json`)
+        const target = path.join(root, '.collections', POSTS, 'docs', shardOf(id), `${id}.json`)
         const updatedAt = (await stat(target)).mtimeMs
         const deletes = fylo[POSTS].find({
             $ops: [{ title: { $eq: 'Deleted timestamp' } }],
@@ -394,7 +388,7 @@ describe('filesystem engine', () => {
             '.collections',
             POSTS,
             '.deleted',
-            id.slice(0, 2),
+            shardOf(id),
             `${id}.json`
         )
         const deletedMetadata = await stat(deletedPath)
@@ -417,14 +411,7 @@ describe('filesystem engine', () => {
 
         await fylo[POSTS].restore(id)
 
-        const activePath = path.join(
-            root,
-            '.collections',
-            POSTS,
-            'docs',
-            id.slice(0, 2),
-            `${id}.json`
-        )
+        const activePath = path.join(root, '.collections', POSTS, 'docs', shardOf(id), `${id}.json`)
         expect(await Bun.file(deletedPath).exists()).toBe(false)
         const restoredMode = (await stat(activePath)).mode & 0o777
         expect(restoredMode & 0o222).not.toBe(0)
@@ -479,7 +466,7 @@ describe('filesystem engine', () => {
             body: 'payload only'
         })
         const raw = await Bun.file(
-            path.join(root, '.collections', POSTS, 'docs', id.slice(0, 2), `${id}.json`)
+            path.join(root, '.collections', POSTS, 'docs', shardOf(id), `${id}.json`)
         ).json()
 
         expect(raw).toEqual({

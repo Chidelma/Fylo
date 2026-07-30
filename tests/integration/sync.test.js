@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { rm } from 'node:fs/promises'
 import path from 'node:path'
 import Fylo, { FyloSyncError } from '../../src/index.js'
@@ -43,7 +44,7 @@ describe('sync hooks', () => {
             '.collections',
             collection,
             '.deleted',
-            id.slice(0, 2),
+            shardOf(id),
             `${id}.json`
         )
 
@@ -58,7 +59,7 @@ describe('sync hooks', () => {
                     '.collections',
                     collection,
                     'docs',
-                    id.slice(0, 2),
+                    shardOf(id),
                     `${id}.json`
                 ),
                 data: { title: 'Hello sync' }
@@ -73,7 +74,7 @@ describe('sync hooks', () => {
                     '.collections',
                     collection,
                     'docs',
-                    id.slice(0, 2),
+                    shardOf(id),
                     `${id}.json`
                 ),
                 data: { title: 'Hello sync 2' }
@@ -89,7 +90,7 @@ describe('sync hooks', () => {
                     '.collections',
                     collection,
                     'docs',
-                    id.slice(0, 2),
+                    shardOf(id),
                     `${id}.json`
                 )
             },
@@ -103,7 +104,7 @@ describe('sync hooks', () => {
                     '.collections',
                     collection,
                     'docs',
-                    id.slice(0, 2),
+                    shardOf(id),
                     `${id}.json`
                 ),
                 data: { title: 'Hello sync 2' }
@@ -150,7 +151,7 @@ describe('sync hooks', () => {
                     '.collections',
                     collection,
                     'docs',
-                    id.slice(0, 2),
+                    shardOf(id),
                     `${id}.json`
                 ),
                 data: { title: 'Hello worm sync' }

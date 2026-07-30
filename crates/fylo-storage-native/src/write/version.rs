@@ -443,7 +443,7 @@ fn write_tree(
             .or_default()
             .entry(namespace_directory(entry.namespace))
             .or_default()
-            .entry(entry.identifier.chars().take(2).collect())
+            .entry(crate::shard_of(&entry.identifier))
             .or_default()
             .insert(entry.filename.clone(), entry.hash.clone());
     }

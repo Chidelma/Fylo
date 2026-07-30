@@ -1,4 +1,5 @@
 import TTID from '../vendor/ttid.mjs'
+import { legacyShardOf, shardOf } from '../../core/shard.js'
 import { copySafeJson, safeRecord } from '../../query/safe-record.js'
 import { assertPathInside, join } from './path.js'
 
@@ -51,7 +52,7 @@ export class BrowserMetadataStore {
     path(collection, id) {
         if (!TTID.isTTID(id)) throw new Error(`Invalid document ID: ${id}`)
         const root = this.root(collection)
-        const target = join(root, id.slice(0, 2), `${id}.json`)
+        const target = join(root, shardOf(id), `${id}.json`)
         assertPathInside(root, target)
         return target
     }
@@ -85,7 +86,7 @@ export class BrowserMetadataStore {
     /** @param {string} collection @param {string} id @param {Record<string, any>} values @param {number} updatedAt */
     async write(collection, id, values, updatedAt) {
         const target = this.path(collection, id)
-        await this.fs.mkdir(join(this.root(collection), id.slice(0, 2)), { recursive: true })
+        await this.fs.mkdir(join(this.root(collection), shardOf(id)), { recursive: true })
         await this.fs.writeText(target, JSON.stringify({ values, updatedAt }))
         return { values, updatedAt }
     }

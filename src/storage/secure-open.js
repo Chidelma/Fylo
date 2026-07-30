@@ -472,7 +472,19 @@ export function unlinkAtRoot(rootFd, relative, directory = false) {
     const loaded = secureOpenSymbols()
     const unlinkat = loaded?.unlinkat
     if (!unlinkat) throw new Error('Secure rooted unlink is unavailable on this platform')
-    const parent = openParentAtRoot(rootFd, relative)
+    let parent
+    try {
+        parent = openParentAtRoot(rootFd, relative)
+    } catch (error) {
+        // A missing parent directory means the entry is already absent, which
+        // is the same outcome `unlinkat` reports as ENOENT below. Records are
+        // sharded by their trailing creation characters, so a directory may
+        // never have been created at all; the previous layout put everything
+        // written in a four-month window in one directory, which always
+        // existed and hid this case.
+        if (/** @type {NodeJS.ErrnoException} */ (error)?.code === 'ENOENT') return
+        throw error
+    }
     try {
         const AT_REMOVEDIR = process.platform === 'darwin' ? 0x80 : 0x200
         const result = unlinkat(parent.fd, ptr(cstr(parent.name)), directory ? AT_REMOVEDIR : 0)

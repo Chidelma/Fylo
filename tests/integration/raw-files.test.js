@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -19,14 +20,7 @@ describe('raw file collections', () => {
         const source = new File(['hello raw file'], 'greeting.txt', { type: 'text/plain' })
 
         const id = await fylo.assets.put(source)
-        const storedPath = path.join(
-            root,
-            '.buckets',
-            'assets',
-            'docs',
-            id.slice(0, 2),
-            `${id}.txt`
-        )
+        const storedPath = path.join(root, '.buckets', 'assets', 'docs', shardOf(id), `${id}.txt`)
 
         expect(await Bun.file(storedPath).text()).toBe('hello raw file')
         expect((await fylo.assets.inspect()).kind).toBe('file')
@@ -64,7 +58,7 @@ describe('raw file collections', () => {
         const id = await Fylo.uniqueTTID()
         const outside = path.join(root, 'outside-secret.txt')
         await writeFile(outside, 'must not escape')
-        const bucket = path.join(root, '.buckets', 'links', 'docs', id.slice(0, 2))
+        const bucket = path.join(root, '.buckets', 'links', 'docs', shardOf(id))
         await mkdir(bucket, { recursive: true })
         await symlink(outside, path.join(bucket, `${id}.txt`))
 
@@ -143,20 +137,13 @@ describe('raw file collections', () => {
         const id = await fylo.assets.put(new File(['restore me'], 'restore.txt'), {
             key: '/archive/restore.txt'
         })
-        const activePath = path.join(
-            root,
-            '.buckets',
-            'assets',
-            'docs',
-            id.slice(0, 2),
-            `${id}.txt`
-        )
+        const activePath = path.join(root, '.buckets', 'assets', 'docs', shardOf(id), `${id}.txt`)
         const deletedPath = path.join(
             root,
             '.buckets',
             'assets',
             '.deleted',
-            id.slice(0, 2),
+            shardOf(id),
             `${id}.txt`
         )
 
@@ -234,7 +221,7 @@ describe('raw file collections', () => {
                 '.buckets',
                 'evidence',
                 'docs',
-                id.slice(0, 2),
+                shardOf(id),
                 `${id}.bin`
             )
 

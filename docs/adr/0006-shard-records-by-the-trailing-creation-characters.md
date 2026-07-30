@@ -1,0 +1,71 @@
+# ADR 0006: Shard records by the trailing creation characters
+
+- Status: **accepted**
+- Date: **2026-07-28**
+- Supersedes: the leading-character shard layout used since the first release
+
+## Context
+
+Documents and raw files are stored under a two-character shard directory
+derived from their TTID. That shard was the identifier's first two characters.
+
+A TTID is base36 of 100 ns ticks. Its characters therefore roll over at wildly
+different rates:
+
+| Character | Rolls over every |
+| --------- | ---------------: |
+| 1         |       11.6 years |
+| 2         |         117 days |
+| 10        |           3.6 µs |
+| 11        |           100 ns |
+
+The first two characters are effectively constant, so every record written in a
+roughly four-month window shared one directory. Generating 4000 consecutive
+TTIDs produces exactly **one** distinct leading pair and **646** distinct
+trailing pairs, with 1 to 16 records per trailing bucket.
+
+The layout therefore carried the whole cost of sharding — an extra path
+component, a directory level to traverse, a shard to compute — while providing
+none of its benefit. Every filesystem limit sharding exists to avoid was still
+directly ahead, and would arrive as a single unbounded directory.
+
+## Decision
+
+Shard on the **last two characters of the identifier's creation segment**.
+
+The shard must be taken from the creation segment rather than the raw string.
+An identifier may carry `created-updated-deleted` lifecycle segments, so
+sharding the whole string would move a record between directories when it is
+updated or deleted, silently orphaning it.
+
+Content-addressed version objects keep their leading-character shard. A
+SHA-256 hex digest is already uniform, so the leading characters are the
+correct choice there and nothing about them changes.
+
+## Consequences
+
+The layout yields 1296 uniformly used buckets. Write locality is lost:
+consecutive writes scatter instead of landing together. FYLO tolerates this
+because queries are answered from the prefix index rather than by walking
+directories, and full scans are index rebuilds that are linear regardless. The
+cost lands on the S3 mirror, whose new objects now spread across shards rather
+than concentrating in the newest directory.
+
+This is a storage-format change. For the published compatibility window a
+point lookup tries the canonical shard and then the superseded one, so a root
+written before this change stays readable and a partly migrated root — the
+state a crash during migration leaves — is readable throughout. Enumeration is
+unaffected either way, because it walks whichever shard directories exist.
+
+Writers always use the canonical shard, so a root converges on the new layout
+as its records are rewritten. A bulk `migrate-shards` command is **not yet
+delivered**; until it is, an existing root is read through the fallback and
+migrates only as records are written. Because documents are the source of truth
+and indexes are derived, that command is a rename plus an index rebuild under
+the existing collection transaction journal, and it never rewrites a record's
+contents.
+
+Rollback to a release predating this ADR is safe for any root whose records
+still sit in the superseded layout. A root that has already written records
+under the canonical shard needs the bulk command running in reverse, so the
+downgrade window is open only until that command exists and is used.

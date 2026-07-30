@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { readdir, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import Fylo from '../../src/index.js'
@@ -107,7 +108,7 @@ describe('developer metadata (xattrs)', () => {
 
         expect(await fylo['atomic-assets'].get(id).once()).toEqual({})
         await expect(fylo['atomic-assets'].get(id).metadata()).rejects.toThrow('Raw file not found')
-        const bucket = path.join(root, '.buckets', 'atomic-assets', 'docs', id.slice(0, 2))
+        const bucket = path.join(root, '.buckets', 'atomic-assets', 'docs', shardOf(id))
         expect(await readdir(bucket).catch(() => [])).toEqual([])
         expect(
             await Array.fromAsync(
@@ -156,7 +157,7 @@ describe('developer metadata (xattrs)', () => {
             '.buckets',
             'atomic-failure',
             'docs',
-            id.slice(0, 2),
+            shardOf(id),
             `${id}.bin`
         )
         await storage.delete(target)

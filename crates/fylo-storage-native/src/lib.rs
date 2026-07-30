@@ -690,7 +690,11 @@ impl VersionTreeEntry {
             }
             VersionTreeLevel::Blob => raw_file_identifier(&self.name).is_some_and(|identifier| {
                 validate_ttid_shape(identifier).is_ok()
-                    && expected_shard.is_some_and(|shard| identifier.starts_with(shard))
+                    && expected_shard.is_some_and(|shard| {
+                        // A tree written before the shard change buckets by the
+                        // leading characters, so an old commit stays verifiable.
+                        shard == shard_of(identifier) || shard == legacy_shard_of(identifier)
+                    })
             }),
         };
         if valid_name && valid_kind && valid_level {
@@ -925,12 +929,7 @@ impl NativeCollection {
                     continue;
                 };
                 validate_ttid_shape(identifier)?;
-                if !identifier.starts_with(
-                    shard_path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or_default(),
-                ) {
+                if !shard_matches(identifier, &shard_path) {
                     return Err(NativeStorageError::new(
                         NativeStorageErrorCode::InvalidDocumentId,
                         "document identifier does not match its shard",
@@ -1010,7 +1009,7 @@ impl NativeCollection {
                 };
                 validate_ttid_shape(identifier)?;
                 validate_raw_extension(filename, identifier)?;
-                if !identifier.starts_with(shard_name) {
+                if shard_name != shard_of(identifier) && shard_name != legacy_shard_of(identifier) {
                     return Err(NativeStorageError::new(
                         NativeStorageErrorCode::InvalidDocumentId,
                         "raw-file identifier does not match its shard",
@@ -1095,9 +1094,7 @@ impl NativeCollection {
         namespace: &Path,
         identifier: &str,
     ) -> Result<StoredBytes, NativeStorageError> {
-        let path = namespace
-            .join(&identifier[..2])
-            .join(format!("{identifier}.json"));
+        let path = existing_shard_path(namespace, identifier, &format!("{identifier}.json"))?;
         let (mut file, metadata) = self.root.open_file(&path, MAX_DOCUMENT_BYTES)?;
         let attributes = read_fylo_attributes(&file, &path)?;
         let bytes = read_bounded(
@@ -1205,7 +1202,10 @@ impl NativeCollection {
         namespace: &Path,
         identifier: &str,
     ) -> Result<PathBuf, NativeStorageError> {
-        let shard = namespace.join(&identifier[..2]);
+        let mut shard = namespace.join(shard_of(identifier));
+        if !path_exists_no_follow(&shard)? {
+            shard = namespace.join(legacy_shard_of(identifier));
+        }
         if !path_exists_no_follow(&shard)? {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::NotFound,
@@ -2232,6 +2232,82 @@ fn validate_version_hash(hash: &str) -> Result<(), NativeStorageError> {
             "FYLO version object hash is invalid",
         ))
     }
+}
+
+/// On-disk shard directory for a record.
+///
+/// The shard is the last two characters of the identifier's *creation*
+/// segment. A TTID is base36 100 ns ticks, so its leading characters barely
+/// move — the second rolls over roughly every 117 days, which put every record
+/// written in a four-month window into one directory. The trailing characters
+/// roll every 100 ns and 3.6 us, giving 1296 uniformly used buckets.
+///
+/// It must be the creation segment: an identifier may carry
+/// `created-updated-deleted` lifecycle segments, and sharding the raw string
+/// would move a record between directories when it is updated or deleted.
+#[must_use]
+pub fn shard_of(identifier: &str) -> String {
+    let created = creation_segment(identifier);
+    let shard: String = created
+        .chars()
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if shard.len() < 2 {
+        format!("{shard:0>2}")
+    } else {
+        shard
+    }
+}
+
+/// Shard a record occupies under the superseded layout, which used the leading
+/// characters. Readers try this after [`shard_of`] so a root written before the
+/// change stays readable through the published compatibility window.
+#[must_use]
+pub fn legacy_shard_of(identifier: &str) -> String {
+    creation_segment(identifier).chars().take(2).collect()
+}
+
+/// Resolve a record's path under its shard.
+///
+/// A root written before the shard change keeps its records under the leading
+/// characters, so a path that does not exist canonically falls back to the
+/// superseded location. That keeps an unmigrated root readable, and a partly
+/// migrated one — the state an interrupted migration leaves — as well. A record
+/// in neither resolves to the canonical path so writes always land there.
+/// Whether a record sits in a shard directory it may legitimately occupy.
+///
+/// Either the canonical shard or the superseded leading-character one is
+/// accepted while the compatibility window is open; anything else means the
+/// record was moved by something other than FYLO.
+fn shard_matches(identifier: &str, shard_path: &Path) -> bool {
+    let Some(shard) = shard_path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    shard == shard_of(identifier) || shard == legacy_shard_of(identifier)
+}
+
+fn existing_shard_path(
+    namespace: &Path,
+    identifier: &str,
+    filename: &str,
+) -> Result<PathBuf, NativeStorageError> {
+    let canonical = namespace.join(shard_of(identifier)).join(filename);
+    if path_exists_no_follow(&canonical)? {
+        return Ok(canonical);
+    }
+    let legacy = namespace.join(legacy_shard_of(identifier)).join(filename);
+    if path_exists_no_follow(&legacy)? {
+        return Ok(legacy);
+    }
+    Ok(canonical)
+}
+
+fn creation_segment(identifier: &str) -> &str {
+    identifier.split('-').next().unwrap_or(identifier)
 }
 
 fn validate_ttid_shape(identifier: &str) -> Result<(), NativeStorageError> {

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { shardOf } from '../core/doc-id.js'
 import { cp, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -1265,7 +1266,7 @@ export class VersionRepository {
     /**
      * Builds the full nested tree from a flat document map, writing every tree
      * node, and returns the root hash (null for an empty tree). The hierarchy is
-     * collection → namespace (`docs`/`.deleted`) → bucket (`id.slice(0,2)`) →
+     * collection → namespace (`docs`/`.deleted`) → bucket (`shardOf(id)`) →
      * document blob, mirroring the on-disk shard layout.
      *
      * @param {Map<string, DocumentTreeEntry>} flatTree
@@ -1279,7 +1280,7 @@ export class VersionRepository {
             const namespace = namespaceForVersionedKind(entry.kind)
             getOrCreate(
                 getOrCreate(getOrCreate(grouped, entry.collection), namespace),
-                entry.id.slice(0, 2)
+                shardOf(entry.id)
             ).set(path.basename(entry.path), entry.hash)
         }
         /** @type {Map<string, { type: 'tree' | 'blob', hash: string }>} */
@@ -1392,7 +1393,7 @@ export class VersionRepository {
             if (seen.has(dedupeKey)) continue
             seen.add(dedupeKey)
             if (!(await this.isVersionedCollection(change.collection))) continue
-            const bucket = id.slice(0, 2)
+            const bucket = shardOf(id)
             const changeDataDir = await this.collectionDataDir(change.collection)
             /** @type {string | null} */
             let documentPath = null
@@ -1619,54 +1620,19 @@ export class VersionRepository {
                 }
                 await this.writeMaterializationManifest(transactionRoot, manifest)
                 try {
-                    for (const entry of tree.values()) {
-                        if (!(await this.isVersionedCollection(entry.collection))) continue
-                        if (entry.kind === 'metadata') continue
-                        const target = path.join(stageRoot, entry.path)
-                        assertPathInside(stageRoot, target)
-                        await writeDurable(target, /** @type {Buffer} */ (objects.get(entry.hash)))
-                    }
-                    for (const entry of metadataEntries) {
-                        const target = await findMaterializedFile(stageRoot, entry)
-                        if (!target) continue
-                        await applyXattrBlob(
-                            target,
-                            /** @type {Buffer} */ (objects.get(entry.hash))
-                        )
-                    }
-                    if (collections.size > 0) {
-                        const engine = new FilesystemEngine(stageRoot, {
-                            catalogRoot: this.root,
-                            repositoryGate: false
-                        })
-                        for (const collection of collections.keys()) {
-                            await engine.ensureCollection(collection)
-                            await engine.rebuildCollection(collection)
-                        }
-                    }
+                    await this.stageMaterializedTree(stageRoot, tree, objects, metadataEntries)
+                    await this.rebuildStagedCollections(stageRoot, collections)
                     manifest.phase = 'staged'
                     await this.writeMaterializationManifest(transactionRoot, manifest)
                     manifest.phase = 'swapping'
                     await this.writeMaterializationManifest(transactionRoot, manifest)
 
-                    for (const target of manifest.targets) {
-                        const current = path.join(targetRoot, target.relative)
-                        const staged = path.join(stageRoot, target.relative)
-                        const backup = path.join(backupRoot, target.relative)
-                        assertPathInside(targetRoot, current)
-                        assertPathInside(transactionRoot, staged)
-                        assertPathInside(transactionRoot, backup)
-                        if (target.hadCurrent) {
-                            await mkdir(path.dirname(backup), { recursive: true })
-                            await renameDurable(current, backup)
-                            manifest.phase = 'backup-moved'
-                            await this.writeMaterializationManifest(transactionRoot, manifest)
-                        }
-                        if (await exists(staged)) {
-                            await mkdir(path.dirname(current), { recursive: true })
-                            await renameDurable(staged, current)
-                        }
-                    }
+                    await this.swapMaterializedTargets(manifest, {
+                        transactionRoot,
+                        targetRoot,
+                        stageRoot,
+                        backupRoot
+                    })
                     manifest.phase = 'installed'
                     await this.writeMaterializationManifest(transactionRoot, manifest)
                     if (manifest.ref) await this.writeRef(manifest.ref.target)
@@ -1686,6 +1652,75 @@ export class VersionRepository {
                 }
             }
         )
+    }
+
+    /**
+     * Writes every versioned blob into the staging tree, then reapplies the
+     * recorded xattr metadata on top of the files it belongs to.
+     * @param {string} stageRoot
+     * @param {Map<string, any>} tree
+     * @param {Map<string, Buffer>} objects
+     * @param {any[]} metadataEntries
+     */
+    async stageMaterializedTree(stageRoot, tree, objects, metadataEntries) {
+        for (const entry of tree.values()) {
+            if (!(await this.isVersionedCollection(entry.collection))) continue
+            if (entry.kind === 'metadata') continue
+            const target = path.join(stageRoot, entry.path)
+            assertPathInside(stageRoot, target)
+            await writeDurable(target, /** @type {Buffer} */ (objects.get(entry.hash)))
+        }
+        for (const entry of metadataEntries) {
+            const target = await findMaterializedFile(stageRoot, entry)
+            if (!target) continue
+            await applyXattrBlob(target, /** @type {Buffer} */ (objects.get(entry.hash)))
+        }
+    }
+
+    /**
+     * Indexes are accelerators, so they are rebuilt from the staged documents
+     * rather than restored from the commit.
+     * @param {string} stageRoot
+     * @param {Map<string, string>} collections
+     */
+    async rebuildStagedCollections(stageRoot, collections) {
+        if (collections.size === 0) return
+        const engine = new FilesystemEngine(stageRoot, {
+            catalogRoot: this.root,
+            repositoryGate: false
+        })
+        for (const collection of collections.keys()) {
+            await engine.ensureCollection(collection)
+            await engine.rebuildCollection(collection)
+        }
+    }
+
+    /**
+     * Moves each staged target into place, recording the backup phase before
+     * displacing an existing tree so recovery can undo a partial swap.
+     * @param {MaterializationTransaction} manifest
+     * @param {{ transactionRoot: string, targetRoot: string, stageRoot: string, backupRoot: string }} roots
+     */
+    async swapMaterializedTargets(manifest, roots) {
+        const { transactionRoot, targetRoot, stageRoot, backupRoot } = roots
+        for (const target of manifest.targets) {
+            const current = path.join(targetRoot, target.relative)
+            const staged = path.join(stageRoot, target.relative)
+            const backup = path.join(backupRoot, target.relative)
+            assertPathInside(targetRoot, current)
+            assertPathInside(transactionRoot, staged)
+            assertPathInside(transactionRoot, backup)
+            if (target.hadCurrent) {
+                await mkdir(path.dirname(backup), { recursive: true })
+                await renameDurable(current, backup)
+                manifest.phase = 'backup-moved'
+                await this.writeMaterializationManifest(transactionRoot, manifest)
+            }
+            if (await exists(staged)) {
+                await mkdir(path.dirname(current), { recursive: true })
+                await renameDurable(staged, current)
+            }
+        }
     }
 
     /**
@@ -1780,30 +1815,43 @@ function validateMaterializationManifest(value) {
     ) {
         throw new Error('Corrupt FYLO materialization transaction manifest')
     }
-    for (const target of manifest.targets) {
-        if (
-            !target ||
-            typeof target.relative !== 'string' ||
-            target.relative.length === 0 ||
-            path.isAbsolute(target.relative) ||
-            path.relative('.', target.relative).startsWith('..') ||
-            typeof target.collection !== 'string' ||
-            typeof target.hadCurrent !== 'boolean' ||
-            typeof target.shouldInstall !== 'boolean'
-        ) {
-            throw new Error('Corrupt FYLO materialization transaction target')
-        }
-        validateBranchName(target.collection)
+    for (const target of manifest.targets) assertMaterializationTarget(target)
+    if (manifest.ref !== null) assertMaterializationRef(manifest.ref)
+}
+
+/**
+ * Each target must name a relative path that stays inside the repository.
+ * @param {any} target
+ */
+function assertMaterializationTarget(target) {
+    if (
+        !target ||
+        typeof target.relative !== 'string' ||
+        target.relative.length === 0 ||
+        path.isAbsolute(target.relative) ||
+        path.relative('.', target.relative).startsWith('..') ||
+        typeof target.collection !== 'string' ||
+        typeof target.hadCurrent !== 'boolean' ||
+        typeof target.shouldInstall !== 'boolean'
+    ) {
+        throw new Error('Corrupt FYLO materialization transaction target')
     }
-    if (manifest.ref !== null) {
-        if (!manifest.ref || !manifest.ref.prior || !manifest.ref.target) {
-            throw new Error('Corrupt FYLO materialization ref transition')
-        }
-        validateBranchName(manifest.ref.prior.name)
-        validateBranchName(manifest.ref.target.name)
-        if (manifest.ref.prior.name !== manifest.ref.target.name) {
-            throw new Error('FYLO materialization ref transition changes branch identity')
-        }
+    validateBranchName(target.collection)
+}
+
+/**
+ * A recorded ref transition may advance a branch but never rename it, so a
+ * recovered materialization cannot move work onto a different branch.
+ * @param {any} ref
+ */
+function assertMaterializationRef(ref) {
+    if (!ref || !ref.prior || !ref.target) {
+        throw new Error('Corrupt FYLO materialization ref transition')
+    }
+    validateBranchName(ref.prior.name)
+    validateBranchName(ref.target.name)
+    if (ref.prior.name !== ref.target.name) {
+        throw new Error('FYLO materialization ref transition changes branch identity')
     }
 }
 
@@ -2271,7 +2319,7 @@ async function collectXattrEntries(
             if (!content) continue
             collected.push({
                 id,
-                path: path.join(dataDir, collection, '.metadata', id.slice(0, 2), `${id}.json`),
+                path: path.join(dataDir, collection, '.metadata', shardOf(id), `${id}.json`),
                 content
             })
         }
@@ -2288,7 +2336,7 @@ async function collectXattrEntries(
  * @returns {Promise<string | null>}
  */
 async function findMaterializedFile(targetRoot, entry) {
-    const bucket = entry.id.slice(0, 2)
+    const bucket = shardOf(entry.id)
     // entry.path already encodes the namespace dir (.collections or .buckets).
     const dataDir = entry.path.split(path.sep)[0] || COLLECTIONS_DIR
     for (const namespace of ['docs', '.deleted']) {

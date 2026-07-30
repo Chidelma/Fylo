@@ -3,6 +3,7 @@ import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import Fylo from '../src/index.js'
+import { shardOf } from '../src/core/shard.js'
 
 const workspace = await mkdtemp(join(tmpdir(), 'fylo-rust-encrypted-'))
 const root = join(workspace, 'root')
@@ -71,9 +72,19 @@ try {
     ])
 
     const stored = JSON.parse(
-        await readFile(join(root, '.collections', collection, 'docs', '4V', `${identifier}.json`), {
-            encoding: 'utf8'
-        })
+        await readFile(
+            join(
+                root,
+                '.collections',
+                collection,
+                'docs',
+                shardOf(identifier),
+                `${identifier}.json`
+            ),
+            {
+                encoding: 'utf8'
+            }
+        )
     )
     assert(stored.kind === 'security-event', 'Rust encrypted a field the schema did not declare')
     assert(
@@ -172,9 +183,19 @@ try {
         { FYLO_STRICT: '1' }
     )
     const strictStored = JSON.parse(
-        await readFile(join(root, '.collections', 'strict', 'docs', '4V', '4VRNF52JPCR.json'), {
-            encoding: 'utf8'
-        })
+        await readFile(
+            join(
+                root,
+                '.collections',
+                'strict',
+                'docs',
+                shardOf('4VRNF52JPCR'),
+                '4VRNF52JPCR.json'
+            ),
+            {
+                encoding: 'utf8'
+            }
+        )
     )
     assert(strictStored._v === 'v1', 'Rust did not stamp the head schema version under FYLO_STRICT')
     const strictReader = new Fylo(root, { versioning: { autoCommit: false } })

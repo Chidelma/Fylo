@@ -30,6 +30,8 @@ export async function filterTTIDs(keys) {
  * @param {string} parent
  * @param {string} target
  */
+export { legacyShardOf, shardOf } from './shard.js'
+
 export function assertPathInside(parent, target) {
     const resolvedParent = path.resolve(parent)
     const resolvedTarget = path.resolve(target)

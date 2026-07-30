@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll, mock } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import Fylo from '../../src/index.js'
@@ -56,7 +57,7 @@ describe('Encryption', () => {
     })
     test('encrypted values stored in the doc file are not plaintext', async () => {
         const raw = await Bun.file(
-            path.join(root, '.collections', COLLECTION, 'docs', docId.slice(0, 2), `${docId}.json`)
+            path.join(root, '.collections', COLLECTION, 'docs', shardOf(docId), `${docId}.json`)
         ).text()
         expect(raw).not.toContain('alice@example.com')
         expect(raw).not.toContain('123-45-6789')

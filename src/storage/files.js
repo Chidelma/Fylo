@@ -2,7 +2,7 @@ import path from 'node:path'
 import { utimesSync } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises'
 import TTID from '../vendor/ttid.js'
-import { assertPathInside, validateDocId } from '../core/doc-id.js'
+import { assertPathInside, legacyShardOf, shardOf, validateDocId } from '../core/doc-id.js'
 import {
     rawFileContentType,
     rawFileExtension,
@@ -195,7 +195,23 @@ export class FilesystemFiles {
      */
     async findPath(root, docId) {
         await validateDocId(docId)
-        const bucket = path.join(root, docId.slice(0, 2))
+        // A root written before the shard change keeps its records under the
+        // leading characters, so both candidates are searched.
+        for (const shard of [shardOf(docId), legacyShardOf(docId)]) {
+            const found = await this.findInShard(root, shard, docId)
+            if (found) return found
+        }
+        return null
+    }
+
+    /**
+     * @param {string} root
+     * @param {string} shard
+     * @param {string} docId
+     * @returns {Promise<string | null>}
+     */
+    async findInShard(root, shard, docId) {
+        const bucket = path.join(root, shard)
         let entries
         try {
             entries = await this.storage.list(bucket)
@@ -239,11 +255,7 @@ export class FilesystemFiles {
         await validateDocId(docId)
         await this.ensureCollection(collection)
         const { extension, contentType, key } = this.resolveMetadata(docId, source)
-        const target = path.join(
-            this.docsRoot(collection),
-            docId.slice(0, 2),
-            `${docId}${extension}`
-        )
+        const target = path.join(this.docsRoot(collection), shardOf(docId), `${docId}${extension}`)
         assertPathInside(this.docsRoot(collection), target)
         await this.storage.mkdir(path.dirname(target))
         const docsRoot = this.docsRoot(collection)
@@ -519,7 +531,7 @@ export class FilesystemFiles {
         if (!source) throw new Error(`Raw file not found: ${docId}`)
         const target = path.join(
             this.deletedRoot(collection),
-            docId.slice(0, 2),
+            shardOf(docId),
             path.basename(source)
         )
         assertPathInside(this.deletedRoot(collection), target)
@@ -540,11 +552,7 @@ export class FilesystemFiles {
     async restoreStoredFile(collection, docId, restoredAt) {
         const source = await this.findPath(this.deletedRoot(collection), docId)
         if (!source) throw new Error(`Deleted raw file not found: ${docId}`)
-        const target = path.join(
-            this.docsRoot(collection),
-            docId.slice(0, 2),
-            path.basename(source)
-        )
+        const target = path.join(this.docsRoot(collection), shardOf(docId), path.basename(source))
         assertPathInside(this.docsRoot(collection), target)
         await this.storage.move(source, target)
         await this.storage.chmod(target, 0o644)

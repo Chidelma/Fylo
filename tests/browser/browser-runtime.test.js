@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import path from 'node:path'
 import TTID from '../../src/browser/vendor/ttid.mjs'
 import fylo, {
@@ -55,7 +56,7 @@ describe('browser runtime', () => {
         await fylo.users.create()
         const id = await fylo.users.put({ name: 'Lin' })
 
-        expect(await fs.exists(`/.collections/users/docs/${id.slice(0, 2)}/${id}.json`)).toBe(true)
+        expect(await fs.exists(`/.collections/users/docs/${shardOf(id)}/${id}.json`)).toBe(true)
         expect(await fs.exists('/.collections/users/collection.json')).toBe(false)
     })
 

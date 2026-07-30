@@ -3,6 +3,7 @@
 // decrypt, and a reader that cannot decrypt must fail instead of returning
 // ciphertext (#84).
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -83,7 +84,7 @@ describe('encrypted reads without a prior write in the process (#84)', () => {
 
         const docId = String(written.result)
         const stored = await Bun.file(
-            path.join(root, '.collections', COLLECTION, 'docs', docId.slice(0, 2), `${docId}.json`)
+            path.join(root, '.collections', COLLECTION, 'docs', shardOf(docId), `${docId}.json`)
         ).text()
         expect(stored).not.toContain(MARKER)
         expect(stored).toContain('v2.')

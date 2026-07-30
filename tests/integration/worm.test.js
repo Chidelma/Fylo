@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import Fylo from '../../src/index.js'
@@ -28,7 +29,7 @@ describe('strict WORM mode', () => {
             '.collections',
             COLLECTION,
             'docs',
-            id.slice(0, 2),
+            shardOf(id),
             `${id}.json`
         )
         const mode = (await stat(documentPath)).mode & 0o777

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import TTID from '../../src/browser/vendor/ttid.mjs'
 import { createMemoryFilesystem } from '../../src/browser/core/memory-filesystem.js'
 import { BrowserCore } from '../../src/browser/core/engine.js'
@@ -9,7 +10,7 @@ describe('BrowserDocuments through BrowserCore', () => {
         const fylo = new BrowserCore({ fs, root: '/' })
         await fylo['users'].create()
         const id = await fylo['users'].put({ name: 'Ada', role: 'admin' })
-        const path = `/.collections/users/docs/${id.slice(0, 2)}/${id}.json`
+        const path = `/.collections/users/docs/${shardOf(id)}/${id}.json`
 
         expect(await fs.readText(path)).toBe('{"name":"Ada","role":"admin"}')
         expect(await fs.exists('/.collections/users/collection.json')).toBe(false)
@@ -24,8 +25,8 @@ describe('BrowserDocuments through BrowserCore', () => {
         await fylo['users'].put({ [id]: { name: 'Grace' } })
         await fylo['users'].delete(id)
 
-        const livePath = `/.collections/users/docs/${id.slice(0, 2)}/${id}.json`
-        const deletedPath = `/.collections/users/.deleted/${id.slice(0, 2)}/${id}.json`
+        const livePath = `/.collections/users/docs/${shardOf(id)}/${id}.json`
+        const deletedPath = `/.collections/users/.deleted/${shardOf(id)}/${id}.json`
         expect(await fs.exists(livePath)).toBe(false)
         const tombstone = JSON.parse(await fs.readText(deletedPath))
         expect(tombstone).toMatchObject({ name: 'Grace' })
@@ -41,7 +42,7 @@ describe('BrowserDocuments through BrowserCore', () => {
         const fylo = new BrowserCore({ fs, root: '/' })
         await fylo['users'].create()
         const id = await fylo['users'].put({ name: 'Ada' })
-        const path = `/.collections/users/docs/${id.slice(0, 2)}/${id}.json`
+        const path = `/.collections/users/docs/${shardOf(id)}/${id}.json`
 
         await fs.writeText(path, '{"name":@}')
 
@@ -53,7 +54,7 @@ describe('BrowserDocuments through BrowserCore', () => {
         const fylo = new BrowserCore({ fs, root: '/' })
         await fylo['users'].create()
         const id = await fylo['users'].put({ name: 'Ada' })
-        const path = `/.collections/users/docs/${id.slice(0, 2)}/${id}.json`
+        const path = `/.collections/users/docs/${shardOf(id)}/${id}.json`
 
         await fs.writeText(path, '["not","a","document"]')
 

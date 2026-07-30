@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { mkdir, readFile, rm, rmdir, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import Fylo from '../../src/index.js'
@@ -25,7 +26,7 @@ describe('document path security', () => {
 
         const docsRoot = path.join(root, '.collections', 'documents', 'docs')
         await mkdir(docsRoot, { recursive: true })
-        await symlink(outside, path.join(docsRoot, id.slice(0, 2)), 'junction')
+        await symlink(outside, path.join(docsRoot, shardOf(id)), 'junction')
 
         await expect(fylo.documents.get(id).once()).rejects.toThrow(/symbolic link|reparse point/)
         await expect(
@@ -44,7 +45,7 @@ describe('document path security', () => {
         expect(await readFile(outsideTarget, 'utf8')).toBe(sentinel)
         expect(getXattr(outsideTarget, 'user.fylo.meta.owner')).toBeNull()
 
-        const shardLink = path.join(docsRoot, id.slice(0, 2))
+        const shardLink = path.join(docsRoot, shardOf(id))
         if (process.platform === 'win32') await rmdir(shardLink)
         else await rm(shardLink)
         await fylo.documents.put(id, { inside: 'retry-succeeded' })

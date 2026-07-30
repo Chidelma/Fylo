@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
+import { shardOf } from '../../src/core/doc-id.js'
 import { readFile, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { runMachineRequest } from '../../src/cli/machine.js'
@@ -154,7 +155,7 @@ describe('CLI machine interface', () => {
                     '.collections',
                     'machine-posts',
                     'docs',
-                    groupId.slice(0, 2),
+                    shardOf(groupId),
                     `${groupId}.json`
                 )
             )
@@ -653,7 +654,7 @@ describe('CLI machine interface', () => {
         const id = JSON.parse(putResponse.stdout).result
         expect(
             await Bun.file(
-                path.join(root, '.buckets', 'machine-files', 'docs', id.slice(0, 2), `${id}.txt`)
+                path.join(root, '.buckets', 'machine-files', 'docs', shardOf(id), `${id}.txt`)
             ).text()
         ).toBe('machine raw bytes')
 

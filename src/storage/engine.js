@@ -1,6 +1,7 @@
 import path from 'node:path'
+import { existsSync } from 'node:fs'
 import { CollectionNotFoundError, validateCollectionName } from '../core/collection.js'
-import { assertPathInside, validateDocId } from '../core/doc-id.js'
+import { assertPathInside, legacyShardOf, shardOf, validateDocId } from '../core/doc-id.js'
 import { Cipher } from '../security/cipher.js'
 import { FyloSyncError, resolveSyncMode } from '../replication/sync.js'
 import { FyloS3Backup } from '../replication/s3-backup.js'
@@ -61,6 +62,52 @@ import {
  * @typedef {import('../query/types.js').StoreQuery<Record<string, any>>} StoreQuery
  * @typedef {{ id: TTID, createdAt: number, updatedAt: number, deletedAt?: number, data: Record<string, any>, path?: string }} StoredRecord
  */
+
+/**
+ * Comparison operators available to a join's `$on` clause.
+ * @type {Record<string, (leftValue: unknown, rightValue: unknown) => boolean>}
+ */
+const JOIN_COMPARATORS = {
+    $eq: (leftValue, rightValue) => leftValue === rightValue,
+    $ne: (leftValue, rightValue) => leftValue !== rightValue,
+    $gt: (leftValue, rightValue) => Number(leftValue) > Number(rightValue),
+    $lt: (leftValue, rightValue) => Number(leftValue) < Number(rightValue),
+    $gte: (leftValue, rightValue) => Number(leftValue) >= Number(rightValue),
+    $lte: (leftValue, rightValue) => Number(leftValue) <= Number(rightValue)
+}
+
+/**
+ * How each join mode combines a matched pair.
+ * @type {Record<string, (leftData: Record<string, any>, rightData: Record<string, any>) => Record<string, any>>}
+ */
+const JOIN_MODES = {
+    inner: (leftData, rightData) => ({ ...leftData, ...rightData }),
+    left: (leftData) => leftData,
+    right: (leftData, rightData) => rightData,
+    outer: (leftData, rightData) => ({ ...leftData, ...rightData })
+}
+
+/**
+ * Buckets joined rows by `$groupby`, returning ids only when the join asked
+ * for them.
+ * @param {any} join
+ * @param {Record<string, Record<string, any>>} docs
+ */
+function groupJoinedDocs(join, docs) {
+    /** @type {Record<string, Record<string, Record<string, any>>>} */
+    const groupedDocs = {}
+    for (const ids in docs) {
+        const data = docs[ids]
+        const key = String(data[join.$groupby])
+        if (!groupedDocs[key]) groupedDocs[key] = {}
+        groupedDocs[key][ids] = data
+    }
+    if (!join.$onlyIds) return groupedDocs
+    /** @type {Record<string, string[]>} */
+    const groupedIds = {}
+    for (const key in groupedDocs) groupedIds[key] = Object.keys(groupedDocs[key]).flat()
+    return groupedIds
+}
 
 /**
  * @param {string} collection
@@ -130,6 +177,28 @@ function restoreMetadataXattrsExact(target, snapshot) {
  * Low-level filesystem storage engine for collections, documents, indexes,
  * events, locks, and strict read-only WORM documents.
  */
+/**
+ * Resolve a record's path under its shard.
+ *
+ * Records live under the last two characters of their creation segment. A root
+ * written before that change used the first two, so a path that does not exist
+ * canonically falls back to the superseded location: an unmigrated root stays
+ * readable, and so does a partly migrated one, which is the state an
+ * interrupted migration leaves. A record that exists in neither resolves to the
+ * canonical path, so new writes always land there.
+ *
+ * @param {string} root @param {string} docId @param {string} filename
+ * @returns {string}
+ */
+function shardedPath(root, docId, filename) {
+    const target = path.join(root, shardOf(docId), filename)
+    assertPathInside(root, target)
+    if (existsSync(target)) return target
+    const legacy = path.join(root, legacyShardOf(docId), filename)
+    assertPathInside(root, legacy)
+    return existsSync(legacy) ? legacy : target
+}
+
 export class FilesystemEngine {
     /** @type {string} */
     root
@@ -367,17 +436,11 @@ export class FilesystemEngine {
         // ponytail: docId is validated at the public method / storage-layer entry
         // before it reaches this sync path-builder; re-checking via the async
         // `ttid` binary here would force every path build async.
-        const docsRoot = this.docsRoot(collection)
-        const target = path.join(docsRoot, docId.slice(0, 2), `${docId}.json`)
-        assertPathInside(docsRoot, target)
-        return target
+        return shardedPath(this.docsRoot(collection), docId, `${docId}.json`)
     }
     /** @param {string} collection @param {TTID} docId @returns {string} */
     deletedPath(collection, docId) {
-        const deletedRoot = this.deletedRoot(collection)
-        const target = path.join(deletedRoot, docId.slice(0, 2), `${docId}.json`)
-        assertPathInside(deletedRoot, target)
-        return target
+        return shardedPath(this.deletedRoot(collection), docId, `${docId}.json`)
     }
     /**
      * Runs a configured sync hook according to the collection's sync mode.
@@ -1249,6 +1312,64 @@ export class FilesystemEngine {
             indexedDocs
         }
     }
+    /**
+     * A soft-deleted document must be restored before it can be written again,
+     * WORM forbids updating an existing record, and an existing record's own
+     * access descriptor governs who may replace it.
+     * @param {string} collection
+     * @param {TTID} docId
+     * @param {any} existing
+     * @param {any} deleted
+     * @param {{ uid?: number }=} access
+     */
+    async assertDocumentWritable(collection, docId, existing, deleted, access) {
+        if (deleted) {
+            throw new Error(`Document is soft-deleted; restore it before writing: ${docId}`)
+        }
+        if (!existing) return
+        if (this.wormEnabled()) throw new Error('Update is not allowed in WORM mode')
+        await this.assertDocumentAccess(collection, docId, access?.uid, 'write')
+    }
+
+    /**
+     * Writes the document, its developer metadata, and its access descriptor,
+     * then rebuilds indexes. Any failure restores the previous record (or
+     * removes a newly created one) before rethrowing, so a failed put leaves
+     * no partial state behind.
+     * @param {{ collection: string, docId: TTID, doc: Record<string, any>, targetPath: string, existing: any, metadata: Array<[string, Uint8Array]>, previousAccess: any, metaUpdates: any, access: any }} input
+     */
+    async writeDocumentOrRollback(input) {
+        const { collection, docId, doc, targetPath, existing, metadata, previousAccess } = input
+        try {
+            await this.documents.writeStoredDoc(collection, docId, doc)
+            restoreDeveloperMetadataXattrs(targetPath, metadata)
+            if (input.metaUpdates?.length) {
+                this.applyDocMetaMutations(targetPath, input.metaUpdates)
+            }
+            if (input.access) await applyAccessDescriptor(targetPath, input.access)
+            else await restoreAccessState(targetPath, previousAccess)
+            await this.rebuildIndexes(collection, docId, doc)
+        } catch (error) {
+            try {
+                await this.removeIndexes(collection, docId, doc)
+                if (existing) {
+                    await this.documents.writeStoredDoc(collection, docId, existing.data)
+                    restoreDeveloperMetadataXattrs(targetPath, metadata)
+                    await restoreAccessState(targetPath, previousAccess)
+                    await this.rebuildIndexes(collection, docId, existing.data)
+                } else {
+                    await this.documents.removeStoredDoc(collection, docId)
+                }
+            } catch (rollbackError) {
+                throw new AggregateError(
+                    [error, rollbackError],
+                    'Document put failed and rollback was incomplete'
+                )
+            }
+            throw error
+        }
+    }
+
     /** @param {string} collection @param {TTID} docId @param {Record<string, any>} doc @param {Record<string, any>=} meta @param {{ uid?: number, gid?: number, mode?: number }=} access @param {boolean=} createOnly @returns {Promise<boolean>} */
     async putDocument(collection, docId, doc, meta, access, createOnly = false) {
         const metaUpdates = meta === undefined ? undefined : metaMutations(meta)
@@ -1266,44 +1387,22 @@ export class FilesystemEngine {
                 const existing = await this.documents.readStoredDoc(collection, docId)
                 const deleted = await this.documents.readDeletedDoc(collection, docId)
                 if (createOnly && (existing || deleted)) return false
-                if (deleted) {
-                    throw new Error(`Document is soft-deleted; restore it before writing: ${docId}`)
-                }
-                if (existing && this.wormEnabled())
-                    throw new Error('Update is not allowed in WORM mode')
-                if (existing) {
-                    await this.assertDocumentAccess(collection, docId, access?.uid, 'write')
-                }
+                await this.assertDocumentWritable(collection, docId, existing, deleted, access)
                 await this.transactions.capture(targetPath)
                 if (existing) await this.removeIndexes(collection, docId, existing.data)
                 const metadata = existing ? developerMetadataXattrs(targetPath) : []
                 const previousAccess = existing ? await snapshotAccessState(targetPath) : null
-                try {
-                    await this.documents.writeStoredDoc(collection, docId, doc)
-                    restoreDeveloperMetadataXattrs(targetPath, metadata)
-                    if (metaUpdates?.length) this.applyDocMetaMutations(targetPath, metaUpdates)
-                    if (access) await applyAccessDescriptor(targetPath, access)
-                    else await restoreAccessState(targetPath, previousAccess)
-                    await this.rebuildIndexes(collection, docId, doc)
-                } catch (error) {
-                    try {
-                        await this.removeIndexes(collection, docId, doc)
-                        if (existing) {
-                            await this.documents.writeStoredDoc(collection, docId, existing.data)
-                            restoreDeveloperMetadataXattrs(targetPath, metadata)
-                            await restoreAccessState(targetPath, previousAccess)
-                            await this.rebuildIndexes(collection, docId, existing.data)
-                        } else {
-                            await this.documents.removeStoredDoc(collection, docId)
-                        }
-                    } catch (rollbackError) {
-                        throw new AggregateError(
-                            [error, rollbackError],
-                            'Document put failed and rollback was incomplete'
-                        )
-                    }
-                    throw error
-                }
+                await this.writeDocumentOrRollback({
+                    collection,
+                    docId,
+                    doc,
+                    targetPath,
+                    existing,
+                    metadata,
+                    previousAccess,
+                    metaUpdates,
+                    access
+                })
                 if (this.wormEnabled())
                     await this.documents.makeStoredDocReadOnly(collection, docId)
                 await this.publishDocumentEvent(collection, {
@@ -1360,7 +1459,7 @@ export class FilesystemEngine {
                 const { key, extension } = this.files.resolveMetadata(docId, source)
                 await this.assertObjectKeyAvailable(collection, key)
                 await this.transactions.capture(
-                    path.join(this.docsRoot(collection), docId.slice(0, 2), `${docId}${extension}`)
+                    shardedPath(this.docsRoot(collection), docId, `${docId}${extension}`)
                 )
                 const stored = await this.files.writeStoredFile(collection, docId, source)
                 try {
@@ -1500,9 +1599,9 @@ export class FilesystemEngine {
                         : this.docPath(collection, docId)) ?? undefined
                 if (!previousPath) throw new Error(`Document path not found: ${docId}`)
                 await this.assertDocumentAccess(collection, docId, actorUid, 'write')
-                const pendingDeletedPath = path.join(
+                const pendingDeletedPath = shardedPath(
                     this.deletedRoot(collection),
-                    docId.slice(0, 2),
+                    docId,
                     path.basename(previousPath)
                 )
                 await this.transactions.capture(previousPath)
@@ -1570,9 +1669,9 @@ export class FilesystemEngine {
                     deleted: true
                 })
                 const access = await readAccessDescriptor(deletedPath)
-                const activePath = path.join(
+                const activePath = shardedPath(
                     this.docsRoot(collection),
-                    docId.slice(0, 2),
+                    docId,
                     path.basename(deletedPath)
                 )
                 await this.transactions.capture(deletedPath)
@@ -2215,80 +2314,61 @@ export class FilesystemEngine {
         const rightDocs = await this.docResults(join.$rightCollection, undefined, actorUid)
         /** @type {Record<string, Record<string, any>>} */
         const docs = {}
-        /** @type {Record<string, (leftVal: unknown, rightVal: unknown) => boolean>} */
-        const compareMap = {
-            $eq: (leftVal, rightVal) => leftVal === rightVal,
-            $ne: (leftVal, rightVal) => leftVal !== rightVal,
-            $gt: (leftVal, rightVal) => Number(leftVal) > Number(rightVal),
-            $lt: (leftVal, rightVal) => Number(leftVal) < Number(rightVal),
-            $gte: (leftVal, rightVal) => Number(leftVal) >= Number(rightVal),
-            $lte: (leftVal, rightVal) => Number(leftVal) <= Number(rightVal)
-        }
         for (const leftEntry of leftDocs) {
             const [leftId, leftData] = Object.entries(leftEntry)[0]
             for (const rightEntry of rightDocs) {
                 const [rightId, rightData] = Object.entries(rightEntry)[0]
-                let matched = false
-                for (const field in join.$on) {
-                    const operand = join.$on[field]
-                    if (!operand) continue
-                    for (const opKey of Object.keys(compareMap)) {
-                        const rightField = operand[/** @type {keyof typeof operand} */ (opKey)]
-                        if (!rightField) continue
-                        const leftValue = this.queryEngine.getValueByPath(leftData, String(field))
-                        const rightValue = this.queryEngine.getValueByPath(
-                            rightData,
-                            String(rightField)
-                        )
-                        if (compareMap[opKey]?.(leftValue, rightValue)) matched = true
-                    }
-                }
-                if (!matched) continue
-                switch (join.$mode) {
-                    case 'inner':
-                        docs[`${leftId}, ${rightId}`] = { ...leftData, ...rightData }
-                        break
-                    case 'left':
-                        docs[`${leftId}, ${rightId}`] = leftData
-                        break
-                    case 'right':
-                        docs[`${leftId}, ${rightId}`] = rightData
-                        break
-                    case 'outer':
-                        docs[`${leftId}, ${rightId}`] = { ...leftData, ...rightData }
-                        break
-                }
-                let projected = docs[`${leftId}, ${rightId}`]
-                if (join.$select?.length) {
-                    projected = this.queryEngine.selectValues(join.$select, projected)
-                }
-                if (join.$rename) {
-                    projected = this.queryEngine.renameFields(join.$rename, projected)
-                }
-                docs[`${leftId}, ${rightId}`] = projected
+                if (!this.joinRowMatches(join, leftData, rightData)) continue
+                docs[`${leftId}, ${rightId}`] = this.projectJoinRow(join, leftData, rightData)
                 if (join.$limit && Object.keys(docs).length >= join.$limit) break
             }
             if (join.$limit && Object.keys(docs).length >= join.$limit) break
         }
-        if (join.$groupby) {
-            /** @type {Record<string, Record<string, Record<string, any>>>} */
-            const groupedDocs = {}
-            for (const ids in docs) {
-                const data = docs[ids]
-                const key = String(data[join.$groupby])
-                if (!groupedDocs[key]) groupedDocs[key] = {}
-                groupedDocs[key][ids] = data
-            }
-            if (join.$onlyIds) {
-                /** @type {Record<string, string[]>} */
-                const groupedIds = {}
-                for (const key in groupedDocs)
-                    groupedIds[key] = Object.keys(groupedDocs[key]).flat()
-                return groupedIds
-            }
-            return groupedDocs
-        }
+        if (join.$groupby) return groupJoinedDocs(join, docs)
         if (join.$onlyIds) return Array.from(new Set(Object.keys(docs).flat()))
         return docs
+    }
+
+    /**
+     * Whether one left/right pair satisfies any comparison in `$on`. A join
+     * matches when at least one field comparison holds.
+     * @param {any} join
+     * @param {Record<string, any>} leftData
+     * @param {Record<string, any>} rightData
+     * @returns {boolean}
+     */
+    joinRowMatches(join, leftData, rightData) {
+        for (const field in join.$on) {
+            const operand = join.$on[field]
+            if (!operand) continue
+            for (const opKey of Object.keys(JOIN_COMPARATORS)) {
+                const rightField = operand[opKey]
+                if (!rightField) continue
+                const leftValue = this.queryEngine.getValueByPath(leftData, String(field))
+                const rightValue = this.queryEngine.getValueByPath(rightData, String(rightField))
+                if (JOIN_COMPARATORS[opKey](leftValue, rightValue)) return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Shapes one matched pair per the join mode, then applies `$select` and
+     * `$rename` projections.
+     * @param {any} join
+     * @param {Record<string, any>} leftData
+     * @param {Record<string, any>} rightData
+     * @returns {Record<string, any>}
+     */
+    projectJoinRow(join, leftData, rightData) {
+        const combine = JOIN_MODES[join.$mode]
+        // An unrecognized mode yields undefined, matching the previous switch
+        // that simply left the row unset before projection.
+        let projected = /** @type {Record<string, any>} */ (
+            combine ? combine(leftData, rightData) : undefined
+        )
+        if (join.$select?.length) projected = this.queryEngine.selectValues(join.$select, projected)
+        if (join.$rename) projected = this.queryEngine.renameFields(join.$rename, projected)
+        return projected
     }
 }
