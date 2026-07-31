@@ -690,6 +690,109 @@ impl NativeWriteRoot {
         finish_transaction(transaction, outcome, "restore")
     }
 
+    /// Move every record in a collection to a new shard width.
+    ///
+    /// The descriptor records the destination and the width being left before
+    /// a single record moves, so an interrupted run leaves every record
+    /// findable under one candidate or another and re-running finishes what
+    /// remains. Documents are the source of truth, so this renames files and
+    /// rebuilds the derived index without rewriting a record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported width, a missing collection, an
+    /// unsafe path, lock contention, or an interrupted durable operation.
+    pub fn reshard_collection(
+        &self,
+        collection_name: &str,
+        width: u32,
+    ) -> Result<usize, NativeStorageError> {
+        if width > crate::MAX_SHARD_WIDTH {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::Unsupported,
+                format!(
+                    "shard width must be 0 to {}: {width}",
+                    crate::MAX_SHARD_WIDTH
+                ),
+            ));
+        }
+        let collection = self.root.collection(collection_name)?;
+        let recorded = collection.shard_width();
+        let previous = collection.previous_shard_widths().to_vec();
+        if recorded == width && previous.is_empty() {
+            return Ok(0);
+        }
+        let _lock = CollectionWriteLock::acquire(&collection.path)?;
+        self.recover_locked(&collection)?;
+        let mut leaving: Vec<u32> = previous;
+        if recorded != width && !leaving.contains(&recorded) {
+            leaving.push(recorded);
+        }
+        leaving.retain(|value| *value != width);
+        self.write_shard_width(collection_name, width, &leaving)?;
+        let collection = self.root.collection(collection_name)?;
+
+        let mut moved = 0;
+        let mut transaction = Transaction::begin(self, &collection, "reshard")?;
+        let outcome = (|| {
+            for namespace in ["docs", ".deleted"] {
+                let root = collection.path.join(namespace);
+                for (source, target) in reshard_moves(&root, width, &leaving)? {
+                    transaction.capture(&source)?;
+                    transaction.capture(&target)?;
+                    let parent = target.parent().ok_or_else(|| {
+                        NativeStorageError::new(
+                            NativeStorageErrorCode::UnsafePath,
+                            "reshard target has no parent",
+                        )
+                    })?;
+                    ensure_directory(&self.root, parent)?;
+                    fs::rename(&source, &target).map_err(NativeStorageError::io)?;
+                    sync_parent(&source)?;
+                    sync_parent(&target)?;
+                    failpoint("after-reshard-rename")?;
+                    moved += 1;
+                }
+            }
+            capture_index(&mut transaction, &collection)?;
+            self.rebuild_index(&collection)?;
+            transaction.commit()
+        })();
+        finish_transaction(transaction, outcome, "reshard")?;
+        self.write_shard_width(collection_name, width, &[])?;
+        Ok(moved)
+    }
+
+    fn write_shard_width(
+        &self,
+        collection: &str,
+        width: u32,
+        leaving: &[u32],
+    ) -> Result<(), NativeStorageError> {
+        let path = self
+            .root
+            .path()
+            .join(".fylo-catalog")
+            .join("collections")
+            .join(format!("{collection}.json"));
+        let mut descriptor: Map<String, Value> =
+            read_bounded_json(&path, super::MAX_DESCRIPTOR_BYTES)?;
+        descriptor.insert("shardWidth".into(), Value::from(width));
+        // A completed reshard must leave no width behind, or every later
+        // lookup would keep probing a directory that can no longer hold
+        // anything.
+        descriptor.remove("previousShardWidths");
+        if !leaving.is_empty() {
+            descriptor.insert(
+                "previousShardWidths".into(),
+                Value::Array(leaving.iter().map(|width| Value::from(*width)).collect()),
+            );
+        }
+        let mut encoded = serde_json::to_vec(&descriptor).map_err(|error| json_error(&error))?;
+        encoded.push(b'\n');
+        durable_replace(&path, &encoded)
+    }
+
     /// Rebuild one collection's derived index from its documents.
     ///
     /// Documents are the source of truth, so this is always safe to repeat.
@@ -1055,6 +1158,49 @@ fn next_meta_updated_at(path: &Path) -> Result<u64, NativeStorageError> {
         )
     })?;
     Ok(now.max(previous.saturating_add(1)))
+}
+
+/// Records that are not already under the canonical shard, with where they go.
+fn reshard_moves(
+    root: &Path,
+    width: u32,
+    leaving: &[u32],
+) -> Result<Vec<(PathBuf, PathBuf)>, NativeStorageError> {
+    let mut moves = Vec::new();
+    let Ok(shards) = fs::read_dir(root) else {
+        return Ok(moves);
+    };
+    for shard in shards {
+        let shard = shard.map_err(NativeStorageError::io)?;
+        if !shard.metadata().map_err(NativeStorageError::io)?.is_dir() {
+            continue;
+        }
+        for record in fs::read_dir(shard.path()).map_err(NativeStorageError::io)? {
+            let record = record.map_err(NativeStorageError::io)?;
+            let path = record.path();
+            if !fs::symlink_metadata(&path)
+                .map_err(NativeStorageError::io)?
+                .is_file()
+            {
+                continue;
+            }
+            let filename = record.file_name().to_string_lossy().into_owned();
+            let Some(identifier) = super::raw_file_identifier(&filename) else {
+                continue;
+            };
+            if crate::validate_ttid_shape(identifier).is_err() {
+                continue;
+            }
+            let target = root
+                .join(crate::shard_of(identifier, width))
+                .join(&filename);
+            if target != path {
+                moves.push((path, target));
+            }
+        }
+    }
+    let _ = leaving;
+    Ok(moves)
 }
 
 fn parse_document_fields(bytes: &[u8]) -> Result<Map<String, Value>, NativeStorageError> {
@@ -2558,7 +2704,7 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), NativeStorageError> {
 /// The list is the contract the crash matrix enumerates, so a new failpoint
 /// must be declared here to be injectable — which is also what stops it from
 /// being added without coverage.
-pub const FAILPOINTS: [&str; 14] = [
+pub const FAILPOINTS: [&str; 15] = [
     "before-file-write",
     "after-file-rename",
     "after-file-sync",
@@ -2570,6 +2716,7 @@ pub const FAILPOINTS: [&str; 14] = [
     "after-chmod",
     "after-delete-rename",
     "after-restore-rename",
+    "after-reshard-rename",
     "before-commit-marker",
     "after-commit-marker",
     "after-commit-object",

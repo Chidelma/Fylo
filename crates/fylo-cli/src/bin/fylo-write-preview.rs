@@ -68,6 +68,16 @@ fn run(arguments: &[String]) -> Result<String, String> {
             run_metadata(command, arguments, &writer)?;
             false
         }
+        "reshard" => {
+            let width = required_option(arguments, "--width")?
+                .parse::<u32>()
+                .map_err(|error| format!("invalid --width: {error}"))?;
+            let moved = writer
+                .reshard_collection(required_option(arguments, "--collection")?, width)
+                .map_err(|error| error.to_string())?;
+            result = Value::from(moved);
+            false
+        }
         "restore-document" => {
             let collection = required_option(arguments, "--collection")?;
             let identifier = required_option(arguments, "--id")?;
@@ -353,7 +363,8 @@ fn usage() -> String {
      [--gid <gid>] [--mode <octal>] [--actor-uid <uid> [--actor-groups <gid,...>]]\n  \
      fylo-write-preview commit --root <path> --message <message>\n  fylo-write-preview \
      restore-document --root <path> --collection <name> --id <ttid> [--actor-uid <uid> \
-     [--actor-groups <gid,...>]]\n  fylo-write-preview failpoints"
+     [--actor-groups <gid,...>]]\n  fylo-write-preview reshard --root <path> \
+     --collection <name> --width <0-4>\n  fylo-write-preview failpoints"
         .into()
 }
 

@@ -201,6 +201,10 @@ try {
             ]
         },
         {
+            name: 'reshard',
+            args: (root) => ['reshard', '--root', root, '--collection', collection, '--width', '3']
+        },
+        {
             name: 'commit',
             template: () => versionedTemplate,
             prepare: async (binary, root) => {

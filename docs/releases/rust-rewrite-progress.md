@@ -83,8 +83,8 @@ The following passed on macOS arm64:
   binary the JavaScript engine drives; a document CHEX rejects fails closed with
   `ESCHEMA` without leaking its contents, and validation plus the `_v` stamp
   activate only under a non-empty `FYLO_STRICT`, matching `validateAgainstHead`.
-- every one of the fourteen declared durable transitions was interrupted by an
-  aborted writer across eleven mutation scenarios — 82 interrupted mutations —
+- every one of the fifteen declared durable transitions was interrupted by an
+  aborted writer across twelve mutation scenarios — 90 interrupted mutations —
   and each root recovered, recovered idempotently, and read back with an index
   matching its documents.
 - Rust auto-commits reproduce the JavaScript content-addressed tree: the
@@ -108,9 +108,9 @@ converges as records are rewritten. The width is configurable per collection thr
 descriptor and read from there by both engines; a write whose configured width
 disagrees with the record fails closed with `ESHARDWIDTH`. `reshard` moves an existing collection to a new
 width, idempotently and resumably, and the regression corpus covers an
-interrupted run remaining readable and finishing on a second pass. The native
-engine has no `reshard` of its own, so the operation is currently a JavaScript
-one.
+interrupted run remaining readable and finishing on a second pass. Both engines implement `reshard`, and the
+crash matrix interrupts it alongside every other durable transition: 90
+interrupted mutations across 15 failpoints.
 
 ## Promotion discipline
 

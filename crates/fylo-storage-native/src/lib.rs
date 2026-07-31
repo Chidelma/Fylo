@@ -129,6 +129,7 @@ impl NativeRoot {
             CollectionDescriptor {
                 kind: CollectionKind::Document,
                 shard_width: None,
+                previous_shard_widths: None,
             }
         };
         let namespace = match descriptor.kind {
@@ -144,6 +145,12 @@ impl NativeRoot {
             kind: descriptor.kind,
             namespace: namespace.to_owned(),
             shard_width: validate_shard_width(descriptor.shard_width)?,
+            previous_shard_widths: descriptor
+                .previous_shard_widths
+                .unwrap_or_default()
+                .into_iter()
+                .map(|width| validate_shard_width(Some(width)))
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 
@@ -644,6 +651,9 @@ struct CollectionDescriptor {
     /// records sit under the default this release uses.
     #[serde(default)]
     shard_width: Option<u32>,
+    /// Widths an unfinished reshard is moving this collection away from.
+    #[serde(default)]
+    previous_shard_widths: Option<Vec<u32>>,
 }
 
 #[derive(Deserialize)]
@@ -813,6 +823,7 @@ pub struct NativeCollection {
     kind: CollectionKind,
     namespace: String,
     shard_width: u32,
+    previous_shard_widths: Vec<u32>,
 }
 
 impl NativeCollection {
@@ -820,6 +831,12 @@ impl NativeCollection {
     #[must_use]
     pub const fn shard_width(&self) -> u32 {
         self.shard_width
+    }
+
+    /// Widths an unfinished reshard is moving this collection away from.
+    #[must_use]
+    pub fn previous_shard_widths(&self) -> &[u32] {
+        &self.previous_shard_widths
     }
 
     /// Collection name.
@@ -946,7 +963,12 @@ impl NativeCollection {
                     continue;
                 };
                 validate_ttid_shape(identifier)?;
-                if !shard_matches(identifier, &shard_path, self.shard_width) {
+                if !shard_matches(
+                    identifier,
+                    &shard_path,
+                    self.shard_width,
+                    &self.previous_shard_widths,
+                ) {
                     return Err(NativeStorageError::new(
                         NativeStorageErrorCode::InvalidDocumentId,
                         "document identifier does not match its shard",
@@ -1026,8 +1048,9 @@ impl NativeCollection {
                 };
                 validate_ttid_shape(identifier)?;
                 validate_raw_extension(filename, identifier)?;
-                if shard_name != shard_of(identifier, self.shard_width)
-                    && shard_name != legacy_shard_of(identifier)
+                if !shard_candidates(identifier, self.shard_width, &self.previous_shard_widths)
+                    .iter()
+                    .any(|candidate| candidate == shard_name)
                 {
                     return Err(NativeStorageError::new(
                         NativeStorageErrorCode::InvalidDocumentId,
@@ -1118,6 +1141,7 @@ impl NativeCollection {
             identifier,
             &format!("{identifier}.json"),
             self.shard_width,
+            &self.previous_shard_widths,
         )?;
         let (mut file, metadata) = self.root.open_file(&path, MAX_DOCUMENT_BYTES)?;
         let attributes = read_fylo_attributes(&file, &path)?;
@@ -1227,8 +1251,13 @@ impl NativeCollection {
         identifier: &str,
     ) -> Result<PathBuf, NativeStorageError> {
         let mut shard = namespace.join(shard_of(identifier, self.shard_width));
-        if !path_exists_no_follow(&shard)? {
-            shard = namespace.join(legacy_shard_of(identifier));
+        for candidate in shard_candidates(identifier, self.shard_width, &self.previous_shard_widths)
+        {
+            let path = namespace.join(candidate);
+            if path_exists_no_follow(&path)? {
+                shard = path;
+                break;
+            }
         }
         if !path_exists_no_follow(&shard)? {
             return Err(NativeStorageError::new(
@@ -2327,11 +2356,34 @@ pub fn legacy_shard_of(identifier: &str) -> String {
 /// Either the canonical shard or the superseded leading-character one is
 /// accepted while the compatibility window is open; anything else means the
 /// record was moved by something other than FYLO.
-fn shard_matches(identifier: &str, shard_path: &Path, width: u32) -> bool {
+fn shard_matches(identifier: &str, shard_path: &Path, width: u32, previous: &[u32]) -> bool {
     let Some(shard) = shard_path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    shard == shard_of(identifier, width) || shard == legacy_shard_of(identifier)
+    shard_candidates(identifier, width, previous)
+        .iter()
+        .any(|candidate| candidate == shard)
+}
+
+/// Every shard directory a record may legitimately occupy, most likely first.
+///
+/// A reshard records the widths it is leaving until it completes, so a root
+/// interrupted midway is still fully readable. The layout superseded by
+/// ADR 0006 is always the last candidate.
+#[must_use]
+pub fn shard_candidates(identifier: &str, width: u32, previous: &[u32]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for candidate in std::iter::once(&width).chain(previous) {
+        let shard = shard_of(identifier, *candidate);
+        if !candidates.contains(&shard) {
+            candidates.push(shard);
+        }
+    }
+    let legacy = legacy_shard_of(identifier);
+    if !candidates.contains(&legacy) {
+        candidates.push(legacy);
+    }
+    candidates
 }
 
 fn existing_shard_path(
@@ -2339,14 +2391,20 @@ fn existing_shard_path(
     identifier: &str,
     filename: &str,
     width: u32,
+    previous: &[u32],
 ) -> Result<PathBuf, NativeStorageError> {
-    let canonical = namespace.join(shard_of(identifier, width)).join(filename);
+    let mut candidates = shard_candidates(identifier, width, previous).into_iter();
+    let canonical = namespace
+        .join(candidates.next().unwrap_or_default())
+        .join(filename);
     if path_exists_no_follow(&canonical)? {
         return Ok(canonical);
     }
-    let legacy = namespace.join(legacy_shard_of(identifier)).join(filename);
-    if path_exists_no_follow(&legacy)? {
-        return Ok(legacy);
+    for shard in candidates {
+        let candidate = namespace.join(shard).join(filename);
+        if path_exists_no_follow(&candidate)? {
+            return Ok(candidate);
+        }
     }
     Ok(canonical)
 }

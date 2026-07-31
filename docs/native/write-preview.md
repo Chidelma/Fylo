@@ -19,6 +19,8 @@ Implemented operations:
 - schema-declared AES-256-GCM field encryption with the head `_v` stamp when a
   schema root and both credentials are configured;
 - `commit` content-addressed auto-commit for versioned roots;
+- `reshard` moving every record to a new shard width, idempotently and
+  resumably, under the same transaction journal;
 - retained soft delete;
 - UID/GID/mode projection on POSIX at put time;
 - UID plus trusted supplementary groups for patch/delete authorization;
@@ -89,6 +91,10 @@ binary declares and proves the root still recovers. The failpoint list comes
 from `fylo-write-preview failpoints`, not from the harness, and every declared
 point must be reached by some scenario — so a new failpoint cannot be added
 without either being exercised or failing this gate.
+
+Resharding is covered here too: interrupting a record move leaves the
+collection readable, because the descriptor names the destination and the width
+being left before the first rename.
 
 For each interrupted mutation the gate asserts that recovery succeeds, that a
 second recovery reports no remaining work, that both collections read back with
