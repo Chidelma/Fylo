@@ -1540,11 +1540,31 @@ impl<'a> Transaction<'a> {
         // failure here owns them. Returning the error alone would leave a live
         // process having published a transaction it never started, forcing the
         // next opener to recover state this one could have undone itself.
+        //
+        // Nothing has been captured and no record has changed, so undoing
+        // exactly what this function published is the whole job. A full
+        // rollback would also rebuild the index, which is work this transaction
+        // never invalidated and which can fail for reasons that have nothing to
+        // do with it.
         if let Err(error) = failpoint("after-state-writing") {
-            transaction.rollback()?;
+            transaction.abandon()?;
             return Err(error);
         }
         Ok(transaction)
+    }
+
+    /// Undo a transaction that published its journal but changed nothing.
+    fn abandon(&mut self) -> Result<(), NativeStorageError> {
+        if self.finished {
+            return Ok(());
+        }
+        write_generation(
+            self.writer,
+            self.collection,
+            &GenerationRecord::stable(self.manifest.generation_before),
+        )?;
+        self.finished = true;
+        remove_dir_durable(&self.root)
     }
 
     fn capture(&mut self, target: &Path) -> Result<(), NativeStorageError> {
