@@ -258,9 +258,7 @@ try {
         for (const scenario of scenarios) {
             for (const action of ACTIONS) {
                 const root = join(workspace, `${failpoint}--${scenario.name}--${action}`)
-                await cp(scenario.template ? scenario.template() : template, root, {
-                    recursive: true
-                })
+                await cloneRoot(scenario.template ? scenario.template() : template, root)
                 if (scenario.prepare) await scenario.prepare(binary, root)
                 const failed = await run(binary, scenario.args(root), {
                     FYLO_RUST_FAILPOINT: failpoint,
@@ -376,6 +374,39 @@ async function assertRecoverable(binary, root, failpoint, scenario, action) {
     } finally {
         await database.close()
     }
+}
+
+/**
+ * Copy a seeded root, extended attributes included.
+ *
+ * `fs.cp` carries contents and mode but not extended attributes, so a cloned
+ * raw file loses the durable key it is read by — silently, and only on the
+ * platforms where the copy is not a filesystem-level clone. The fixture has to
+ * survive being cloned or the gate tests a root the engine never wrote.
+ */
+async function cloneRoot(source, target) {
+    await mkdir(target, { recursive: true })
+    const [command, args, okExit] =
+        platform() === 'win32'
+            ? [
+                  'robocopy',
+                  [source, target, '/E', '/COPYALL', '/NFL', '/NDL', '/NJH', '/NJS', '/NP'],
+                  8
+              ]
+            : ['cp', ['-a', `${source}/.`, target], 1]
+    const subprocess = Bun.spawn([command, ...args], {
+        cwd: process.cwd(),
+        env: process.env,
+        stdout: 'pipe',
+        stderr: 'pipe'
+    })
+    const [stderr, exitCode] = await Promise.all([
+        new Response(subprocess.stderr).text(),
+        subprocess.exited
+    ])
+    // robocopy reports copied/extra files with codes below 8; only 8 and above
+    // are failures.
+    if (exitCode >= okExit) throw new Error(`cloning ${source} failed (${exitCode}): ${stderr}`)
 }
 
 async function run(binary, arguments_, overrides = {}) {
