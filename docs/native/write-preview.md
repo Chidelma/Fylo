@@ -99,6 +99,12 @@ from `fylo-write-preview failpoints`, not from the harness, and every declared
 point must be reached by some scenario — so a new failpoint cannot be added
 without either being exercised or failing this gate.
 
+A transition guarding a capability the platform lacks cannot be reached, so
+the gate exempts it and prints why: raw-file transitions need extended
+attributes, which some filesystems do not carry, and the ownership transitions
+need POSIX ownership, which Windows does not offer. Reduced coverage is
+therefore visible in the log rather than implied by a pass.
+
 Each transition is interrupted two ways. `abort` loses the process, so the next
 opener must recover the journal. `enospc` injects a real full-volume error
 number, which is an ordinary I/O failure rather than a lost process: the writer

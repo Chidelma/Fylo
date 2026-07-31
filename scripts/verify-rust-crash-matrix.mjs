@@ -65,6 +65,15 @@ try {
     const { failpoints } = JSON.parse((await run(binary, ['failpoints'])).stdout)
     assert(Array.isArray(failpoints) && failpoints.length > 0, 'Rust declared no failpoints')
 
+    // Raw files keep their durable key in an extended attribute. Some
+    // filesystems — a CI runner's tmpfs among them — do not carry one, and a
+    // collection seeded there is unreadable through no fault of the writer.
+    const probe = join(workspace, 'xattr-probe')
+    await cp(template, probe, { recursive: true })
+    const probed = await run(binary, ['recover', '--root', probe, '--collection', fileCollection])
+    const extendedAttributes = probed.exitCode === 0
+    await rm(probe, { recursive: true, force: true })
+
     const scenarios = [
         {
             name: 'put-document',
@@ -222,7 +231,7 @@ try {
             },
             args: (root) => ['commit', '--root', root, '--message', 'crash matrix commit']
         }
-    ]
+    ].filter((scenario) => extendedAttributes || !scenario.name.includes('file'))
 
     // Each durable transition is interrupted two ways. `abort` loses the
     // process, so the next opener must recover the journal. `enospc` is an
@@ -230,6 +239,7 @@ try {
     // nothing for recovery to do — a distinction the crash case cannot make.
     const ACTIONS = ['abort', 'enospc']
     const reached = new Set()
+    const unsupported = new Set()
     let interrupted = 0
     for (const failpoint of failpoints) {
         for (const scenario of scenarios) {
@@ -243,7 +253,12 @@ try {
                     FYLO_RUST_FAILPOINT: failpoint,
                     FYLO_RUST_FAILPOINT_ACTION: action
                 })
-                if (failed.exitCode === 0) {
+                // A mutation the platform does not offer at all never reaches
+                // the transition, so it is not evidence either way.
+                if (failed.exitCode === 0 || failed.stderr.includes('ENATIVE_UNSUPPORTED')) {
+                    if (failed.stderr.includes('ENATIVE_UNSUPPORTED')) {
+                        unsupported.add(`${scenario.name} (${failed.stderr.trim().slice(0, 60)})`)
+                    }
                     await rm(root, { recursive: true, force: true })
                     continue
                 }
@@ -261,10 +276,38 @@ try {
         }
     }
 
+    // A transition guarding a capability the platform lacks cannot be reached
+    // here, and pretending otherwise would either fail honest runs or hide a
+    // real gap. Each exemption names the capability it needs and is printed, so
+    // a platform's reduced coverage is visible in the log rather than implied.
+    const REQUIRES = {
+        'before-file-write': 'extended attributes',
+        'after-file-rename': 'extended attributes',
+        'after-file-sync': 'extended attributes',
+        'after-chown': 'POSIX ownership',
+        'after-chmod': 'POSIX ownership',
+        'after-access-marker': 'POSIX ownership'
+    }
+    const available = {
+        'extended attributes': extendedAttributes,
+        'POSIX ownership': platform() !== 'win32'
+    }
+    if (!extendedAttributes) {
+        console.error(
+            'skipped raw-file scenarios: this filesystem does not carry extended attributes'
+        )
+    }
+    for (const skipped of unsupported) console.error(`skipped unsupported here: ${skipped}`)
+
     const uncovered = failpoints.filter((name) => !reached.has(name))
+    const exempt = uncovered.filter((name) => available[REQUIRES[name]] === false)
+    for (const name of exempt) {
+        console.error(`not reachable here: ${name} requires ${REQUIRES[name]}`)
+    }
+    const missing = uncovered.filter((name) => !exempt.includes(name))
     assert(
-        uncovered.length === 0,
-        `no scenario reaches these declared failpoints: ${uncovered.join(', ')}`
+        missing.length === 0,
+        `no scenario reaches these declared failpoints: ${missing.join(', ')}`
     )
     console.log(
         `Recovered ${interrupted} interrupted native mutations across ${failpoints.length} failpoints`
