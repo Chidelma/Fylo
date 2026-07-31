@@ -25,7 +25,7 @@ engine. It does not replace the production JavaScript machine server.
 Reads: `handshake`, `getDoc`, `getLatest`, `getMeta`, `findDocs`,
 `findDeletedDocs`, `inspectCollection`, `verifyCollection`, `log`, `branch`,
 `status`, `backupStatus`, `schemaInspect`, `schemaCurrent`, `schemaHistory`,
-`schemaDoctor`, `schemaValidate`, and `executeSQL` for `SELECT`.
+`schemaDoctor`, `schemaValidate`, `joinDocs`, and `executeSQL` for `SELECT`.
 
 Writes: `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`,
 `delDocs`, `restoreDoc`, `setMeta`, `createCollection`, `dropCollection`,
@@ -122,11 +122,21 @@ not create. It also asserts that a contradicting kind is refused, that dropping
 twice reports `ENATIVE_NOT_FOUND`, and that `FYLO_SHARD_WIDTH` reaches the
 descriptor — with a width past the published maximum refused.
 
+`joinDocs` is qualified differentially, because a join is answered from
+documents rather than from the index: eight joins run through both engines on
+one root and the results must agree — any-comparison matching, each mode,
+`$select` then `$rename`, `$groupby`, and `$onlyIds`. Every case must match
+something, since two empty results also compare equal. The comparison sorts
+keys: row order follows each engine's document enumeration — Rust walks
+TTID-ascending, JavaScript walks the directory — and that order is not part of
+the contract. For `$limit` only the row count is compared, because which rows a
+truncation keeps follows from that same order.
+
 ## Limitations
 
 Cancellation, timeouts, signal handling, and stderr back-pressure are open
-Phase 7 gates, as are the eight operations this preview still answers with
-`EUNSUPPORTEDOP`: joins, bulk import, repository checkout/diff/restore/merge,
+Phase 7 gates, as are the seven operations this preview still answers with
+`EUNSUPPORTEDOP`: bulk import, repository checkout/diff/restore/merge,
 `schemaMaterialize`, and S3 backup reconciliation. Until the client corpus runs against exact compiled binaries,
 this is not a substitute for the JavaScript server in a client's binary
 selection.

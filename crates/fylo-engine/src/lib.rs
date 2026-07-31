@@ -7,15 +7,15 @@
 mod encryption;
 mod schema;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
 use encryption::{EncryptionReader, is_encrypted_field, reject_undeclared_ciphertext};
 use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, decode_ttid};
 use fylo_query::{
-    IndexLookupValue, QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan, StructuredQuery,
-    index_entries_for_document,
+    IndexLookupValue, JoinSpec, QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan,
+    StructuredQuery, index_entries_for_document,
 };
 use fylo_storage_native::{
     AccessDescriptor, CollectionKind, GenerationStatus, IndexVerification, NativeAccess,
@@ -24,7 +24,7 @@ use fylo_storage_native::{
 };
 use schema::SchemaTools;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 const MAX_STABLE_READ_ATTEMPTS: usize = 3;
 /// Drifted index keys reported by one verification.
@@ -780,6 +780,89 @@ impl ReadOnlyEngine {
         self.find_with_access(collection, query, None)
     }
 
+    /// Join two document collections.
+    ///
+    /// A nested loop over both sides, matching the JavaScript engine: joins are
+    /// answered from documents rather than from the prefix index, because the
+    /// index records keys and a join compares values.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for unsafe/corrupt storage or an invalid join.
+    pub fn join(
+        &self,
+        join: &JoinSpec,
+        actor: Option<&AccessContext>,
+    ) -> Result<JoinResult, EngineError> {
+        let empty = StructuredQuery::from_value(&json!({}), QueryLimits::default())
+            .map_err(EngineError::query)?;
+        let left = self.find_with_access(join.left_collection(), &empty, actor)?;
+        let right = self.find_with_access(join.right_collection(), &empty, actor)?;
+
+        let mut rows: Vec<JoinedRow> = Vec::new();
+        'outer: for left_row in &left {
+            for right_row in &right {
+                if !join.matches(left_row.document.fields(), right_row.document.fields()) {
+                    continue;
+                }
+                // The pair identifier is the JavaScript key verbatim: two
+                // identifiers separated by a comma and a space.
+                rows.push((
+                    format!("{}, {}", left_row.metadata.id, right_row.metadata.id),
+                    join.project(left_row.document.fields(), right_row.document.fields()),
+                ));
+                if join.limit().is_some_and(|limit| rows.len() >= limit) {
+                    break 'outer;
+                }
+            }
+        }
+
+        let Some(field) = join.group_by() else {
+            if join.only_ids() {
+                return Ok(JoinResult::Ids(
+                    rows.into_iter().map(|(id, _)| id).collect(),
+                ));
+            }
+            return Ok(JoinResult::Rows(
+                rows.into_iter()
+                    .map(|(id, row)| (id, Value::Object(row)))
+                    .collect(),
+            ));
+        };
+        let mut grouped: BTreeMap<String, Vec<JoinedRow>> = BTreeMap::new();
+        for (id, row) in rows {
+            // `String(data[field])` in JavaScript, so an absent field buckets
+            // under "undefined" rather than being dropped.
+            let key = match row.get(field) {
+                None => "undefined".to_owned(),
+                Some(Value::String(text)) => text.clone(),
+                Some(value) => value.to_string(),
+            };
+            grouped.entry(key).or_default().push((id, row));
+        }
+        if join.only_ids() {
+            return Ok(JoinResult::GroupedIds(
+                grouped
+                    .into_iter()
+                    .map(|(key, rows)| (key, rows.into_iter().map(|(id, _)| id).collect()))
+                    .collect(),
+            ));
+        }
+        Ok(JoinResult::Grouped(
+            grouped
+                .into_iter()
+                .map(|(key, rows)| {
+                    (
+                        key,
+                        rows.into_iter()
+                            .map(|(id, row)| (id, Value::Object(row)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        ))
+    }
+
     /// Execute a structured query as a trusted actor.
     ///
     /// Protected rows that deny reads are omitted, matching the JavaScript
@@ -1250,6 +1333,27 @@ pub struct ReadDocument {
     pub metadata: CanonicalMetadata,
     /// Stored JSON document.
     pub document: Document,
+}
+
+/// One joined pair: the `"<leftId>, <rightId>"` key and the projected row.
+type JoinedRow = (String, Map<String, Value>);
+
+/// One join's result, in the four shapes the JavaScript engine returns.
+///
+/// The shape is chosen by the join, not by the caller: `$groupby` buckets the
+/// rows and `$onlyIds` drops the bodies, so the four combinations are distinct
+/// result types rather than one type with empty fields.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum JoinResult {
+    /// Joined rows keyed by `"<leftId>, <rightId>"`.
+    Rows(Map<String, Value>),
+    /// Joined pair identifiers only.
+    Ids(Vec<String>),
+    /// Rows bucketed by the `$groupby` field.
+    Grouped(BTreeMap<String, Map<String, Value>>),
+    /// Pair identifiers bucketed by the `$groupby` field.
+    GroupedIds(BTreeMap<String, Vec<String>>),
 }
 
 /// Retained soft-deleted JSON document.

@@ -174,6 +174,127 @@ try {
     )
     await bulkReader.close()
 
+    // A join is answered from documents rather than the index, so the only way
+    // to know Rust agrees is to ask both engines the same joins and compare.
+    // Each case isolates one rule: any-comparison matching, right winning a
+    // shared name, projection order, grouping, and identifiers only.
+    const joinReader = new Fylo(root, { versioning: { autoCommit: false } })
+    await joinReader.ready()
+    await joinReader.left.create()
+    await joinReader.right.create()
+    await joinReader.left.put('4VRNF52JPE1', { key: 1, name: 'Ada', score: 10 })
+    await joinReader.left.put('4VRNF52JPE2', { key: 2, name: 'Grace', score: 20 })
+    await joinReader.right.put('4VRNF52JPE3', { key: 1, name: 'Lovelace', tier: 'gold' })
+    await joinReader.right.put('4VRNF52JPE4', { key: 2, name: 'Hopper', tier: 'gold' })
+
+    const joins = [
+        {
+            $leftCollection: 'left',
+            $rightCollection: 'right',
+            $mode: 'inner',
+            $on: { key: { $eq: 'key' } }
+        },
+        {
+            $leftCollection: 'left',
+            $rightCollection: 'right',
+            $mode: 'left',
+            $on: { key: { $eq: 'key' } }
+        },
+        {
+            $leftCollection: 'left',
+            $rightCollection: 'right',
+            $mode: 'right',
+            $on: { key: { $eq: 'key' } }
+        },
+        {
+            $leftCollection: 'left',
+            $rightCollection: 'right',
+            $mode: 'inner',
+            $on: { score: { $gt: 'key' } }
+        },
+        {
+            $leftCollection: 'left',
+            $rightCollection: 'right',
+            $mode: 'inner',
+            $on: { key: { $eq: 'key' } },
+            $select: ['name', 'tier'],
+            $rename: { name: 'who' }
+        },
+        {
+            $leftCollection: 'left',
+            $rightCollection: 'right',
+            $mode: 'inner',
+            $on: { key: { $eq: 'key' } },
+            $groupby: 'tier'
+        },
+        {
+            $leftCollection: 'left',
+            $rightCollection: 'right',
+            $mode: 'inner',
+            $on: { key: { $eq: 'key' } },
+            $onlyIds: true
+        },
+        {
+            $leftCollection: 'left',
+            $rightCollection: 'right',
+            $mode: 'inner',
+            $on: { key: { $eq: 'key' } },
+            $limit: 1
+        }
+    ]
+    const nativeJoins = await session(
+        binary,
+        joins.map((join, index) =>
+            JSON.stringify({ op: 'joinDocs', requestId: `join${index}`, join })
+        )
+    )
+    for (const [index, join] of joins.entries()) {
+        const frame = nativeJoins[index]
+        assert(frame.ok === true, `Rust joinDocs failed: ${JSON.stringify(frame.error)}`)
+        const expected = await joinReader.join(join)
+        // Two empty results compare equal, so a corpus that matched nothing
+        // would pass without testing anything.
+        assert(
+            Object.keys(expected).length > 0,
+            `join case ${index} matched nothing, so it proves nothing`
+        )
+        if (join.$limit) {
+            // Row order follows each engine's document enumeration — Rust walks
+            // TTID-ascending, JavaScript walks the directory — and which rows a
+            // truncation keeps follows from that. The count is the contract;
+            // the identity of the surviving row is not.
+            assert(
+                Object.keys(frame.result).length === Object.keys(expected).length,
+                `Rust join ${index} kept a different number of rows under $limit`
+            )
+            continue
+        }
+        assert(
+            canonical(frame.result) === canonical(expected),
+            `Rust join ${index} disagrees with JavaScript:\n  rust ${JSON.stringify(frame.result)}\n  js   ${JSON.stringify(expected)}`
+        )
+    }
+    await joinReader.close()
+
+    const refusedJoin = (
+        await session(binary, [
+            JSON.stringify({
+                op: 'joinDocs',
+                requestId: 'crossProduct',
+                join: {
+                    $leftCollection: 'left',
+                    $rightCollection: 'right',
+                    $mode: 'inner',
+                    $on: {}
+                }
+            })
+        ])
+    )[0]
+    assert(
+        refusedJoin.ok === false && refusedJoin.error.code === 'EBADREQUEST',
+        'Rust accepted a join with nothing to compare'
+    )
+
     // A natively created collection has to be legible to the JavaScript engine:
     // the descriptor names the namespace and the shard width, and a missing or
     // foreign index manifest would leave it unreadable rather than empty.
@@ -564,6 +685,21 @@ async function command(arguments_) {
     })
     const exitCode = await subprocess.exited
     if (exitCode !== 0) throw new Error(`command failed (${exitCode}): ${arguments_.join(' ')}`)
+}
+
+/**
+ * Stringify with object keys sorted, so a comparison sees the joined set rather
+ * than the order each engine happened to enumerate documents in.
+ */
+function canonical(value) {
+    if (Array.isArray(value)) return `[${[...value].map(canonical).sort().join(',')}]`
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value)
+            .sort()
+            .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+            .join(',')}}`
+    }
+    return JSON.stringify(value)
 }
 
 function assert(condition, message) {

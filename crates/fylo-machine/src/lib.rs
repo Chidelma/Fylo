@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use fylo_engine::{AccessContext, EngineError, ReadOnlyEngine, WriteEngine};
-use fylo_query::{QueryLimits, SqlOperation, StructuredQuery, prepare_sql};
+use fylo_query::{JoinSpec, QueryLimits, SqlOperation, StructuredQuery, prepare_sql};
 use fylo_storage_native::{
     CollectionKind, NativeStorageError, NativeWriteRoot, RootLease, WriteAccess, WriteActor,
 };
@@ -255,6 +255,7 @@ impl Session {
             "getMeta" => self.get_metadata(request),
             "backupStatus" => Ok(json!({ "configured": false, "state": "disabled", "runs": 0 })),
             "executeSQL" => self.execute_sql(request),
+            "joinDocs" => self.join_documents(request),
             "createCollection" => self.create_collection(request),
             "dropCollection" => self.drop_collection(request),
             "rebuildCollection" => self.rebuild_collection(request),
@@ -501,6 +502,23 @@ impl Session {
             .execute_sql_mutation(statement, actor.as_ref(), access(request)?)
             .map_err(|error| storage_error(&error))?;
         serde_json::to_value(mutation).map_err(|error| serialization_error(&error))
+    }
+
+    fn join_documents(&self, request: &Value) -> Result<Value, MachineError> {
+        let Some(join) = request.get("join") else {
+            return Err(MachineError::new(
+                "EBADREQUEST",
+                "machine request field \"join\" must be an object",
+            ));
+        };
+        let join = JoinSpec::from_value(join, QueryLimits::default())
+            .map_err(|error| MachineError::new("EBADREQUEST", error.to_string()))?;
+        let engine = self.engine(request)?;
+        let actor = actor(request)?;
+        let result = engine
+            .join(&join, actor.as_ref())
+            .map_err(|error| engine_error(&error))?;
+        serde_json::to_value(result).map_err(|error| serialization_error(&error))
     }
 
     fn create_collection(&self, request: &Value) -> Result<Value, MachineError> {
@@ -1068,8 +1086,9 @@ fn read_frame<R: BufRead>(
     }
 }
 
-const SUPPORTED_OPERATIONS: [&str; 30] = [
+const SUPPORTED_OPERATIONS: [&str; 31] = [
     "handshake",
+    "joinDocs",
     "backupStatus",
     "executeSQL",
     "createCollection",

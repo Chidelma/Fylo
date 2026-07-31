@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 mod index;
+mod join;
 mod sql;
 
 pub use index::{IndexLookupValue, index_entries_for_document};
+pub use join::{JoinComparator, JoinMode, JoinSpec, value_by_path};
 pub use sql::{AccessPath, SqlOperation, SqlPlan, prepare_sql};
 
 /// Current portable query contract.
