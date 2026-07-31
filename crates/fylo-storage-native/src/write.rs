@@ -2586,9 +2586,83 @@ fn capture_attributes(path: &Path) -> Result<Vec<CapturedAttribute>, NativeStora
 
 // The signature mirrors the Unix implementation so callers stay platform-free.
 #[allow(clippy::unnecessary_wraps)]
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn capture_attributes(_path: &Path) -> Result<Vec<CapturedAttribute>, NativeStorageError> {
     Ok(Vec::new())
+}
+
+/// Capture a record's alternate data stream so a rollback can restore it.
+///
+/// FYLO metadata lives in one JSON manifest stream on NTFS rather than in
+/// per-name xattrs, and its values are already base64, so the manifest maps
+/// directly onto the captured form the Unix path produces.
+#[cfg(windows)]
+fn capture_attributes(path: &Path) -> Result<Vec<CapturedAttribute>, NativeStorageError> {
+    Ok(read_attribute_stream(path)?
+        .into_iter()
+        .map(|(name, value)| CapturedAttribute { name, value })
+        .collect())
+}
+
+/// Restore a record's alternate data stream from its before-image.
+///
+/// The stream is replaced wholesale, and removed when the before-image had
+/// none, so a rolled-back mutation cannot leave an attribute it added behind.
+#[cfg(windows)]
+fn restore_attributes(
+    path: &Path,
+    attributes: &[CapturedAttribute],
+) -> Result<(), NativeStorageError> {
+    let stream = attribute_stream_path(path);
+    if attributes.is_empty() {
+        match fs::remove_file(&stream) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(NativeStorageError::io(error)),
+        }
+    }
+    let manifest: std::collections::BTreeMap<String, String> = attributes
+        .iter()
+        .map(|attribute| (attribute.name.clone(), attribute.value.clone()))
+        .collect();
+    let encoded = serde_json::to_vec(&manifest).map_err(|error| json_error(&error))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(stream)
+        .map_err(NativeStorageError::io)?;
+    file.write_all(&encoded).map_err(NativeStorageError::io)?;
+    file.sync_all().map_err(NativeStorageError::io)
+}
+
+/// Path of the FYLO metadata stream beside a record.
+#[cfg(windows)]
+fn attribute_stream_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+
+    let mut stream = OsString::from(path.as_os_str());
+    stream.push(":fylo.xattrs");
+    PathBuf::from(stream)
+}
+
+/// Read the FYLO metadata stream, treating an absent one as empty.
+#[cfg(windows)]
+fn read_attribute_stream(
+    path: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, NativeStorageError> {
+    match fs::read(attribute_stream_path(path)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("Windows FYLO ADS manifest is corrupt: {error}"),
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(std::collections::BTreeMap::new())
+        }
+        Err(error) => Err(NativeStorageError::io(error)),
+    }
 }
 
 #[cfg(unix)]
@@ -2625,7 +2699,7 @@ fn restore_attributes(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn restore_attributes(
     _path: &Path,
     attributes: &[CapturedAttribute],
@@ -2995,6 +3069,52 @@ mod tests {
             .get(super::super::META_UPDATED_XATTR)
             .map(|value| String::from_utf8_lossy(value).parse::<u64>().unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn a_before_image_restores_the_metadata_a_mutation_replaced() {
+        let fixture = TestRoot::create();
+        let writer = NativeWriteRoot::open(&fixture.0).unwrap();
+        writer
+            .put_document(
+                "users",
+                "4VRNF52JPCO",
+                br#"{"name":"Ada"}"#,
+                PutDocumentOptions::default(),
+            )
+            .unwrap();
+        let target = writer
+            .root
+            .collection("users")
+            .unwrap()
+            .read_document("4VRNF52JPCO")
+            .unwrap()
+            .path;
+
+        write_fylo_attribute(&target, "user.fylo.meta.team", br#""storage""#).unwrap();
+        let before = capture_attributes(&target).unwrap();
+        assert!(
+            before.iter().any(|a| a.name == "user.fylo.meta.team"),
+            "the before-image captured no metadata to restore"
+        );
+
+        // A mutation replaces one name and adds another.
+        write_fylo_attribute(&target, "user.fylo.meta.team", br#""platform""#).unwrap();
+        write_fylo_attribute(&target, "user.fylo.meta.draft", b"true").unwrap();
+
+        restore_attributes(&target, &before).unwrap();
+
+        let file = File::open(&target).unwrap();
+        let restored = crate::read_fylo_attributes(&file, &target).unwrap();
+        assert_eq!(
+            restored.get("user.fylo.meta.team").map(Vec::as_slice),
+            Some(&br#""storage""#[..]),
+            "rollback did not restore the replaced metadata"
+        );
+        assert!(
+            !restored.contains_key("user.fylo.meta.draft"),
+            "rollback left behind metadata the mutation added"
+        );
     }
 
     #[cfg(unix)]

@@ -56,8 +56,14 @@ clock, and a collision retries up to sixteen times before failing closed.
 
 `set-metadata` merges; it has no authoritative-replace mode, so a caller that
 needs the JavaScript `replaceDocMetadata` contract must send explicit `null`
-removals. Windows before-images do not yet capture alternate data streams, so a
-rolled-back metadata mutation restores bytes but not the stream on NTFS.
+removals.
+
+Before-images capture developer metadata on both platforms. FYLO keeps that
+metadata in per-name xattrs on POSIX and in one JSON manifest stream on NTFS,
+whose values are already base64, so the stream maps directly onto the captured
+form. A rollback replaces the stream wholesale and removes it when the
+before-image had none, so it can neither keep a value a mutation replaced nor
+leave behind a name it added.
 
 Encryption and schema validation run in `fylo-engine` before any byte reaches
 the journal, so an interrupted encrypted write can never leave plaintext behind.
