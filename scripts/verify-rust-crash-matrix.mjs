@@ -10,6 +10,8 @@ import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import Fylo from '../src/index.js'
+import { shardOf } from '../src/core/shard.js'
+import { getXattr } from '../src/storage/xattr.js'
 
 const workspace = await mkdtemp(join(tmpdir(), 'fylo-rust-crash-'))
 const template = join(workspace, 'template')
@@ -29,10 +31,30 @@ try {
     await seed[collection].put(secondIdentifier, { name: 'Grace', score: 50 })
     await seed[collection].put(deletedIdentifier, { name: 'Linus', score: 1 })
     await seed[collection].delete(deletedIdentifier)
-    await seed[fileCollection]
-        .put(new File([new Uint8Array([1, 2, 3, 4])], 'seed.bin'), { key: '/seed.bin' })
-        .metadata({ source: 'seed' })
+    const seededFile = String(
+        await seed[fileCollection]
+            .put(new File([new Uint8Array([1, 2, 3, 4])], 'seed.bin'), { key: '/seed.bin' })
+            .metadata({ source: 'seed' })
+    )
     await seed.close()
+
+    // Raw files keep their durable key in an extended attribute. Some
+    // filesystems — a CI runner's tmpfs among them — silently carry none, and a
+    // collection seeded there is unreadable through no fault of the writer. Ask
+    // the attribute directly: a recovery of a stable collection would answer
+    // without ever reading a raw file.
+    const extendedAttributes =
+        getXattr(
+            join(
+                template,
+                '.buckets',
+                fileCollection,
+                'docs',
+                shardOf(seededFile),
+                `${seededFile}.bin`
+            ),
+            'user.fylo.key'
+        ) !== null
 
     // A versioned root is a separate template: the repository failpoints are
     // only reachable where `.fylo-vcs` exists.
@@ -64,15 +86,6 @@ try {
 
     const { failpoints } = JSON.parse((await run(binary, ['failpoints'])).stdout)
     assert(Array.isArray(failpoints) && failpoints.length > 0, 'Rust declared no failpoints')
-
-    // Raw files keep their durable key in an extended attribute. Some
-    // filesystems — a CI runner's tmpfs among them — do not carry one, and a
-    // collection seeded there is unreadable through no fault of the writer.
-    const probe = join(workspace, 'xattr-probe')
-    await cp(template, probe, { recursive: true })
-    const probed = await run(binary, ['recover', '--root', probe, '--collection', fileCollection])
-    const extendedAttributes = probed.exitCode === 0
-    await rm(probe, { recursive: true, force: true })
 
     const scenarios = [
         {
