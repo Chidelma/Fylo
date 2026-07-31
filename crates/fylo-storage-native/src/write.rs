@@ -216,7 +216,7 @@ impl NativeWriteRoot {
         let target = collection
             .path
             .join("docs")
-            .join(crate::shard_of(identifier))
+            .join(crate::shard_of(identifier, collection.shard_width()))
             .join(format!("{identifier}.json"));
         if path_exists_no_follow(&target)? {
             return Err(NativeStorageError::new(
@@ -296,7 +296,7 @@ impl NativeWriteRoot {
         let target = collection
             .path
             .join("docs")
-            .join(crate::shard_of(identifier))
+            .join(crate::shard_of(identifier, collection.shard_width()))
             .join(format!("{identifier}{}", options.extension));
         let mut transaction = Transaction::begin(self, &collection, "put-file")?;
         let outcome = (|| {
@@ -594,7 +594,7 @@ impl NativeWriteRoot {
         let target = collection
             .path
             .join(".deleted")
-            .join(crate::shard_of(identifier))
+            .join(crate::shard_of(identifier, collection.shard_width()))
             .join(format!("{identifier}.json"));
         if path_exists_no_follow(&target)? {
             return Err(NativeStorageError::new(
@@ -666,7 +666,7 @@ impl NativeWriteRoot {
         let target = collection
             .path
             .join("docs")
-            .join(crate::shard_of(identifier))
+            .join(crate::shard_of(identifier, collection.shard_width()))
             .join(format!("{identifier}.json"));
         let mut transaction = Transaction::begin(self, &collection, "restore-document")?;
         let outcome = (|| {
@@ -1137,7 +1137,7 @@ fn deleted_document_path(collection: &super::NativeCollection, identifier: &str)
     collection
         .path
         .join(".deleted")
-        .join(crate::shard_of(identifier))
+        .join(crate::shard_of(identifier, collection.shard_width()))
         .join(format!("{identifier}.json"))
 }
 

@@ -1,7 +1,14 @@
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { CollectionNotFoundError, validateCollectionName } from '../core/collection.js'
-import { assertPathInside, legacyShardOf, shardOf, validateDocId } from '../core/doc-id.js'
+import { assertPathInside, validateDocId } from '../core/doc-id.js'
+import {
+    DEFAULT_SHARD_WIDTH,
+    assertShardWidth,
+    configuredShardWidth,
+    legacyShardOf,
+    shardOf
+} from '../core/shard.js'
 import { Cipher } from '../security/cipher.js'
 import { FyloSyncError, resolveSyncMode } from '../replication/sync.js'
 import { FyloS3Backup } from '../replication/s3-backup.js'
@@ -190,8 +197,8 @@ function restoreMetadataXattrsExact(target, snapshot) {
  * @param {string} root @param {string} docId @param {string} filename
  * @returns {string}
  */
-function shardedPath(root, docId, filename) {
-    const target = path.join(root, shardOf(docId), filename)
+function shardedPath(root, docId, filename, width = DEFAULT_SHARD_WIDTH) {
+    const target = path.join(root, shardOf(docId, width), filename)
     assertPathInside(root, target)
     if (existsSync(target)) return target
     const legacy = path.join(root, legacyShardOf(docId), filename)
@@ -280,6 +287,8 @@ export class FilesystemEngine {
          * @type {Map<string, FyloCollectionKind>}
          */
         this.kinds = new Map()
+        /** @type {Map<string, number>} recorded shard width per collection */
+        this.shardWidths = new Map()
         this.locks = new FilesystemLockManager(this.collectionRoot.bind(this), this.storage)
         this.events = new FilesystemEventBus(this.collectionRoot.bind(this), this.storage)
         this.queue = options.queue
@@ -308,7 +317,8 @@ export class FilesystemEngine {
             this.storage,
             this.docsRoot.bind(this),
             this.deletedRoot.bind(this),
-            this.ensureCollection.bind(this)
+            this.ensureCollection.bind(this),
+            this.shardWidth.bind(this)
         )
         this.queryEngine = new FilesystemQueryEngine({
             index: this.index
@@ -395,11 +405,65 @@ export class FilesystemEngine {
                 throw new Error(`Collection descriptor is corrupt: ${collection}`)
             }
             kind = parsed.kind
+            // A descriptor written before shard widths existed records none, and
+            // its records sit under the width this release defaults to.
+            this.shardWidths.set(
+                collection,
+                parsed.shardWidth === undefined
+                    ? DEFAULT_SHARD_WIDTH
+                    : assertShardWidth(parsed.shardWidth)
+            )
         }
         if (kind === 'file') await this.migrateBucketIfNeeded(collection)
         this.kinds.set(collection, kind)
         return kind
     }
+    /**
+     * Synchronous shard width, valid once `resolveKind` has run for the
+     * collection — the same contract every sync path builder already relies on.
+     *
+     * @param {string} collection @returns {number}
+     */
+    shardWidth(collection) {
+        return this.shardWidths.get(collection) ?? DEFAULT_SHARD_WIDTH
+    }
+
+    /**
+     * The shard width a collection's records are stored under.
+     *
+     * The descriptor is the authority. `FYLO_SHARD_WIDTH` chooses the width for
+     * collections that do not exist yet and is never consulted here, because a
+     * per-process variable deciding a durable layout would let two processes
+     * disagree and relocate every record back and forth.
+     *
+     * @param {string} collection @returns {Promise<number>}
+     */
+    async collectionShardWidth(collection) {
+        await this.resolveKind(collection)
+        return this.shardWidths.get(collection) ?? DEFAULT_SHARD_WIDTH
+    }
+
+    /**
+     * Refuse a write when the environment asks for a width the collection was
+     * not built with. Relocating every record is bounded only by the collection
+     * size, so it is never done implicitly inside a write.
+     *
+     * @param {string} collection @returns {Promise<void>}
+     */
+    async assertShardWidthMatches(collection) {
+        const recorded = await this.collectionShardWidth(collection)
+        const requested = configuredShardWidth()
+        if (recorded === requested) return
+        const error = new Error(
+            `Collection "${collection}" is sharded ${recorded} characters wide but ` +
+                `FYLO_SHARD_WIDTH requests ${requested}. Run "fylo reshard ${collection} ` +
+                `--width ${requested}" to move its records, or set FYLO_SHARD_WIDTH back ` +
+                `to ${recorded}.`
+        )
+        Object.assign(error, { code: 'ESHARDWIDTH' })
+        throw error
+    }
+
     /** @param {string} collection @returns {Promise<FyloCollectionKind>} */
     async collectionKind(collection) {
         return await this.resolveKind(collection)
@@ -436,11 +500,21 @@ export class FilesystemEngine {
         // ponytail: docId is validated at the public method / storage-layer entry
         // before it reaches this sync path-builder; re-checking via the async
         // `ttid` binary here would force every path build async.
-        return shardedPath(this.docsRoot(collection), docId, `${docId}.json`)
+        return shardedPath(
+            this.docsRoot(collection),
+            docId,
+            `${docId}.json`,
+            this.shardWidth(collection)
+        )
     }
     /** @param {string} collection @param {TTID} docId @returns {string} */
     deletedPath(collection, docId) {
-        return shardedPath(this.deletedRoot(collection), docId, `${docId}.json`)
+        return shardedPath(
+            this.deletedRoot(collection),
+            docId,
+            `${docId}.json`,
+            this.shardWidth(collection)
+        )
     }
     /**
      * Runs a configured sync hook according to the collection's sync mode.
@@ -831,6 +905,11 @@ export class FilesystemEngine {
      */
     async withCollectionWriteLock(collection, action, operation = 'write') {
         if (this.transactions.isActive(collection)) return await action()
+        // Every durable mutation passes here, so this is where a collection
+        // whose layout does not match the configured width is refused. Reads
+        // are deliberately unaffected: an existing root stays readable whatever
+        // the environment asks for.
+        await this.assertShardWidthMatches(collection)
         const previous = this.writeLanes.get(collection) ?? Promise.resolve()
         /** @type {() => void} */
         let release = () => {}
@@ -919,16 +998,22 @@ export class FilesystemEngine {
         if (options.versioned !== undefined && typeof options.versioned !== 'boolean') {
             throw new Error('Collection "versioned" option must be a boolean')
         }
+        const width = configuredShardWidth()
         await this.storage.write(
             this.collectionDescriptorPath(collection),
             `${JSON.stringify({
                 version: 1,
                 kind,
+                shardWidth: width,
                 ...(options.versioned === false ? { versioned: false } : {})
             })}\n`
         )
-        // Route this collection's paths to the right namespace before building them.
+        // Route this collection's paths to the right namespace before building
+        // them, and record the width the descriptor just captured: the sync
+        // path builders read this cache, so leaving it unset would write the
+        // default width into a collection whose descriptor says otherwise.
         this.kinds.set(collection, kind)
+        this.shardWidths.set(collection, width)
         await this.ensureCollection(collection)
         await this.invalidateQueryCache(collection)
     }
@@ -1459,7 +1544,12 @@ export class FilesystemEngine {
                 const { key, extension } = this.files.resolveMetadata(docId, source)
                 await this.assertObjectKeyAvailable(collection, key)
                 await this.transactions.capture(
-                    shardedPath(this.docsRoot(collection), docId, `${docId}${extension}`)
+                    shardedPath(
+                        this.docsRoot(collection),
+                        docId,
+                        `${docId}${extension}`,
+                        this.shardWidth(collection)
+                    )
                 )
                 const stored = await this.files.writeStoredFile(collection, docId, source)
                 try {
@@ -1595,14 +1685,19 @@ export class FilesystemEngine {
                 // must be resolved, not rebuilt from the id).
                 const previousPath =
                     (kind === 'file'
-                        ? await this.files.findPath(this.docsRoot(collection), docId)
+                        ? await this.files.findPath(
+                              this.docsRoot(collection),
+                              docId,
+                              this.shardWidth(collection)
+                          )
                         : this.docPath(collection, docId)) ?? undefined
                 if (!previousPath) throw new Error(`Document path not found: ${docId}`)
                 await this.assertDocumentAccess(collection, docId, actorUid, 'write')
                 const pendingDeletedPath = shardedPath(
                     this.deletedRoot(collection),
                     docId,
-                    path.basename(previousPath)
+                    path.basename(previousPath),
+                    this.shardWidth(collection)
                 )
                 await this.transactions.capture(previousPath)
                 await this.transactions.capture(pendingDeletedPath)
@@ -1672,7 +1767,8 @@ export class FilesystemEngine {
                 const activePath = shardedPath(
                     this.docsRoot(collection),
                     docId,
-                    path.basename(deletedPath)
+                    path.basename(deletedPath),
+                    this.shardWidth(collection)
                 )
                 await this.transactions.capture(deletedPath)
                 await this.transactions.capture(activePath)
@@ -1873,7 +1969,7 @@ export class FilesystemEngine {
         ]
         for (const [namespace, root, ids] of namespaces) {
             for (const docId of ids) {
-                const target = await this.files.findPath(root, docId)
+                const target = await this.files.findPath(root, docId, this.shardWidth(collection))
                 if (!target) continue
                 let check
                 try {
@@ -1931,7 +2027,11 @@ export class FilesystemEngine {
             if (!(await this.canAccessDocument(collection, String(docId), actorUid, 'read'))) {
                 continue
             }
-            const target = await this.files.findPath(this.docsRoot(collection), String(docId))
+            const target = await this.files.findPath(
+                this.docsRoot(collection),
+                String(docId),
+                this.shardWidth(collection)
+            )
             if (!target) continue
             let key
             try {
@@ -1960,7 +2060,11 @@ export class FilesystemEngine {
         await validateDocId(docId)
         await this.requireCollection(collection)
         if ((await this.collectionKind(collection)) === 'file') {
-            const target = await this.files.findPath(this.docsRoot(collection), docId)
+            const target = await this.files.findPath(
+                this.docsRoot(collection),
+                docId,
+                this.shardWidth(collection)
+            )
             if (!target) throw new Error(`Raw file not found: ${docId}`)
             return target
         }

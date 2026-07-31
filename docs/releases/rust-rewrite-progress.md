@@ -103,8 +103,12 @@ ADR 0006 changed record sharding from the leading to the trailing characters of
 an identifier's creation segment. Measured: 4000 consecutive TTIDs produced one
 leading-pair bucket and 646 trailing-pair buckets. Both engines write the
 canonical shard and read either, so an existing root stays readable and
-converges as records are rewritten. The bulk `migrate-shards` command, its
-interrupted-migration crash case, and the downgrade path are outstanding.
+converges as records are rewritten. The width is configurable per collection through
+`FYLO_SHARD_WIDTH` for newly created collections, recorded in the catalog
+descriptor and read from there by both engines; a write whose configured width
+disagrees with the record fails closed with `ESHARDWIDTH`. The bulk `reshard`
+command, its interrupted-migration crash case, and the downgrade path are
+outstanding.
 
 ## Promotion discipline
 

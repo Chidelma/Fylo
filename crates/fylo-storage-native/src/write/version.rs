@@ -84,6 +84,7 @@ pub struct RepositoryStatus {
 
 /// One working-tree file captured as a content-addressed blob.
 struct SnapshotEntry {
+    shard_width: u32,
     collection: String,
     namespace: &'static str,
     identifier: String,
@@ -254,11 +255,16 @@ impl NativeWriteRoot {
                 {
                     continue;
                 }
+                let shard_width = self
+                    .root
+                    .collection(&collection)
+                    .map_or(crate::DEFAULT_SHARD_WIDTH, |handle| handle.shard_width());
                 let collection_root = data_root.join(&collection);
                 for (namespace, kind) in [("docs", "active"), (".deleted", "deleted")] {
                     Self::snapshot_namespace(
                         repository,
                         persist,
+                        shard_width,
                         &collection_root.join(namespace),
                         &collection,
                         kind,
@@ -279,6 +285,7 @@ impl NativeWriteRoot {
     fn snapshot_namespace(
         repository: &Path,
         persist: bool,
+        shard_width: u32,
         namespace_root: &Path,
         collection: &str,
         kind: &'static str,
@@ -325,6 +332,7 @@ impl NativeWriteRoot {
                     write_object(repository, &hash, &bytes)?;
                 }
                 entries.push(SnapshotEntry {
+                    shard_width,
                     collection: collection.to_owned(),
                     namespace: kind,
                     identifier: identifier.clone(),
@@ -337,6 +345,7 @@ impl NativeWriteRoot {
                         write_object(repository, &hash, &blob)?;
                     }
                     entries.push(SnapshotEntry {
+                        shard_width,
                         collection: collection.to_owned(),
                         namespace: "metadata",
                         identifier: identifier.clone(),
@@ -443,7 +452,7 @@ fn write_tree(
             .or_default()
             .entry(namespace_directory(entry.namespace))
             .or_default()
-            .entry(crate::shard_of(&entry.identifier))
+            .entry(crate::shard_of(&entry.identifier, entry.shard_width))
             .or_default()
             .insert(entry.filename.clone(), entry.hash.clone());
     }

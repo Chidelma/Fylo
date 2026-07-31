@@ -128,6 +128,7 @@ impl NativeRoot {
         } else {
             CollectionDescriptor {
                 kind: CollectionKind::Document,
+                shard_width: None,
             }
         };
         let namespace = match descriptor.kind {
@@ -142,6 +143,7 @@ impl NativeRoot {
             path,
             kind: descriptor.kind,
             namespace: namespace.to_owned(),
+            shard_width: validate_shard_width(descriptor.shard_width)?,
         })
     }
 
@@ -633,8 +635,15 @@ pub enum CollectionKind {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CollectionDescriptor {
     kind: CollectionKind,
+    /// Characters of the creation segment a record's shard directory uses.
+    ///
+    /// A descriptor written before shard widths existed records none, and its
+    /// records sit under the default this release uses.
+    #[serde(default)]
+    shard_width: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -693,7 +702,8 @@ impl VersionTreeEntry {
                     && expected_shard.is_some_and(|shard| {
                         // A tree written before the shard change buckets by the
                         // leading characters, so an old commit stays verifiable.
-                        shard == shard_of(identifier) || shard == legacy_shard_of(identifier)
+                        (0..=MAX_SHARD_WIDTH).any(|width| shard == shard_of(identifier, width))
+                            || shard == legacy_shard_of(identifier)
                     })
             }),
         };
@@ -802,9 +812,16 @@ pub struct NativeCollection {
     path: PathBuf,
     kind: CollectionKind,
     namespace: String,
+    shard_width: u32,
 }
 
 impl NativeCollection {
+    /// Characters of the creation segment this collection's shards use.
+    #[must_use]
+    pub const fn shard_width(&self) -> u32 {
+        self.shard_width
+    }
+
     /// Collection name.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -929,7 +946,7 @@ impl NativeCollection {
                     continue;
                 };
                 validate_ttid_shape(identifier)?;
-                if !shard_matches(identifier, &shard_path) {
+                if !shard_matches(identifier, &shard_path, self.shard_width) {
                     return Err(NativeStorageError::new(
                         NativeStorageErrorCode::InvalidDocumentId,
                         "document identifier does not match its shard",
@@ -1009,7 +1026,9 @@ impl NativeCollection {
                 };
                 validate_ttid_shape(identifier)?;
                 validate_raw_extension(filename, identifier)?;
-                if shard_name != shard_of(identifier) && shard_name != legacy_shard_of(identifier) {
+                if shard_name != shard_of(identifier, self.shard_width)
+                    && shard_name != legacy_shard_of(identifier)
+                {
                     return Err(NativeStorageError::new(
                         NativeStorageErrorCode::InvalidDocumentId,
                         "raw-file identifier does not match its shard",
@@ -1094,7 +1113,12 @@ impl NativeCollection {
         namespace: &Path,
         identifier: &str,
     ) -> Result<StoredBytes, NativeStorageError> {
-        let path = existing_shard_path(namespace, identifier, &format!("{identifier}.json"))?;
+        let path = existing_shard_path(
+            namespace,
+            identifier,
+            &format!("{identifier}.json"),
+            self.shard_width,
+        )?;
         let (mut file, metadata) = self.root.open_file(&path, MAX_DOCUMENT_BYTES)?;
         let attributes = read_fylo_attributes(&file, &path)?;
         let bytes = read_bounded(
@@ -1202,7 +1226,7 @@ impl NativeCollection {
         namespace: &Path,
         identifier: &str,
     ) -> Result<PathBuf, NativeStorageError> {
-        let mut shard = namespace.join(shard_of(identifier));
+        let mut shard = namespace.join(shard_of(identifier, self.shard_width));
         if !path_exists_no_follow(&shard)? {
             shard = namespace.join(legacy_shard_of(identifier));
         }
@@ -2234,6 +2258,22 @@ fn validate_version_hash(hash: &str) -> Result<(), NativeStorageError> {
     }
 }
 
+/// Default shard width for a collection whose descriptor records none.
+pub const DEFAULT_SHARD_WIDTH: u32 = 2;
+/// Widest shard a collection may use.
+pub const MAX_SHARD_WIDTH: u32 = 4;
+
+fn validate_shard_width(width: Option<u32>) -> Result<u32, NativeStorageError> {
+    let width = width.unwrap_or(DEFAULT_SHARD_WIDTH);
+    if width > MAX_SHARD_WIDTH {
+        return Err(NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            format!("collection shard width must be 0 to {MAX_SHARD_WIDTH}: {width}"),
+        ));
+    }
+    Ok(width)
+}
+
 /// On-disk shard directory for a record.
 ///
 /// The shard is the last two characters of the identifier's *creation*
@@ -2246,18 +2286,22 @@ fn validate_version_hash(hash: &str) -> Result<(), NativeStorageError> {
 /// `created-updated-deleted` lifecycle segments, and sharding the raw string
 /// would move a record between directories when it is updated or deleted.
 #[must_use]
-pub fn shard_of(identifier: &str) -> String {
+pub fn shard_of(identifier: &str, width: u32) -> String {
+    if width == 0 {
+        return String::new();
+    }
     let created = creation_segment(identifier);
+    let width = width as usize;
     let shard: String = created
         .chars()
         .rev()
-        .take(2)
+        .take(width)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect();
-    if shard.len() < 2 {
-        format!("{shard:0>2}")
+    if shard.chars().count() < width {
+        format!("{shard:0>width$}")
     } else {
         shard
     }
@@ -2283,19 +2327,20 @@ pub fn legacy_shard_of(identifier: &str) -> String {
 /// Either the canonical shard or the superseded leading-character one is
 /// accepted while the compatibility window is open; anything else means the
 /// record was moved by something other than FYLO.
-fn shard_matches(identifier: &str, shard_path: &Path) -> bool {
+fn shard_matches(identifier: &str, shard_path: &Path, width: u32) -> bool {
     let Some(shard) = shard_path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    shard == shard_of(identifier) || shard == legacy_shard_of(identifier)
+    shard == shard_of(identifier, width) || shard == legacy_shard_of(identifier)
 }
 
 fn existing_shard_path(
     namespace: &Path,
     identifier: &str,
     filename: &str,
+    width: u32,
 ) -> Result<PathBuf, NativeStorageError> {
-    let canonical = namespace.join(shard_of(identifier)).join(filename);
+    let canonical = namespace.join(shard_of(identifier, width)).join(filename);
     if path_exists_no_follow(&canonical)? {
         return Ok(canonical);
     }

@@ -2,7 +2,8 @@ import path from 'node:path'
 import { utimesSync } from 'node:fs'
 import { lstat, realpath } from 'node:fs/promises'
 import TTID from '../vendor/ttid.js'
-import { assertPathInside, legacyShardOf, shardOf, validateDocId } from '../core/doc-id.js'
+import { assertPathInside, validateDocId } from '../core/doc-id.js'
+import { DEFAULT_SHARD_WIDTH, legacyShardOf, shardOf } from '../core/shard.js'
 import {
     rawFileContentType,
     rawFileExtension,
@@ -116,11 +117,14 @@ export class FilesystemFiles {
      * @param {(collection: string) => string} deletedRoot
      * @param {(collection: string) => Promise<void>} ensureCollection
      */
-    constructor(storage, docsRoot, deletedRoot, ensureCollection) {
+    constructor(storage, docsRoot, deletedRoot, ensureCollection, shardWidth) {
         this.storage = storage
         this.docsRoot = docsRoot
         this.deletedRoot = deletedRoot
         this.ensureCollection = ensureCollection
+        // Raw files shard exactly as documents do, so the width has to come
+        // from the same recorded descriptor rather than a second default.
+        this.shardWidth = shardWidth ?? (() => DEFAULT_SHARD_WIDTH)
     }
 
     /**
@@ -162,7 +166,11 @@ export class FilesystemFiles {
      * @returns {Promise<string>}
      */
     async repairKey(collection, docId) {
-        const target = await this.findPath(this.docsRoot(collection), docId)
+        const target = await this.findPath(
+            this.docsRoot(collection),
+            docId,
+            this.shardWidth(collection)
+        )
         if (!target) throw new Error(`Raw file not found: ${docId}`)
         const key = `/${path.basename(target)}`
         setXattr(target, KEY_XATTR, key)
@@ -193,11 +201,11 @@ export class FilesystemFiles {
      * @param {string} docId
      * @returns {Promise<string | null>}
      */
-    async findPath(root, docId) {
+    async findPath(root, docId, width = DEFAULT_SHARD_WIDTH) {
         await validateDocId(docId)
-        // A root written before the shard change keeps its records under the
-        // leading characters, so both candidates are searched.
-        for (const shard of [shardOf(docId), legacyShardOf(docId)]) {
+        // A root written before ADR 0006 keeps its records under the leading
+        // characters, so both candidates are searched.
+        for (const shard of [shardOf(docId, width), legacyShardOf(docId)]) {
             const found = await this.findInShard(root, shard, docId)
             if (found) return found
         }
@@ -255,7 +263,11 @@ export class FilesystemFiles {
         await validateDocId(docId)
         await this.ensureCollection(collection)
         const { extension, contentType, key } = this.resolveMetadata(docId, source)
-        const target = path.join(this.docsRoot(collection), shardOf(docId), `${docId}${extension}`)
+        const target = path.join(
+            this.docsRoot(collection),
+            shardOf(docId, this.shardWidth(collection)),
+            `${docId}${extension}`
+        )
         assertPathInside(this.docsRoot(collection), target)
         await this.storage.mkdir(path.dirname(target))
         const docsRoot = this.docsRoot(collection)
@@ -342,7 +354,7 @@ export class FilesystemFiles {
      * @returns {Promise<StoredRawFile | null>}
      */
     async readFileAtRoot(collection, root, docId) {
-        const target = await this.findPath(root, docId)
+        const target = await this.findPath(root, docId, this.shardWidth(collection))
         if (!target) return null
         try {
             const filename = path.basename(target)
@@ -527,11 +539,15 @@ export class FilesystemFiles {
      * @returns {Promise<string>}
      */
     async softDeleteStoredFile(collection, docId, deletedAt) {
-        const source = await this.findPath(this.docsRoot(collection), docId)
+        const source = await this.findPath(
+            this.docsRoot(collection),
+            docId,
+            this.shardWidth(collection)
+        )
         if (!source) throw new Error(`Raw file not found: ${docId}`)
         const target = path.join(
             this.deletedRoot(collection),
-            shardOf(docId),
+            shardOf(docId, this.shardWidth(collection)),
             path.basename(source)
         )
         assertPathInside(this.deletedRoot(collection), target)
@@ -550,9 +566,17 @@ export class FilesystemFiles {
      * @returns {Promise<string>}
      */
     async restoreStoredFile(collection, docId, restoredAt) {
-        const source = await this.findPath(this.deletedRoot(collection), docId)
+        const source = await this.findPath(
+            this.deletedRoot(collection),
+            docId,
+            this.shardWidth(collection)
+        )
         if (!source) throw new Error(`Deleted raw file not found: ${docId}`)
-        const target = path.join(this.docsRoot(collection), shardOf(docId), path.basename(source))
+        const target = path.join(
+            this.docsRoot(collection),
+            shardOf(docId, this.shardWidth(collection)),
+            path.basename(source)
+        )
         assertPathInside(this.docsRoot(collection), target)
         await this.storage.move(source, target)
         await this.storage.chmod(target, 0o644)
@@ -563,7 +587,11 @@ export class FilesystemFiles {
 
     /** @param {string} collection @param {string} docId @returns {Promise<void>} */
     async makeStoredFileReadOnly(collection, docId) {
-        const target = await this.findPath(this.docsRoot(collection), docId)
+        const target = await this.findPath(
+            this.docsRoot(collection),
+            docId,
+            this.shardWidth(collection)
+        )
         if (!target) throw new Error(`Raw file not found: ${docId}`)
         await this.storage.syncFile(target)
         await this.storage.chmod(target, 0o444)
@@ -571,7 +599,11 @@ export class FilesystemFiles {
 
     /** @param {string} collection @param {string} docId @returns {Promise<Uint8Array>} */
     async readBytes(collection, docId) {
-        const target = await this.findPath(this.docsRoot(collection), docId)
+        const target = await this.findPath(
+            this.docsRoot(collection),
+            docId,
+            this.shardWidth(collection)
+        )
         if (!target) throw new Error(`Raw file not found: ${docId}`)
         return await this.storage.readBytes(target)
     }
@@ -583,7 +615,11 @@ export class FilesystemFiles {
      * @returns {Promise<ReadableStream<Uint8Array>>}
      */
     async readStream(collection, docId, range) {
-        const target = await this.findPath(this.docsRoot(collection), docId)
+        const target = await this.findPath(
+            this.docsRoot(collection),
+            docId,
+            this.shardWidth(collection)
+        )
         if (!target) throw new Error(`Raw file not found: ${docId}`)
         return this.storage.readStream(target, range)
     }

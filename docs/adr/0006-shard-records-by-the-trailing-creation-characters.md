@@ -42,6 +42,28 @@ Content-addressed version objects keep their leading-character shard. A
 SHA-256 hex digest is already uniform, so the leading characters are the
 correct choice there and nothing about them changes.
 
+## Configurable width
+
+The right number of buckets depends on collection size, so the width is
+configurable. A collection records its width in its catalog descriptor, and
+that descriptor is the authority: readers derive the shard from it and never
+guess.
+
+`FYLO_SHARD_WIDTH` chooses the width for collections that do not exist yet,
+defaulting to 2 and capped at 4 — 36^4 is already 1.7 million directories, past
+which enumeration costs more than the fan-out saves. A width of 0 is a flat
+collection, allowed explicitly but never the default, because that is the
+failure mode this ADR exists to remove.
+
+The variable is deliberately not consulted for a collection that already
+exists. An environment variable is per process while the layout is a property
+of the root, so letting it decide would allow two processes to disagree and
+relocate every record back and forth indefinitely. A write into a collection
+whose recorded width differs from the configured one fails closed with
+`ESHARDWIDTH` and names the command that fixes it; reads are unaffected.
+Relocating every record is bounded only by collection size, so it never happens
+implicitly inside a write.
+
 ## Consequences
 
 The layout yields 1296 uniformly used buckets. Write locality is lost:
@@ -57,9 +79,9 @@ written before this change stays readable and a partly migrated root — the
 state a crash during migration leaves — is readable throughout. Enumeration is
 unaffected either way, because it walks whichever shard directories exist.
 
-Writers always use the canonical shard, so a root converges on the new layout
-as its records are rewritten. A bulk `migrate-shards` command is **not yet
-delivered**; until it is, an existing root is read through the fallback and
+Writers always use the shard recorded for the collection, so a root converges
+on the new layout as its records are rewritten. The bulk `reshard` command is
+**not yet delivered**; until it is, an existing root is read through the fallback and
 migrates only as records are written. Because documents are the source of truth
 and indexes are derived, that command is a rename plus an index rebuild under
 the existing collection transaction journal, and it never rewrites a record's
@@ -67,5 +89,5 @@ contents.
 
 Rollback to a release predating this ADR is safe for any root whose records
 still sit in the superseded layout. A root that has already written records
-under the canonical shard needs the bulk command running in reverse, so the
+under the canonical shard needs the bulk command run in reverse, so the
 downgrade window is open only until that command exists and is used.
