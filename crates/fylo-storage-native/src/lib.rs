@@ -2235,7 +2235,7 @@ fn base64_value(byte: u8) -> Result<u8, &'static str> {
     }
 }
 
-fn validate_collection_name(name: &str) -> Result<(), NativeStorageError> {
+pub(crate) fn validate_collection_name(name: &str) -> Result<(), NativeStorageError> {
     let bytes = name.as_bytes();
     let valid = bytes.len() >= 2
         && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
@@ -2291,6 +2291,34 @@ fn validate_version_hash(hash: &str) -> Result<(), NativeStorageError> {
 pub const DEFAULT_SHARD_WIDTH: u32 = 2;
 /// Widest shard a collection may use.
 pub const MAX_SHARD_WIDTH: u32 = 4;
+
+/// Shard width for a collection that does not exist yet.
+///
+/// Deliberately not consulted for an existing collection: the layout is a
+/// property of the root, so letting a per-process variable decide it would let
+/// two processes disagree and relocate every record back and forth. Reading it
+/// here is what keeps a natively created collection legible to the JavaScript
+/// engine, which reads the same variable.
+///
+/// # Errors
+///
+/// Returns an error when the variable is set to something that is not an
+/// integer within range.
+pub fn configured_shard_width() -> Result<u32, NativeStorageError> {
+    let Ok(raw) = std::env::var("FYLO_SHARD_WIDTH") else {
+        return Ok(DEFAULT_SHARD_WIDTH);
+    };
+    if raw.is_empty() {
+        return Ok(DEFAULT_SHARD_WIDTH);
+    }
+    let parsed = raw.parse::<u32>().map_err(|_| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            format!("FYLO_SHARD_WIDTH must be an integer from 0 to {MAX_SHARD_WIDTH}: {raw}"),
+        )
+    })?;
+    validate_shard_width(Some(parsed))
+}
 
 fn validate_shard_width(width: Option<u32>) -> Result<u32, NativeStorageError> {
     let width = width.unwrap_or(DEFAULT_SHARD_WIDTH);

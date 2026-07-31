@@ -28,13 +28,30 @@ Reads: `handshake`, `getDoc`, `getLatest`, `getMeta`, `findDocs`,
 `schemaDoctor`, `schemaValidate`, and `executeSQL` for `SELECT`.
 
 Writes: `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`,
-`delDocs`, `restoreDoc`, `setMeta`, `rebuildCollection`, `commit`, and
+`delDocs`, `restoreDoc`, `setMeta`, `createCollection`, `dropCollection`,
+`rebuildCollection`, `commit`, and
 `executeSQL` for `INSERT`/`UPDATE`/`DELETE`. Every write runs through the same
 native transaction journal the write preview uses, so a crash recovers
 identically. `batchPutData`, `patchDocs`, and `delDocs` are loops over that
 per-record path, not one atomic transaction — the registry already classifies
 them as retry-unsafe for that reason. `patchDocs` and `delDocs` resolve their
 target rows before writing any of them, so the selection cannot drift mid-batch.
+
+`createCollection` writes the descriptor before the directories it describes.
+A collection exists when its directory does, so an interrupted create leaves a
+descriptor naming nothing — which reads as no such collection — rather than a
+directory whose namespace and shard width nobody recorded, and re-running
+finishes it. Re-creating never rewrites an index that exists, or a populated
+collection would come back with an empty snapshot. The width comes from
+`FYLO_SHARD_WIDTH`, read by both engines, and only for a collection that does
+not exist yet: a native create that ignored it would produce a collection the
+JavaScript engine fails closed on. `dropCollection` recovers the collection
+before removing it, so it cannot discard a journal that still owes an
+interrupted write.
+
+WORM is a per-process option rather than a property of the root, so no native
+write consults it — the same as a second JavaScript process opened without it.
+A root that must enforce WORM cannot be handed to this preview.
 
 Results use the published field names, not the Rust structures' names.
 `backupStatus` always reports `disabled`, because S3 backup remains a
@@ -97,12 +114,19 @@ malformed-frame resume, duplicate-key rejection, truncated-frame termination,
 `EUNSUPPORTEDOP` for every unimplemented registered operation, and a check that
 no emitted code is missing from `api/errors/v1.json`.
 
+The collection lifecycle is qualified by handing the result back: the gate
+creates a collection natively, writes into it, re-creates it, and then has the
+JavaScript engine query the collection and read the document written after the
+re-create. A collection JavaScript cannot read is a collection this preview did
+not create. It also asserts that a contradicting kind is refused, that dropping
+twice reports `ENATIVE_NOT_FOUND`, and that `FYLO_SHARD_WIDTH` reaches the
+descriptor — with a width past the published maximum refused.
+
 ## Limitations
 
 Cancellation, timeouts, signal handling, and stderr back-pressure are open
-Phase 7 gates, as are the ten operations this preview still answers with
-`EUNSUPPORTEDOP`: collection creation and drop, joins, bulk import, repository
-checkout/diff/restore/merge, `schemaMaterialize`, and S3 backup
-reconciliation. Until the client corpus runs against exact compiled binaries,
+Phase 7 gates, as are the eight operations this preview still answers with
+`EUNSUPPORTEDOP`: joins, bulk import, repository checkout/diff/restore/merge,
+`schemaMaterialize`, and S3 backup reconciliation. Until the client corpus runs against exact compiled binaries,
 this is not a substitute for the JavaScript server in a client's binary
 selection.

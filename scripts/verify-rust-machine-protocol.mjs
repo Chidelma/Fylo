@@ -174,6 +174,109 @@ try {
     )
     await bulkReader.close()
 
+    // A natively created collection has to be legible to the JavaScript engine:
+    // the descriptor names the namespace and the shard width, and a missing or
+    // foreign index manifest would leave it unreadable rather than empty.
+    const made = 'machine-made'
+    const lifecycle = await session(binary, [
+        JSON.stringify({ op: 'createCollection', requestId: 'create', collection: made }),
+        JSON.stringify({
+            op: 'putData',
+            requestId: 'seed',
+            collection: made,
+            data: { name: 'Jean' }
+        }),
+        // Re-creating must complete a collection without touching one, or an
+        // empty snapshot would replace the keys just written.
+        JSON.stringify({ op: 'createCollection', requestId: 'again', collection: made }),
+        JSON.stringify({
+            op: 'createCollection',
+            requestId: 'clash',
+            collection: made,
+            kind: 'file'
+        }),
+        JSON.stringify({
+            op: 'createCollection',
+            requestId: 'bucket',
+            collection: 'machine-files',
+            kind: 'file'
+        })
+    ])
+    assert(
+        lifecycle[0].ok === true,
+        `Rust createCollection failed: ${JSON.stringify(lifecycle[0].error)}`
+    )
+    assert(lifecycle[0].result.kind === 'document', 'Rust createCollection kind drift')
+    assert(lifecycle[1].ok === true, 'Rust could not write into the collection it created')
+    assert(lifecycle[2].ok === true, 'Rust createCollection is not idempotent')
+    assert(
+        lifecycle[3].ok === false && lifecycle[3].error.code === 'ENATIVE_WRONG_TYPE',
+        'Rust createCollection accepted a kind that contradicts the existing collection'
+    )
+    assert(lifecycle[4].result.kind === 'file', 'Rust createCollection file-kind drift')
+
+    const madeReader = new Fylo(root, { versioning: { autoCommit: false } })
+    await madeReader.ready()
+    const seeded = lifecycle[1].result
+    const seenRows = []
+    for await (const record of madeReader[made]
+        .find({ $ops: [{ name: { $eq: 'Jean' } }] })
+        .collect()) {
+        seenRows.push(record)
+    }
+    assert(seenRows.length === 1, 'JavaScript could not query the natively created collection')
+    assert(
+        (await madeReader[made].get(seeded).once())[seeded]?.name === 'Jean',
+        'JavaScript could not read the document written after re-creation'
+    )
+    const bucket = await madeReader['machine-files'].inspect()
+    assert(bucket.exists === true && bucket.kind === 'file', 'JavaScript misread the native bucket')
+    await madeReader.close()
+
+    // The width a collection is built with is what every later writer must
+    // use. A native create that ignored the variable would produce a
+    // collection the JavaScript engine refuses to write to, so it is read from
+    // the same place by both engines.
+    const wide = await session(
+        binary,
+        [JSON.stringify({ op: 'createCollection', requestId: 'wide', collection: 'machine-wide' })],
+        { FYLO_SHARD_WIDTH: '3' }
+    )
+    assert(
+        wide[0].ok === true,
+        `Rust createCollection honouring the width failed: ${JSON.stringify(wide[0].error)}`
+    )
+    const recorded = JSON.parse(
+        await readFile(join(root, '.fylo-catalog', 'collections', 'machine-wide.json'), 'utf8')
+    )
+    assert(recorded.shardWidth === 3, `Rust ignored FYLO_SHARD_WIDTH: ${JSON.stringify(recorded)}`)
+    const rejected = await session(
+        binary,
+        [JSON.stringify({ op: 'createCollection', requestId: 'bad', collection: 'machine-bad' })],
+        { FYLO_SHARD_WIDTH: '9' }
+    )
+    assert(rejected[0].ok === false, 'Rust accepted a shard width past the published maximum')
+
+    const dropped = await session(binary, [
+        JSON.stringify({ op: 'dropCollection', requestId: 'drop', collection: made }),
+        JSON.stringify({ op: 'dropCollection', requestId: 'gone', collection: made })
+    ])
+    assert(
+        dropped[0].ok === true,
+        `Rust dropCollection failed: ${JSON.stringify(dropped[0].error)}`
+    )
+    assert(
+        dropped[1].ok === false && dropped[1].error.code === 'ENATIVE_NOT_FOUND',
+        'Rust dropped a collection that no longer exists'
+    )
+    const dropReader = new Fylo(root, { versioning: { autoCommit: false } })
+    await dropReader.ready()
+    assert(
+        (await dropReader[made].inspect()).exists === false,
+        'JavaScript still sees a dropped collection'
+    )
+    await dropReader.close()
+
     const repository = await session(binary, [
         JSON.stringify({ op: 'branch', requestId: 'branch' }),
         JSON.stringify({ op: 'status', requestId: 'status' })

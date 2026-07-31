@@ -851,6 +851,160 @@ impl NativeWriteRoot {
         finish_transaction(transaction, outcome, "index rebuild")
     }
 
+    /// Open one collection, or report that there is none.
+    ///
+    /// `NativeRoot::collection` reports a missing directory as an unsafe path,
+    /// because for a reader it is one — the descriptor named something that is
+    /// not there. Creating and dropping have to tell "absent" apart from
+    /// "unsafe", so the directory is probed directly first.
+    fn collection_if_present(
+        &self,
+        collection_name: &str,
+    ) -> Result<Option<super::NativeCollection>, NativeStorageError> {
+        let present = [".collections", ".buckets"].into_iter().try_fold(
+            false,
+            |found, namespace| -> Result<bool, NativeStorageError> {
+                Ok(found
+                    || path_exists_no_follow(
+                        &self.root.path().join(namespace).join(collection_name),
+                    )?)
+            },
+        )?;
+        if !present {
+            return Ok(None);
+        }
+        self.root.collection(collection_name).map(Some)
+    }
+
+    /// Create one collection, or complete a partly created one.
+    ///
+    /// The descriptor is written before the directories it describes. A
+    /// collection exists when its directory does, so an interrupted create
+    /// leaves a descriptor naming nothing — which reads as "no such
+    /// collection" — rather than a directory whose namespace and shard width
+    /// nobody recorded. Re-running finishes it.
+    ///
+    /// Returns `true` when the collection did not exist beforehand.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid name, a kind that contradicts an
+    /// existing collection, an unsafe path, or an interrupted durable write.
+    pub fn create_collection(
+        &self,
+        collection_name: &str,
+        kind: CollectionKind,
+        versioned: Option<bool>,
+    ) -> Result<bool, NativeStorageError> {
+        super::validate_collection_name(collection_name)?;
+        let existing = self.collection_if_present(collection_name)?;
+        if let Some(collection) = &existing
+            && collection.kind != kind
+        {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::WrongType,
+                format!(
+                    "collection \"{collection_name}\" already exists with kind \"{}\"",
+                    match collection.kind {
+                        CollectionKind::Document => "document",
+                        CollectionKind::File => "file",
+                    }
+                ),
+            ));
+        }
+
+        let catalog = self.root.path().join(".fylo-catalog").join("collections");
+        let descriptor_path = catalog.join(format!("{collection_name}.json"));
+        // An existing collection keeps the width it was built with: the layout
+        // is a property of the root, and the environment only chooses for a
+        // collection that does not exist yet.
+        let width = match &existing {
+            Some(collection) => collection.shard_width,
+            None => super::configured_shard_width()?,
+        };
+        if existing.is_none() {
+            ensure_directory(&self.root, &catalog)?;
+            let mut descriptor = Map::new();
+            descriptor.insert("version".into(), Value::from(1));
+            descriptor.insert(
+                "kind".into(),
+                Value::from(match kind {
+                    CollectionKind::Document => "document",
+                    CollectionKind::File => "file",
+                }),
+            );
+            descriptor.insert("shardWidth".into(), Value::from(width));
+            if versioned == Some(false) {
+                descriptor.insert("versioned".into(), Value::from(false));
+            }
+            let mut encoded = serde_json::to_vec(&Value::Object(descriptor))
+                .map_err(|error| json_error(&error))?;
+            encoded.push(b'\n');
+            durable_replace(&descriptor_path, &encoded)?;
+        }
+
+        let namespace = match kind {
+            CollectionKind::Document => ".collections",
+            CollectionKind::File => ".buckets",
+        };
+        let collection_root = self.root.path().join(namespace).join(collection_name);
+        for directory in [
+            collection_root.clone(),
+            collection_root.join("docs"),
+            collection_root.join(".deleted"),
+            collection_root.join("index"),
+        ] {
+            ensure_directory(&self.root, &directory)?;
+        }
+        // Never rewrite an index that exists: re-creating a populated
+        // collection would otherwise replace its keys with an empty snapshot.
+        let index = collection_root.join("index");
+        write_if_missing(
+            &index.join("manifest.json"),
+            format!(
+                "{{\"format\":\"fylo.local-fs.index.v1\",\"createdAt\":{}}}\n",
+                now_millis()?
+            )
+            .as_bytes(),
+        )?;
+        write_if_missing(&index.join("keys.snapshot"), b"")?;
+        write_if_missing(&index.join("keys.wal"), b"")?;
+        Ok(existing.is_none())
+    }
+
+    /// Remove one collection and the descriptor that names it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing collection, an unsafe path, or a failed
+    /// removal.
+    pub fn drop_collection(&self, collection_name: &str) -> Result<(), NativeStorageError> {
+        super::validate_collection_name(collection_name)?;
+        let Some(collection) = self.collection_if_present(collection_name)? else {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::NotFound,
+                format!("collection \"{collection_name}\" does not exist"),
+            ));
+        };
+        // Recover first: dropping a collection mid-transaction would discard
+        // the journal that says what the interrupted write still owes.
+        {
+            let _lock = CollectionWriteLock::acquire(&collection.path)?;
+            self.recover_locked(&collection)?;
+        }
+        remove_dir_durable(&collection.path)?;
+        let descriptor_path = self
+            .root
+            .path()
+            .join(".fylo-catalog")
+            .join("collections")
+            .join(format!("{collection_name}.json"));
+        if path_exists_no_follow(&descriptor_path)? {
+            fs::remove_file(&descriptor_path).map_err(NativeStorageError::io)?;
+        }
+        Ok(())
+    }
+
     /// Allocate one process-monotonic TTID for a caller that has none.
     ///
     /// # Errors
@@ -2450,6 +2604,36 @@ fn read_bounded_json<T: for<'de> Deserialize<'de>>(
         NativeStorageError::new(
             NativeStorageErrorCode::CorruptMetadata,
             format!("bounded JSON target is corrupt: {error}"),
+        )
+    })
+}
+
+/// Write a file only when it does not already exist.
+///
+/// Creating a collection that is partly there must finish it without touching
+/// what is already correct: rewriting a populated index with an empty snapshot
+/// would discard every key in it.
+fn write_if_missing(path: &Path, bytes: &[u8]) -> Result<(), NativeStorageError> {
+    if path_exists_no_follow(path)? {
+        return Ok(());
+    }
+    durable_replace(path, bytes)
+}
+
+fn now_millis() -> Result<u64, NativeStorageError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::Io,
+                format!("system clock is before the Unix epoch: {error}"),
+            )
+        })?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::Io,
+            "system clock exceeds the metadata timestamp range",
         )
     })
 }

@@ -13,7 +13,7 @@ use std::time::Instant;
 use fylo_engine::{AccessContext, EngineError, ReadOnlyEngine, WriteEngine};
 use fylo_query::{QueryLimits, SqlOperation, StructuredQuery, prepare_sql};
 use fylo_storage_native::{
-    NativeStorageError, NativeWriteRoot, RootLease, WriteAccess, WriteActor,
+    CollectionKind, NativeStorageError, NativeWriteRoot, RootLease, WriteAccess, WriteActor,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -255,6 +255,8 @@ impl Session {
             "getMeta" => self.get_metadata(request),
             "backupStatus" => Ok(json!({ "configured": false, "state": "disabled", "runs": 0 })),
             "executeSQL" => self.execute_sql(request),
+            "createCollection" => self.create_collection(request),
+            "dropCollection" => self.drop_collection(request),
             "rebuildCollection" => self.rebuild_collection(request),
             "putData" => self.put_data(request),
             "patchDoc" => self.patch_document(request),
@@ -499,6 +501,38 @@ impl Session {
             .execute_sql_mutation(statement, actor.as_ref(), access(request)?)
             .map_err(|error| storage_error(&error))?;
         serde_json::to_value(mutation).map_err(|error| serialization_error(&error))
+    }
+
+    fn create_collection(&self, request: &Value) -> Result<Value, MachineError> {
+        let collection = require_string(request, "collection")?;
+        let kind = match request.get("kind").and_then(Value::as_str) {
+            None | Some("document") => CollectionKind::Document,
+            Some("file") => CollectionKind::File,
+            Some(_) => {
+                return Err(MachineError::new(
+                    "EBADREQUEST",
+                    "machine request field \"kind\" must be \"document\" or \"file\"",
+                ));
+            }
+        };
+        self.writer(request)?
+            .create_collection(collection, kind, None)
+            .map_err(|error| storage_error(&error))?;
+        Ok(json!({
+            "collection": collection,
+            "kind": match kind {
+                CollectionKind::Document => "document",
+                CollectionKind::File => "file",
+            }
+        }))
+    }
+
+    fn drop_collection(&self, request: &Value) -> Result<Value, MachineError> {
+        let collection = require_string(request, "collection")?;
+        self.writer(request)?
+            .drop_collection(collection)
+            .map_err(|error| storage_error(&error))?;
+        Ok(json!({ "collection": collection }))
     }
 
     fn rebuild_collection(&self, request: &Value) -> Result<Value, MachineError> {
@@ -1034,10 +1068,12 @@ fn read_frame<R: BufRead>(
     }
 }
 
-const SUPPORTED_OPERATIONS: [&str; 28] = [
+const SUPPORTED_OPERATIONS: [&str; 30] = [
     "handshake",
     "backupStatus",
     "executeSQL",
+    "createCollection",
+    "dropCollection",
     "inspectCollection",
     "rebuildCollection",
     "verifyCollection",
