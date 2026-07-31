@@ -54,9 +54,10 @@ JavaScript must roll back the first two states and roll forward the third.
 TTID generator, so cross-process identifier ordering is only guaranteed by the
 clock, and a collision retries up to sixteen times before failing closed.
 
-`set-metadata` merges; it has no authoritative-replace mode, so a caller that
-needs the JavaScript `replaceDocMetadata` contract must send explicit `null`
-removals.
+`set-metadata` merges by default and `--replace` is authoritative, matching
+`replaceDocMetadata`: a name the record omits is removed rather than left
+behind, so a caller does not have to know what is stored to state what should
+be.
 
 Before-images capture developer metadata on both platforms. FYLO keeps that
 metadata in per-name xattrs on POSIX and in one JSON manifest stream on NTFS,
@@ -92,11 +93,18 @@ legitimately differ from a rebuild.
 
 ## Crash matrix
 
-`bun run rust:crash:matrix` aborts the writer at every durable transition the
-binary declares and proves the root still recovers. The failpoint list comes
+`bun run rust:crash:matrix` interrupts the writer at every durable transition
+the binary declares and proves the root still recovers. The failpoint list comes
 from `fylo-write-preview failpoints`, not from the harness, and every declared
 point must be reached by some scenario — so a new failpoint cannot be added
 without either being exercised or failing this gate.
+
+Each transition is interrupted two ways. `abort` loses the process, so the next
+opener must recover the journal. `enospc` injects a real full-volume error
+number, which is an ordinary I/O failure rather than a lost process: the writer
+has to roll back in place and leave recovery nothing to do, and the gate asserts
+that a following recovery reports no work. The crash case cannot make that
+distinction, which is why both run.
 
 Resharding is covered here too: interrupting a record move leaves the
 collection readable, because the descriptor names the destination and the width
@@ -109,6 +117,15 @@ Whether the mutation applied or rolled back is deliberately not asserted: both
 are valid outcomes of a crash, and only the recovered state has to be one of
 them.
 
-This is not a supported writer. Disk-full and quota cases, Windows
-before-image streams, cloned-root replay, and native retained release evidence
-remain Phase 5 gates.
+## Differential replay
+
+`bun run rust:replay` clones one seeded root twice, replays a fixed operation
+log through the JavaScript engine into one clone and the native writer into the
+other, and requires the results to agree. No two writers ever touch one root,
+which the plan forbids. Both roots are then described by the same reader, so a
+difference can only come from what was written, and the log's outcome is also
+stated outright — agreement alone would be satisfied by two engines wrong in
+the same way.
+
+This is not a supported writer. Quota-specific behaviour beyond a full volume,
+and native retained release evidence, remain Phase 5 gates.

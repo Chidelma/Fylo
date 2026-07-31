@@ -499,6 +499,36 @@ impl NativeWriteRoot {
         record: &Map<String, Value>,
         actor: Option<&WriteActor>,
     ) -> Result<(), NativeStorageError> {
+        self.write_record_metadata(collection_name, identifier, record, actor, false)
+    }
+
+    /// Replace a record's developer metadata with `record` exactly.
+    ///
+    /// This is the `replaceDocMetadata` contract: a name the record omits is
+    /// removed rather than left behind, so the caller does not have to know
+    /// what is currently stored in order to state what should be.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_record_metadata`].
+    pub fn replace_record_metadata(
+        &self,
+        collection_name: &str,
+        identifier: &str,
+        record: &Map<String, Value>,
+        actor: Option<&WriteActor>,
+    ) -> Result<(), NativeStorageError> {
+        self.write_record_metadata(collection_name, identifier, record, actor, true)
+    }
+
+    fn write_record_metadata(
+        &self,
+        collection_name: &str,
+        identifier: &str,
+        record: &Map<String, Value>,
+        actor: Option<&WriteActor>,
+        replace: bool,
+    ) -> Result<(), NativeStorageError> {
         validate_ttid_shape(identifier)?;
         validate_custom_metadata(&record.clone().into_iter().collect())?;
         let collection = self.root.collection(collection_name)?;
@@ -506,6 +536,13 @@ impl NativeWriteRoot {
         self.recover_locked(&collection)?;
         let (target, access) = record_target(&collection, identifier)?;
         require_write_access(access, actor)?;
+        let mut record = record.clone();
+        if replace {
+            for name in collection.read_custom_metadata(identifier)?.keys() {
+                record.entry(name.clone()).or_insert(Value::Null);
+            }
+        }
+        let record = &record;
         let updated_at = next_meta_updated_at(&target)?;
         let mut transaction = Transaction::begin(self, &collection, "set-metadata")?;
         let outcome = (|| {
@@ -1490,8 +1527,7 @@ impl<'a> Transaction<'a> {
             collection,
             &GenerationRecord::writing(generation.generation.saturating_add(1), identifier),
         )?;
-        failpoint("after-state-writing")?;
-        Ok(Self {
+        let mut transaction = Self {
             writer,
             collection,
             manifest,
@@ -1499,7 +1535,16 @@ impl<'a> Transaction<'a> {
             captures: Vec::new(),
             captured: BTreeSet::new(),
             finished: false,
-        })
+        };
+        // The manifest and the writing generation are already durable, so a
+        // failure here owns them. Returning the error alone would leave a live
+        // process having published a transaction it never started, forcing the
+        // next opener to recover state this one could have undone itself.
+        if let Err(error) = failpoint("after-state-writing") {
+            transaction.rollback()?;
+            return Err(error);
+        }
+        Ok(transaction)
     }
 
     fn capture(&mut self, target: &Path) -> Result<(), NativeStorageError> {
@@ -2807,12 +2852,25 @@ fn failpoint(name: &str) -> Result<(), NativeStorageError> {
     match std::env::var("FYLO_RUST_FAILPOINT_ACTION").ok().as_deref() {
         Some("abort") => std::process::abort(),
         Some("panic") => panic!("FYLO Rust failpoint: {name}"),
+        // A full volume is the failure a durable writer is most likely to meet
+        // and least likely to be tested against, and it is an ordinary I/O
+        // error rather than a lost process: the writer must roll back in place
+        // and leave nothing for recovery to do.
+        Some("enospc") => Err(NativeStorageError::io(std::io::Error::from_raw_os_error(
+            DISK_FULL_ERRNO,
+        ))),
         _ => Err(NativeStorageError::new(
             NativeStorageErrorCode::Io,
             format!("injected FYLO Rust failpoint: {name}"),
         )),
     }
 }
+
+/// `ENOSPC` on Unix, `ERROR_DISK_FULL` on Windows.
+#[cfg(windows)]
+const DISK_FULL_ERRNO: i32 = 112;
+#[cfg(not(windows))]
+const DISK_FULL_ERRNO: i32 = 28;
 
 fn json_error(error: &serde_json::Error) -> NativeStorageError {
     NativeStorageError::new(
@@ -3115,6 +3173,62 @@ mod tests {
             !restored.contains_key("user.fylo.meta.draft"),
             "rollback left behind metadata the mutation added"
         );
+    }
+
+    #[test]
+    fn replacing_metadata_removes_a_name_the_record_omits() {
+        let fixture = TestRoot::create();
+        let writer = NativeWriteRoot::open(&fixture.0).unwrap();
+        writer
+            .put_document(
+                "users",
+                "4VRNF52JPCO",
+                br#"{"name":"Ada"}"#,
+                PutDocumentOptions::default(),
+            )
+            .unwrap();
+        writer
+            .set_record_metadata(
+                "users",
+                "4VRNF52JPCO",
+                &serde_json::from_value(json!({"team": "storage", "draft": true})).unwrap(),
+                None,
+            )
+            .unwrap();
+
+        // A merge leaves an omitted name alone; a replace is authoritative.
+        writer
+            .set_record_metadata(
+                "users",
+                "4VRNF52JPCO",
+                &serde_json::from_value(json!({"team": "platform"})).unwrap(),
+                None,
+            )
+            .unwrap();
+        let merged = writer
+            .root
+            .collection("users")
+            .unwrap()
+            .read_custom_metadata("4VRNF52JPCO")
+            .unwrap();
+        assert_eq!(merged.get("draft"), Some(&json!(true)));
+
+        writer
+            .replace_record_metadata(
+                "users",
+                "4VRNF52JPCO",
+                &serde_json::from_value(json!({"team": "platform"})).unwrap(),
+                None,
+            )
+            .unwrap();
+        let replaced = writer
+            .root
+            .collection("users")
+            .unwrap()
+            .read_custom_metadata("4VRNF52JPCO")
+            .unwrap();
+        assert_eq!(replaced.get("team"), Some(&json!("platform")));
+        assert!(!replaced.contains_key("draft"));
     }
 
     #[cfg(unix)]

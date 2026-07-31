@@ -201,9 +201,13 @@ fn run_metadata(
     if command == "set-metadata" {
         let record = serde_json::from_str(required_option(arguments, "--record")?)
             .map_err(|error| format!("invalid --record: {error}"))?;
-        return writer
-            .set_record_metadata(collection, identifier, &record, actor.as_ref())
-            .map_err(|error| error.to_string());
+        let replace = arguments.iter().any(|argument| argument == "--replace");
+        return if replace {
+            writer.replace_record_metadata(collection, identifier, &record, actor.as_ref())
+        } else {
+            writer.set_record_metadata(collection, identifier, &record, actor.as_ref())
+        }
+        .map_err(|error| error.to_string());
     }
     writer
         .set_record_access(
@@ -358,7 +362,7 @@ fn usage() -> String {
      [--actor-uid <uid> [--actor-groups <gid,...>]]\n  fylo-write-preview sql --root <path> \
      --statement <sql> [--actor-uid <uid> [--actor-groups <gid,...>]] [--uid <uid>] [--gid \
      <gid>] [--mode <octal>]\n  fylo-write-preview set-metadata --root <path> --collection \
-     <name> --id <ttid> --record <json> [--actor-uid <uid> [--actor-groups <gid,...>]]\n  \
+     <name> --id <ttid> --record <json> [--replace] [--actor-uid <uid> [--actor-groups <gid,...>]]\n  \
      fylo-write-preview set-access --root <path> --collection <name> --id <ttid> [--uid <uid>] \
      [--gid <gid>] [--mode <octal>] [--actor-uid <uid> [--actor-groups <gid,...>]]\n  \
      fylo-write-preview commit --root <path> --message <message>\n  fylo-write-preview \

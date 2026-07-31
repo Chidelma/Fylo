@@ -224,25 +224,40 @@ try {
         }
     ]
 
+    // Each durable transition is interrupted two ways. `abort` loses the
+    // process, so the next opener must recover the journal. `enospc` is an
+    // ordinary I/O error, so the writer must roll back in place and leave
+    // nothing for recovery to do — a distinction the crash case cannot make.
+    const ACTIONS = ['abort', 'enospc']
     const reached = new Set()
     let interrupted = 0
     for (const failpoint of failpoints) {
         for (const scenario of scenarios) {
-            const root = join(workspace, `${failpoint}--${scenario.name}`)
-            await cp(scenario.template ? scenario.template() : template, root, { recursive: true })
-            if (scenario.prepare) await scenario.prepare(binary, root)
-            const crashed = await run(binary, scenario.args(root), {
-                FYLO_RUST_FAILPOINT: failpoint,
-                FYLO_RUST_FAILPOINT_ACTION: 'abort'
-            })
-            if (crashed.exitCode === 0) {
+            for (const action of ACTIONS) {
+                const root = join(workspace, `${failpoint}--${scenario.name}--${action}`)
+                await cp(scenario.template ? scenario.template() : template, root, {
+                    recursive: true
+                })
+                if (scenario.prepare) await scenario.prepare(binary, root)
+                const failed = await run(binary, scenario.args(root), {
+                    FYLO_RUST_FAILPOINT: failpoint,
+                    FYLO_RUST_FAILPOINT_ACTION: action
+                })
+                if (failed.exitCode === 0) {
+                    await rm(root, { recursive: true, force: true })
+                    continue
+                }
+                reached.add(failpoint)
+                interrupted++
+                if (action === 'enospc') {
+                    assert(
+                        /disk|space|full/i.test(failed.stderr),
+                        `${failpoint}/${scenario.name}: a full volume was not reported as one: ${failed.stderr.trim()}`
+                    )
+                }
+                await assertRecoverable(binary, root, failpoint, scenario.name, action)
                 await rm(root, { recursive: true, force: true })
-                continue
             }
-            reached.add(failpoint)
-            interrupted++
-            await assertRecoverable(binary, root, failpoint, scenario.name)
-            await rm(root, { recursive: true, force: true })
         }
     }
 
@@ -263,11 +278,19 @@ try {
  * the root must always open, recover idempotently, and land on a stable even
  * generation with an index that matches its documents.
  */
-async function assertRecoverable(binary, root, failpoint, scenario) {
-    const label = `${failpoint}/${scenario}`
+async function assertRecoverable(binary, root, failpoint, scenario, action) {
+    const label = `${failpoint}/${scenario}/${action}`
 
     const first = await run(binary, ['recover', '--root', root, '--collection', collection])
     assert(first.exitCode === 0, `${label}: Rust recovery failed: ${first.stderr}`)
+    if (action === 'enospc') {
+        // The writer stayed alive, so it owed itself a rollback before
+        // returning the error. Anything left for recovery means it did not.
+        assert(
+            JSON.parse(first.stdout).recovered === false,
+            `${label}: a failed write left its journal behind instead of rolling back`
+        )
+    }
     const second = await run(binary, ['recover', '--root', root, '--collection', collection])
     assert(second.exitCode === 0, `${label}: repeated recovery failed: ${second.stderr}`)
     assert(

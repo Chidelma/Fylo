@@ -35,6 +35,7 @@
         "rust:interop:versioned": "bun ./scripts/verify-rust-versioned-writes.mjs",
         "rust:interop:machine": "bun ./scripts/verify-rust-machine-protocol.mjs",
         "rust:crash:matrix": "bun ./scripts/verify-rust-crash-matrix.mjs",
+        "rust:replay": "bun ./scripts/verify-rust-cloned-root-replay.mjs",
         "rust:benchmark:readonly": "bun ./scripts/benchmark-rust-readonly.mjs",
         "rust:test": "bun ./scripts/run-rust.mjs cargo test --workspace --all-features",
         "rust:verify": "bun ./scripts/run-rust.mjs cargo run -p xtask -- verify-workspace",

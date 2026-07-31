@@ -275,6 +275,9 @@ jobs:
             - name: Recover every interrupted native durable transition
               run: bun run rust:crash:matrix
 
+            - name: Replay one operation log into cloned roots
+              run: bun run rust:replay
+
             - name: Benchmark current and native read-only engines
               run: >-
                   bun ./scripts/benchmark-rust-readonly.mjs
