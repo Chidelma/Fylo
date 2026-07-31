@@ -55,6 +55,30 @@ export function legacyShardOf(id) {
 }
 
 /**
+ * Every shard directory a record may legitimately occupy, most likely first.
+ *
+ * A reshard records the widths it is moving away from until it completes, so a
+ * root interrupted midway is still fully readable: a record that has moved is
+ * found under the new width, one that has not under an old one. The layout
+ * superseded by ADR 0006 is always the last candidate.
+ *
+ * @param {string} id
+ * @param {number} width
+ * @param {number[]} [previousWidths]
+ * @returns {string[]}
+ */
+export function shardCandidates(id, width, previousWidths = []) {
+    const candidates = []
+    for (const candidate of [width, ...previousWidths]) {
+        const shard = shardOf(id, candidate)
+        if (!candidates.includes(shard)) candidates.push(shard)
+    }
+    const legacy = legacyShardOf(id)
+    if (!candidates.includes(legacy)) candidates.push(legacy)
+    return candidates
+}
+
+/**
  * Validate a configured shard width.
  *
  * @param {unknown} width

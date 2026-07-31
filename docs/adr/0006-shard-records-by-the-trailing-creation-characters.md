@@ -79,15 +79,16 @@ written before this change stays readable and a partly migrated root — the
 state a crash during migration leaves — is readable throughout. Enumeration is
 unaffected either way, because it walks whichever shard directories exist.
 
-Writers always use the shard recorded for the collection, so a root converges
-on the new layout as its records are rewritten. The bulk `reshard` command is
-**not yet delivered**; until it is, an existing root is read through the fallback and
-migrates only as records are written. Because documents are the source of truth
-and indexes are derived, that command is a rename plus an index rebuild under
-the existing collection transaction journal, and it never rewrites a record's
-contents.
+Writers always use the shard recorded for the collection. `reshard` moves an
+existing collection to a new width: it records the destination and the width
+being left _before_ moving a single record, so an interrupted run leaves every
+record findable under one candidate or the other, and re-running finishes what
+remains. It is therefore both idempotent and resumable. Because documents are
+the source of truth and indexes are derived, it renames files and rebuilds the
+index without rewriting a record's contents, and it removes the shard
+directories it empties. Resharding is the one write the width guard lets
+through, since it is the operation that resolves the mismatch.
 
 Rollback to a release predating this ADR is safe for any root whose records
-still sit in the superseded layout. A root that has already written records
-under the canonical shard needs the bulk command run in reverse, so the
-downgrade window is open only until that command exists and is used.
+still sit in the superseded layout. A root that has moved needs `reshard` run
+back to the width the older release expects.

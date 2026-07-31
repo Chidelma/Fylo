@@ -302,6 +302,161 @@ export class FyloBatchWriteError extends Error {
     }
 }
 
+/**
+ * A JSON-array import body cannot be parsed incrementally, so it is buffered
+ * whole (under the byte budget the caller already enforced) and parsed once.
+ * A bare object is treated as a single-item import.
+ * @param {Uint8Array[]} chunks
+ * @param {number} length
+ * @returns {Record<string, any>[]}
+ */
+function parseJsonArrayImportBody(chunks, length) {
+    const body = new Uint8Array(length)
+    let offset = 0
+    for (const chunk of chunks) {
+        body.set(chunk, offset)
+        offset += chunk.length
+    }
+    let data
+    try {
+        data = JSON.parse(new TextDecoder().decode(body))
+    } catch {
+        throw new Error('Invalid JSON in import response')
+    }
+    return /** @type {Record<string, any>[]} */ (Array.isArray(data) ? data : [data])
+}
+
+/**
+ * @param {Blob} input
+ * @param {{ key?: string }} options
+ * @param {{ maxBytes: number }} normalized
+ */
+function blobFileSource(input, options, normalized) {
+    if (input.size > normalized.maxBytes) {
+        throw new Error(`Raw file exceeded ${normalized.maxBytes} bytes`)
+    }
+    const named = /** @type {{ name?: unknown }} */ (input)
+    return {
+        stream: /** @type {ReadableStream<Uint8Array>} */ (input.stream()),
+        name: typeof named.name === 'string' ? named.name : undefined,
+        contentType: input.type || undefined,
+        key: options.key,
+        maxBytes: normalized.maxBytes
+    }
+}
+
+/**
+ * @param {URL} input
+ * @param {{ key?: string }} options
+ * @param {{ maxBytes: number }} normalized
+ */
+async function localFileSource(input, options, normalized) {
+    const filePath = fileURLToPath(input)
+    const file = Bun.file(filePath)
+    if (!(await file.exists())) throw new Error(`Raw file source was not found: ${input}`)
+    if (file.size > normalized.maxBytes) {
+        throw new Error(`Raw file exceeded ${normalized.maxBytes} bytes`)
+    }
+    return {
+        // Bun's compiled runtime can stop servicing a long-lived stdin
+        // iterator after Bun.file().stream() reaches EOF. Adapt the
+        // independent Node file stream instead so `fylo exec --loop`
+        // retains ownership of stdin for the next machine request.
+        stream: localFileStream(filePath),
+        name: decodeURIComponent(input.pathname.split('/').pop() ?? ''),
+        contentType: file.type || undefined,
+        key: options.key,
+        maxBytes: normalized.maxBytes
+    }
+}
+
+/** @param {string} message @returns {'protocol' | 'host' | 'private-network'} */
+function importBlockReason(message) {
+    if (message.includes('protocol is not allowed')) return 'protocol'
+    if (message.includes('private address')) return 'private-network'
+    return 'host'
+}
+
+/**
+ * Builds the fetch options for an import, pinning TLS to the resolved server
+ * name so a DNS rebind between the allowlist check and the request cannot
+ * redirect it elsewhere.
+ * @param {URL} url
+ * @param {{ pinnedUrls: URL[], serverName: string } | null} pin
+ */
+function buildImportFetchInit(url, pin) {
+    /** @type {RequestInit & { tls?: { serverName?: string, checkServerIdentity?: Function } }} */
+    const fetchInit = { redirect: 'manual' }
+    if (!pin) return fetchInit
+    const { serverName } = pin
+    fetchInit.headers = { Host: url.host }
+    if (url.protocol === 'https:') {
+        fetchInit.tls = {
+            serverName,
+            /** @param {string} _hostname @param {import('node:tls').PeerCertificate} cert */
+            checkServerIdentity: (_hostname, cert) => tlsCheckServerIdentity(serverName, cert)
+        }
+    }
+    return fetchInit
+}
+
+/**
+ * Tries each pinned address in turn, surfacing the last failure if none
+ * respond.
+ * @param {URL[]} targets
+ * @param {RequestInit} fetchInit
+ * @returns {Promise<Response>}
+ */
+async function fetchFirstReachable(targets, fetchInit) {
+    /** @type {unknown} */
+    let lastFetchError
+    for (let index = 0; index < targets.length; index++) {
+        try {
+            return await fetch(targets[index], fetchInit)
+        } catch (err) {
+            lastFetchError = err
+            if (index === targets.length - 1) throw err
+        }
+    }
+    throw lastFetchError instanceof Error ? lastFetchError : new Error('Import request failed')
+}
+
+/** SQL statements that may only assert who is asking, never what to create. */
+const SQL_ACTOR_ONLY_OPERATIONS = new Set(['SELECT', 'UPDATE', 'DELETE'])
+
+/**
+ * Ownership and permission bits belong to record creation, so only INSERT may
+ * carry gid/mode; reads and mutations must identify their actor; and DDL takes
+ * no access context at all.
+ *
+ * @param {string} operation
+ * @param {{ uid?: number, gid?: number, mode?: number }=} access
+ */
+function assertSqlAccessAllowed(operation, access) {
+    if (operation !== 'INSERT' && (access?.gid !== undefined || access?.mode !== undefined)) {
+        throw new TypeError('SQL gid and mode are only supported for INSERT statements')
+    }
+    if (!access) return
+    if (SQL_ACTOR_ONLY_OPERATIONS.has(operation) && access.uid === undefined) {
+        throw new TypeError(`SQL ${operation} as() requires a numeric uid`)
+    }
+    if (operation === 'CREATE' || operation === 'DROP') {
+        throw new TypeError(`SQL ${operation} does not support as({ uid })`)
+    }
+}
+
+/**
+ * UPDATE and DELETE carry only the actor's uid into the engine.
+ * @template T
+ * @param {PromiseLike<T> & { as: (access: any) => any }} operation
+ * @param {{ uid?: number }=} access
+ * @returns {Promise<T>}
+ */
+async function runSqlMutation(operation, access) {
+    if (!access) return await operation
+    return await operation.as({ uid: /** @type {number} */ (access.uid) })
+}
+
 export default class Fylo {
     /** @type {string | undefined} */
     static LOGGING = process.env.FYLO_LOGGING
@@ -494,24 +649,7 @@ export default class Fylo {
         const normalizedAccess = access
             ? normalizeAccessInput(access, { allowMode: true })
             : undefined
-        if (
-            plan.operation !== 'INSERT' &&
-            (normalizedAccess?.gid !== undefined || normalizedAccess?.mode !== undefined)
-        ) {
-            throw new TypeError('SQL gid and mode are only supported for INSERT statements')
-        }
-        if (
-            normalizedAccess &&
-            (plan.operation === 'SELECT' ||
-                plan.operation === 'UPDATE' ||
-                plan.operation === 'DELETE') &&
-            normalizedAccess.uid === undefined
-        ) {
-            throw new TypeError(`SQL ${plan.operation} as() requires a numeric uid`)
-        }
-        if (normalizedAccess && (plan.operation === 'CREATE' || plan.operation === 'DROP')) {
-            throw new TypeError(`SQL ${plan.operation} does not support as({ uid })`)
-        }
+        assertSqlAccessAllowed(plan.operation, normalizedAccess)
         if (plan.explain && !plan.analyze) return this.planner.describe(plan)
         const startedAt = performance.now()
         const result = await this.executeSqlPlan(plan, normalizedAccess)
@@ -529,65 +667,63 @@ export default class Fylo {
      * @returns {Promise<unknown>}
      */
     async executeSqlPlan(plan, access = undefined) {
-        const operation = plan.operation
         const parsed = /** @type {any} */ (structuredClone(plan.ast))
-        const col = String(parsed.$collection ?? '')
-        switch (operation) {
+        switch (plan.operation) {
             case 'CREATE':
-                return await new CollectionFacade(this, col).create()
+                return await new CollectionFacade(this, String(parsed.$collection ?? '')).create()
             case 'DROP':
-                return await new CollectionFacade(this, col).drop()
-            case 'SELECT': {
-                const query = /** @type {StoreQuery} */ (parsed)
-                if (plan.sql.includes('JOIN'))
-                    return await this.join(/** @type {StoreJoin} */ (query), access?.uid)
-                const selectedCollection = query.$collection
-                delete query.$collection
-                const cursor = new CollectionFacade(this, String(selectedCollection)).find(query)
-                if (access) cursor.as({ uid: /** @type {number} */ (access.uid) })
-                /** @type {TTIDValue[] | Record<string, any>} */
-                let docs = query.$onlyIds ? [] : {}
-                for await (const data of cursor.collect()) {
-                    if (typeof data === 'object')
-                        docs = /** @type {{ appendGroup(target: any, value: any): any }} */ (
-                            /** @type {unknown} */ (Object)
-                        ).appendGroup(docs, data)
-                    else docs.push(data)
-                }
-                return docs
-            }
+                return await new CollectionFacade(this, String(parsed.$collection ?? '')).drop()
+            case 'SELECT':
+                return await this.executeSqlSelect(plan, parsed, access)
             case 'INSERT': {
                 const insert = /** @type {StoreInsert} */ (parsed)
-                const insertCollection = insert.$collection
+                const facade = new CollectionFacade(this, String(insert.$collection))
                 delete insert.$collection
-                const operation = new CollectionFacade(this, String(insertCollection)).put(
-                    insert.$values
-                )
+                const operation = facade.put(insert.$values)
                 return await (access ? operation.as(access) : operation)
             }
             case 'UPDATE': {
                 const update = /** @type {StoreUpdate} */ (parsed)
-                const updateCol = update.$collection
+                const facade = new CollectionFacade(this, String(update.$collection))
                 delete update.$collection
-                const operation = new CollectionFacade(this, String(updateCol)).patch.many(update)
-                return await (access
-                    ? operation.as({ uid: /** @type {number} */ (access.uid) })
-                    : operation)
+                return await runSqlMutation(facade.patch.many(update), access)
             }
             case 'DELETE': {
                 const del = /** @type {StoreDelete} */ (parsed)
-                const deleteCollection = del.$collection
+                const facade = new CollectionFacade(this, String(del.$collection))
                 delete del.$collection
-                const operation = new CollectionFacade(this, String(deleteCollection)).delete.many(
-                    del
-                )
-                return await (access
-                    ? operation.as({ uid: /** @type {number} */ (access.uid) })
-                    : operation)
+                return await runSqlMutation(facade.delete.many(del), access)
             }
             default:
                 throw new Error('Invalid Operation')
         }
+    }
+
+    /**
+     * @param {ReturnType<FyloQueryPlanner['prepare']>} plan
+     * @param {any} parsed
+     * @param {{ uid?: number, gid?: number, mode?: number }=} access
+     * @returns {Promise<unknown>}
+     */
+    async executeSqlSelect(plan, parsed, access) {
+        const query = /** @type {StoreQuery} */ (parsed)
+        if (plan.sql.includes('JOIN')) {
+            return await this.join(/** @type {StoreJoin} */ (query), access?.uid)
+        }
+        const selectedCollection = query.$collection
+        delete query.$collection
+        const cursor = new CollectionFacade(this, String(selectedCollection)).find(query)
+        if (access) cursor.as({ uid: /** @type {number} */ (access.uid) })
+        /** @type {TTIDValue[] | Record<string, any>} */
+        let docs = query.$onlyIds ? [] : {}
+        for await (const data of cursor.collect()) {
+            if (typeof data === 'object') {
+                docs = /** @type {{ appendGroup(target: any, value: any): any }} */ (
+                    /** @type {unknown} */ (Object)
+                ).appendGroup(docs, data)
+            } else docs.push(data)
+        }
+        return docs
     }
     /**
      * Parses and retains a reusable SQL plan.
@@ -684,65 +820,35 @@ export default class Fylo {
         await this.ready()
         return await this.engine.joinDocs(join, actorUid)
     }
-    /** @param {string} collection @param {URL} url @param {number | ImportBulkDataOptions} [limitOrOptions] @returns {Promise<number>} */
-    async importBulkData(collection, url, limitOrOptions) {
-        await this.ready()
-        await this.engine.requireCollection(collection)
-        const importOptions = normalizeImportOptions(limitOrOptions)
-        const limit = importOptions.limit
-        if (limit !== undefined && limit <= 0) return 0
-        /** @type {{ pinnedUrls: URL[], serverName: string } | null} */
-        let pin = null
+    /**
+     * Applies the import allowlist, reporting a blocked attempt with the
+     * category that rejected it before rethrowing.
+     * @param {URL} url
+     * @param {any} importOptions
+     * @returns {Promise<{ pinnedUrls: URL[], serverName: string } | null>}
+     */
+    async resolveImportPin(url, importOptions) {
         try {
-            pin = await assertImportUrlAllowed(url, importOptions)
+            return await assertImportUrlAllowed(url, importOptions)
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err)
-            /** @type {'protocol' | 'host' | 'private-network'} */
-            let reason = 'host'
-            if (message.includes('protocol is not allowed')) reason = 'protocol'
-            else if (message.includes('host is not allowed')) reason = 'host'
-            else if (message.includes('private address')) reason = 'private-network'
             emitFyloEvent(this.onEvent, {
                 type: 'import.blocked',
-                reason,
+                reason: importBlockReason(message),
                 url: redactImportUrl(url),
                 detail: message
             })
             throw err
         }
-        /** @type {RequestInit & { tls?: { serverName?: string, checkServerIdentity?: Function } }} */
-        const fetchInit = { redirect: 'manual' }
-        if (pin) {
-            const { serverName } = pin
-            fetchInit.headers = { Host: url.host }
-            if (url.protocol === 'https:') {
-                fetchInit.tls = {
-                    serverName,
-                    /** @param {string} _hostname @param {import('node:tls').PeerCertificate} cert */
-                    checkServerIdentity: (_hostname, cert) =>
-                        tlsCheckServerIdentity(serverName, cert)
-                }
-            }
-        }
-        /** @type {URL[]} */
-        const fetchTargets = pin ? pin.pinnedUrls : [url]
-        /** @type {Response | undefined} */
-        let response
-        /** @type {unknown} */
-        let lastFetchError
-        for (let i = 0; i < fetchTargets.length; i++) {
-            try {
-                response = await fetch(fetchTargets[i], fetchInit)
-                break
-            } catch (err) {
-                lastFetchError = err
-                if (i === fetchTargets.length - 1) throw err
-            }
-        }
-        if (!response)
-            throw lastFetchError instanceof Error
-                ? lastFetchError
-                : new Error('Import request failed')
+    }
+
+    /**
+     * A redirect is refused rather than followed: the destination has not been
+     * through the allowlist, so following it would bypass SSRF protection.
+     * @param {Response} response
+     * @param {URL} url
+     */
+    assertImportResponse(response, url) {
         if (response.status >= 300 && response.status < 400) {
             const location = response.headers.get('location')
             const redactedLocation = location ? redactImportUrl(location) : 'unknown'
@@ -755,8 +861,22 @@ export default class Fylo {
             throw new Error(`Import request redirected to ${redactedLocation}`)
         }
         if (!response.ok) throw new Error(`Import request failed with status ${response.status}`)
-        if (!response.headers.get('content-type')?.includes('application/json'))
+        if (!response.headers.get('content-type')?.includes('application/json')) {
             throw new Error('Response is not JSON')
+        }
+    }
+
+    /** @param {string} collection @param {URL} url @param {number | ImportBulkDataOptions} [limitOrOptions] @returns {Promise<number>} */
+    async importBulkData(collection, url, limitOrOptions) {
+        await this.ready()
+        await this.engine.requireCollection(collection)
+        const importOptions = normalizeImportOptions(limitOrOptions)
+        const limit = importOptions.limit
+        if (limit !== undefined && limit <= 0) return 0
+        const pin = await this.resolveImportPin(url, importOptions)
+        const fetchInit = buildImportFetchInit(url, pin)
+        const response = await fetchFirstReachable(pin ? pin.pinnedUrls : [url], fetchInit)
+        this.assertImportResponse(response, url)
         if (!response.body) throw new Error('Response body is empty')
         const responseBody = response.body
         let count = 0
@@ -781,6 +901,17 @@ export default class Fylo {
                 console.log(
                     `Batch ${batchNum} of ${bytes} bytes took ${elapsed === Infinity ? 'Infinity' : elapsed}ms (${bytesPerSec} bytes/sec)`
                 )
+            }
+        }
+        /**
+         * Writes a fully materialized array in MAX_CPUS-sized batches, stopping
+         * as soon as the caller's limit is reached.
+         * @param {Record<string, any>[]} items
+         */
+        const flushInBatches = async (items) => {
+            for (let index = 0; index < items.length; index += Fylo.MAX_CPUS) {
+                if (limit !== undefined && count >= limit) break
+                await flush(items.slice(index, index + Fylo.MAX_CPUS))
             }
         }
         // Coalesce the entire stream into one commit: each `flush` opens a
@@ -821,25 +952,7 @@ export default class Fylo {
                 }
             }
             if (isJsonArray) {
-                const body = new Uint8Array(jsonArrayLength)
-                let offset = 0
-                for (const c of jsonArrayChunks) {
-                    body.set(c, offset)
-                    offset += c.length
-                }
-                let data
-                try {
-                    data = JSON.parse(new TextDecoder().decode(body))
-                } catch {
-                    throw new Error('Invalid JSON in import response')
-                }
-                const items = /** @type {Record<string, any>[]} */ (
-                    Array.isArray(data) ? data : [data]
-                )
-                for (let i = 0; i < items.length; i += Fylo.MAX_CPUS) {
-                    if (limit !== undefined && count >= limit) break
-                    await flush(items.slice(i, i + Fylo.MAX_CPUS))
-                }
+                await flushInBatches(parseJsonArrayImportBody(jsonArrayChunks, jsonArrayLength))
             } else {
                 if (pending.length > 0) {
                     const { values } = Bun.JSONL.parseChunk(pending)
@@ -997,41 +1110,12 @@ export default class Fylo {
      */
     async prepareFileSource(input, options = {}) {
         const normalized = normalizeImportOptions(options)
-        if (input instanceof Blob) {
-            if (input.size > normalized.maxBytes) {
-                throw new Error(`Raw file exceeded ${normalized.maxBytes} bytes`)
-            }
-            return {
-                stream: /** @type {ReadableStream<Uint8Array>} */ (input.stream()),
-                name:
-                    typeof (/** @type {{ name?: unknown }} */ (input).name) === 'string'
-                        ? /** @type {{ name: string }} */ (/** @type {unknown} */ (input)).name
-                        : undefined,
-                contentType: input.type || undefined,
-                key: options.key,
-                maxBytes: normalized.maxBytes
-            }
-        }
+        if (input instanceof Blob) return blobFileSource(input, options, normalized)
         if (!(input instanceof URL)) {
             throw new Error('File collection put() requires a Blob, File, or URL')
         }
         if (input.protocol === 'file:') {
-            const file = Bun.file(fileURLToPath(input))
-            if (!(await file.exists())) throw new Error(`Raw file source was not found: ${input}`)
-            if (file.size > normalized.maxBytes) {
-                throw new Error(`Raw file exceeded ${normalized.maxBytes} bytes`)
-            }
-            return {
-                // Bun's compiled runtime can stop servicing a long-lived stdin
-                // iterator after Bun.file().stream() reaches EOF. Adapt the
-                // independent Node file stream instead so `fylo exec --loop`
-                // retains ownership of stdin for the next machine request.
-                stream: localFileStream(fileURLToPath(input)),
-                name: decodeURIComponent(input.pathname.split('/').pop() ?? ''),
-                contentType: file.type || undefined,
-                key: options.key,
-                maxBytes: normalized.maxBytes
-            }
+            return await localFileSource(input, options, normalized)
         }
         const response = await this.fetchRawFile(input, normalized)
         if (!response.body) throw new Error('Raw file response body is empty')
@@ -1886,6 +1970,18 @@ export class CollectionFacade {
     async rebuild() {
         await this.fylo.ready()
         return await this.fylo.engine.rebuildCollection(this.collection)
+    }
+    /**
+     * Move every record to a new shard width.
+     *
+     * Idempotent and resumable: an interrupted run leaves the collection
+     * readable and re-running finishes what remains.
+     *
+     * @param {number} width
+     */
+    async reshard(width) {
+        await this.fylo.ready()
+        return await this.fylo.engine.reshardCollection(this.collection, width)
     }
     /** @param {CollectionCreateOptions} [options] */
     async create(options) {

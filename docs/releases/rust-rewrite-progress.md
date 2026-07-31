@@ -106,9 +106,11 @@ canonical shard and read either, so an existing root stays readable and
 converges as records are rewritten. The width is configurable per collection through
 `FYLO_SHARD_WIDTH` for newly created collections, recorded in the catalog
 descriptor and read from there by both engines; a write whose configured width
-disagrees with the record fails closed with `ESHARDWIDTH`. The bulk `reshard`
-command, its interrupted-migration crash case, and the downgrade path are
-outstanding.
+disagrees with the record fails closed with `ESHARDWIDTH`. `reshard` moves an existing collection to a new
+width, idempotently and resumably, and the regression corpus covers an
+interrupted run remaining readable and finishing on a second pass. The native
+engine has no `reshard` of its own, so the operation is currently a JavaScript
+one.
 
 ## Promotion discipline
 

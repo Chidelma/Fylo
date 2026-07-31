@@ -1,12 +1,13 @@
 import path from 'node:path'
 import { existsSync } from 'node:fs'
+import { readdir, rmdir } from 'node:fs/promises'
 import { CollectionNotFoundError, validateCollectionName } from '../core/collection.js'
 import { assertPathInside, validateDocId } from '../core/doc-id.js'
 import {
     DEFAULT_SHARD_WIDTH,
     assertShardWidth,
     configuredShardWidth,
-    legacyShardOf,
+    shardCandidates,
     shardOf
 } from '../core/shard.js'
 import { Cipher } from '../security/cipher.js'
@@ -14,6 +15,7 @@ import { FyloSyncError, resolveSyncMode } from '../replication/sync.js'
 import { FyloS3Backup } from '../replication/s3-backup.js'
 import { emitFyloEvent } from '../observability/events.js'
 import { FilesystemEventBus, FilesystemLockManager, FilesystemStorage } from './primitives.js'
+import { rawFileId } from '../core/raw-file.js'
 import { FilesystemDocuments } from './documents.js'
 import {
     FilesystemFiles,
@@ -197,13 +199,17 @@ function restoreMetadataXattrsExact(target, snapshot) {
  * @param {string} root @param {string} docId @param {string} filename
  * @returns {string}
  */
-function shardedPath(root, docId, filename, width = DEFAULT_SHARD_WIDTH) {
-    const target = path.join(root, shardOf(docId, width), filename)
+function shardedPath(root, docId, filename, width = DEFAULT_SHARD_WIDTH, previousWidths = []) {
+    const [canonical, ...fallbacks] = shardCandidates(docId, width, previousWidths)
+    const target = path.join(root, canonical, filename)
     assertPathInside(root, target)
     if (existsSync(target)) return target
-    const legacy = path.join(root, legacyShardOf(docId), filename)
-    assertPathInside(root, legacy)
-    return existsSync(legacy) ? legacy : target
+    for (const shard of fallbacks) {
+        const candidate = path.join(root, shard, filename)
+        assertPathInside(root, candidate)
+        if (existsSync(candidate)) return candidate
+    }
+    return target
 }
 
 export class FilesystemEngine {
@@ -289,6 +295,8 @@ export class FilesystemEngine {
         this.kinds = new Map()
         /** @type {Map<string, number>} recorded shard width per collection */
         this.shardWidths = new Map()
+        /** @type {Map<string, number[]>} widths an unfinished reshard is leaving */
+        this.previousShardWidths = new Map()
         this.locks = new FilesystemLockManager(this.collectionRoot.bind(this), this.storage)
         this.events = new FilesystemEventBus(this.collectionRoot.bind(this), this.storage)
         this.queue = options.queue
@@ -413,6 +421,12 @@ export class FilesystemEngine {
                     ? DEFAULT_SHARD_WIDTH
                     : assertShardWidth(parsed.shardWidth)
             )
+            this.previousShardWidths.set(
+                collection,
+                Array.isArray(parsed.previousShardWidths)
+                    ? parsed.previousShardWidths.map((value) => assertShardWidth(value))
+                    : []
+            )
         }
         if (kind === 'file') await this.migrateBucketIfNeeded(collection)
         this.kinds.set(collection, kind)
@@ -426,6 +440,15 @@ export class FilesystemEngine {
      */
     shardWidth(collection) {
         return this.shardWidths.get(collection) ?? DEFAULT_SHARD_WIDTH
+    }
+
+    /**
+     * Widths an unfinished reshard is moving this collection away from.
+     *
+     * @param {string} collection @returns {number[]}
+     */
+    priorShardWidths(collection) {
+        return this.previousShardWidths.get(collection) ?? []
     }
 
     /**
@@ -504,7 +527,8 @@ export class FilesystemEngine {
             this.docsRoot(collection),
             docId,
             `${docId}.json`,
-            this.shardWidth(collection)
+            this.shardWidth(collection),
+            this.priorShardWidths(collection)
         )
     }
     /** @param {string} collection @param {TTID} docId @returns {string} */
@@ -513,7 +537,8 @@ export class FilesystemEngine {
             this.deletedRoot(collection),
             docId,
             `${docId}.json`,
-            this.shardWidth(collection)
+            this.shardWidth(collection),
+            this.priorShardWidths(collection)
         )
     }
     /**
@@ -908,8 +933,9 @@ export class FilesystemEngine {
         // Every durable mutation passes here, so this is where a collection
         // whose layout does not match the configured width is refused. Reads
         // are deliberately unaffected: an existing root stays readable whatever
-        // the environment asks for.
-        await this.assertShardWidthMatches(collection)
+        // the environment asks for. Resharding is the operation that resolves
+        // the mismatch, so it is the one write the guard must let through.
+        if (operation !== 'reshard') await this.assertShardWidthMatches(collection)
         const previous = this.writeLanes.get(collection) ?? Promise.resolve()
         /** @type {() => void} */
         let release = () => {}
@@ -1014,6 +1040,7 @@ export class FilesystemEngine {
         // default width into a collection whose descriptor says otherwise.
         this.kinds.set(collection, kind)
         this.shardWidths.set(collection, width)
+        this.previousShardWidths.set(collection, [])
         await this.ensureCollection(collection)
         await this.invalidateQueryCache(collection)
     }
@@ -1320,6 +1347,163 @@ export class FilesystemEngine {
         await this.index.removeDocument(collection, docId, doc)
     }
     /** @param {string} collection @returns {Promise<CollectionRebuildResult>} */
+    /**
+     * Move every record in a collection to a new shard width.
+     *
+     * The descriptor records the target width and the width being left behind
+     * *before* any record moves, so a reader resolves both and an interrupted
+     * run leaves a fully readable root. Re-running finishes whatever remains,
+     * which makes the operation both idempotent and resumable. Documents are
+     * the source of truth, so this only renames files and rebuilds the derived
+     * index; no record's contents are rewritten.
+     *
+     * @param {string} collection
+     * @param {number} width
+     * @returns {Promise<{ collection: string, width: number, moved: number }>}
+     */
+    async reshardCollection(collection, width) {
+        assertShardWidth(width)
+        await this.requireCollection(collection)
+        return await this.withCollectionWriteLock(
+            collection,
+            () => this.reshardCollectionUnlocked(collection, width),
+            'reshard'
+        )
+    }
+
+    /**
+     * @param {string} collection @param {number} width
+     * @returns {Promise<{ collection: string, width: number, moved: number }>}
+     */
+    async reshardCollectionUnlocked(collection, width) {
+        const recorded = this.shardWidth(collection)
+        const previous = this.priorShardWidths(collection)
+        if (recorded === width && previous.length === 0) {
+            return { collection, width, moved: 0 }
+        }
+        const leaving = [...new Set([...previous, recorded])].filter((value) => value !== width)
+        // Record the destination and the widths being left before moving a
+        // single record, so an interrupted run leaves every record findable
+        // under one candidate or another.
+        await this.writeCollectionDescriptor(collection, width, leaving)
+        const kind = await this.collectionKind(collection)
+        let moved = 0
+        for (const [root, ids] of [
+            [
+                this.docsRoot(collection),
+                kind === 'file'
+                    ? await this.files.listFileIds(collection)
+                    : await this.documents.listDocIds(collection)
+            ],
+            [
+                this.deletedRoot(collection),
+                kind === 'file'
+                    ? await this.files.listDeletedFileIds(collection)
+                    : await this.documents.listDeletedDocIds(collection)
+            ]
+        ]) {
+            for (const docId of ids) {
+                const found = await this.findShardedRecord(root, docId, width, leaving)
+                if (!found) continue
+                const target = path.join(root, shardOf(docId, width), path.basename(found))
+                assertPathInside(root, target)
+                if (found === target) continue
+                await this.transactions.capture(found)
+                await this.transactions.capture(target)
+                await this.storage.mkdir(path.dirname(target))
+                await this.storage.move(found, target)
+                moved++
+            }
+        }
+        await this.rebuildCollectionIndexUnlocked(collection)
+        await this.pruneEmptyShards(collection)
+        // Only once every record has moved does the collection stop needing the
+        // old widths to be readable.
+        await this.writeCollectionDescriptor(collection, width, [])
+        await this.invalidateQueryCache(collection)
+        return { collection, width, moved }
+    }
+
+    /**
+     * Remove shard directories a reshard emptied.
+     *
+     * Leaving them costs nothing to correctness but makes every later
+     * enumeration walk directories that can never contain a record again.
+     *
+     * @param {string} collection @returns {Promise<void>}
+     */
+    async pruneEmptyShards(collection) {
+        for (const root of [this.docsRoot(collection), this.deletedRoot(collection)]) {
+            let shards
+            try {
+                shards = await readdir(root)
+            } catch (error) {
+                if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') continue
+                throw error
+            }
+            for (const shard of shards) {
+                const bucket = path.join(root, shard)
+                assertPathInside(root, bucket)
+                try {
+                    if ((await readdir(bucket)).length === 0) await rmdir(bucket)
+                } catch (error) {
+                    const code = /** @type {NodeJS.ErrnoException} */ (error).code
+                    // ENOTDIR: a stray file beside the shards is not ours to remove.
+                    if (code !== 'ENOENT' && code !== 'ENOTEMPTY' && code !== 'ENOTDIR') throw error
+                }
+            }
+        }
+    }
+
+    /**
+     * Locate a record under any shard width it may still occupy.
+     *
+     * @param {string} root @param {string} docId @param {number} width
+     * @param {number[]} leaving
+     * @returns {Promise<string | null>}
+     */
+    async findShardedRecord(root, docId, width, leaving) {
+        for (const shard of shardCandidates(docId, width, leaving)) {
+            const bucket = path.join(root, shard)
+            assertPathInside(root, bucket)
+            let entries
+            try {
+                entries = await this.storage.list(bucket)
+            } catch (error) {
+                if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') continue
+                throw error
+            }
+            const match = entries.find((entry) => rawFileId(path.basename(entry)) === docId)
+            if (match) return match
+        }
+        return null
+    }
+
+    /**
+     * @param {string} collection @param {number} width @param {number[]} previousWidths
+     * @returns {Promise<void>}
+     */
+    async writeCollectionDescriptor(collection, width, previousWidths) {
+        const descriptorPath = this.collectionDescriptorPath(collection)
+        // Drop the recorded key rather than spreading it forward: a completed
+        // reshard must leave no width behind, or every later lookup would keep
+        // probing a directory that can no longer hold anything.
+        const { previousShardWidths: _leaving, ...existing } =
+            /** @type {Record<string, unknown>} */ (
+                JSON.parse(await this.storage.read(descriptorPath))
+            )
+        await this.storage.write(
+            descriptorPath,
+            `${JSON.stringify({
+                ...existing,
+                shardWidth: width,
+                ...(previousWidths.length > 0 ? { previousShardWidths: previousWidths } : {})
+            })}\n`
+        )
+        this.shardWidths.set(collection, width)
+        this.previousShardWidths.set(collection, previousWidths)
+    }
+
     async rebuildCollection(collection) {
         await this.requireCollection(collection)
         return await this.withCollectionWriteLock(
@@ -1548,7 +1732,8 @@ export class FilesystemEngine {
                         this.docsRoot(collection),
                         docId,
                         `${docId}${extension}`,
-                        this.shardWidth(collection)
+                        this.shardWidth(collection),
+                        this.priorShardWidths(collection)
                     )
                 )
                 const stored = await this.files.writeStoredFile(collection, docId, source)
@@ -1688,7 +1873,8 @@ export class FilesystemEngine {
                         ? await this.files.findPath(
                               this.docsRoot(collection),
                               docId,
-                              this.shardWidth(collection)
+                              this.shardWidth(collection),
+                              this.priorShardWidths(collection)
                           )
                         : this.docPath(collection, docId)) ?? undefined
                 if (!previousPath) throw new Error(`Document path not found: ${docId}`)
@@ -1697,7 +1883,8 @@ export class FilesystemEngine {
                     this.deletedRoot(collection),
                     docId,
                     path.basename(previousPath),
-                    this.shardWidth(collection)
+                    this.shardWidth(collection),
+                    this.priorShardWidths(collection)
                 )
                 await this.transactions.capture(previousPath)
                 await this.transactions.capture(pendingDeletedPath)
@@ -1768,7 +1955,8 @@ export class FilesystemEngine {
                     this.docsRoot(collection),
                     docId,
                     path.basename(deletedPath),
-                    this.shardWidth(collection)
+                    this.shardWidth(collection),
+                    this.priorShardWidths(collection)
                 )
                 await this.transactions.capture(deletedPath)
                 await this.transactions.capture(activePath)
@@ -2030,7 +2218,8 @@ export class FilesystemEngine {
             const target = await this.files.findPath(
                 this.docsRoot(collection),
                 String(docId),
-                this.shardWidth(collection)
+                this.shardWidth(collection),
+                this.priorShardWidths(collection)
             )
             if (!target) continue
             let key
@@ -2063,7 +2252,8 @@ export class FilesystemEngine {
             const target = await this.files.findPath(
                 this.docsRoot(collection),
                 docId,
-                this.shardWidth(collection)
+                this.shardWidth(collection),
+                this.priorShardWidths(collection)
             )
             if (!target) throw new Error(`Raw file not found: ${docId}`)
             return target
