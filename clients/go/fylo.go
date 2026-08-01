@@ -3,7 +3,7 @@
 // Stdlib only. Requires the `fylo` binary on PATH (brew/scoop) or an explicit
 // path. One long-lived subprocess keeps the engine warm across calls.
 //
-//	db, _ := fylo.Open("/path/to/db", "fylo", false)
+//	db, _ := fylo.Open("/path/to/db", "fylo")
 //	defer db.Close()
 //	db.CreateCollection("users", "document")
 //	id, _ := db.PutData("users", map[string]any{"name": "Ada", "role": "admin"})
@@ -41,7 +41,7 @@ type Fylo struct {
 }
 
 // Open starts a warm fylo process rooted at root. binary defaults to "fylo".
-func Open(root, binary string, worm bool) (*Fylo, error) {
+func Open(root, binary string) (*Fylo, error) {
 	if binary == "" {
 		binary = "fylo"
 	}
@@ -49,9 +49,6 @@ func Open(root, binary string, worm bool) (*Fylo, error) {
 		"exec", "--loop", "--root", root,
 		"--max-request-bytes", strconv.Itoa(maxRequestBytes),
 		"--max-response-bytes", strconv.Itoa(maxResponseBytes),
-	}
-	if worm {
-		args = append(args, "--worm")
 	}
 	cmd := exec.Command(binary, args...)
 	stdin, err := cmd.StdinPipe()

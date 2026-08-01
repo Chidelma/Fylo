@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/fylo-format",
+    "crates/fylo-engine",
+    "crates/fylo-query",
+    "crates/fylo-storage-native",
+    "crates/fylo-machine",
+    "crates/fylo-cli",
+    "src/browser/wasm",
+    "xtask",
+]
+default-members = [
+    "crates/fylo-format",
+    "crates/fylo-engine",
+    "crates/fylo-query",
+    "crates/fylo-storage-native",
+    "crates/fylo-machine",
+    "crates/fylo-cli",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+repository = "https://github.com/d31ma/Fylo"
+
+[workspace.dependencies]
+aes-gcm = "0.11.0"
+base64 = "0.22.1"
+boa_engine = { version = "0.21.1", default-features = false }
+getrandom = "0.4.3"
+hmac = "0.13.0"
+pbkdf2 = { version = "0.13.0", features = ["hmac"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+ryu-js = "1.0.3"
+same-file = "1.0.6"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+xattr = "1.6.1"
+zeroize = "1.8.2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+strip = true

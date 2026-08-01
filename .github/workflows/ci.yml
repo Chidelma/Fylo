@@ -1,26 +1,191 @@
 name: CI
 
 on:
+    push:
+        branches: [main, codex/rust-rewrite]
     pull_request:
         branches: [main]
         types: [opened, synchronize, reopened, ready_for_review]
+    workflow_dispatch:
 
 permissions:
     contents: read
 
 concurrency:
     group: ci-${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-    windows-storage:
-        name: Windows x64 storage safety (${{ matrix.os }})
+    quality:
+        name: Rust quality, contracts, and browser units
+        runs-on: ubuntu-24.04
+        timeout-minutes: 35
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install dependencies and verified vendor binaries
+              run: |
+                  bun install --frozen-lockfile
+                  sh ./scripts/install-vendor-bins.sh
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
+            - name: Verify Rust-only product boundary and contracts
+              run: |
+                  bun run contracts:verify
+                  bun run rust:verify
+                  bun run query:verify
+                  bun run predicate:verify
+                  bun run sql:verify
+
+            - name: Check formatting, Clippy, and tests
+              run: |
+                  bun run rust:fmt
+                  bun run rust:clippy
+                  bun run rust:test
+                  bun ./scripts/run-rust.mjs cargo build --locked -p fylo-cli --bin fylo-rust
+
+            - name: Check JavaScript host and client surfaces
+              run: |
+                  bun run typecheck
+                  bun run lint
+                  bun test tests/browser/*.test.js --timeout 120000 --parallel=1
+
+            - name: Install cargo-deny
+              run: bun ./scripts/run-rust.mjs cargo install cargo-deny --version 0.19.4 --locked
+
+            - name: Check dependency policy
+              run: bun run rust:deny
+
+    native:
+        name: Native Rust safety (${{ matrix.target }})
         runs-on: ${{ matrix.os }}
+        timeout-minutes: 50
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-24.04
+                      target: linux-x64
+                      asset: fylo-rust-linux-x64
+                    - os: macos-15
+                      target: macos-arm64
+                      asset: fylo-rust-macos-arm64
+                    - os: windows-2022
+                      target: windows-x64-2022
+                      asset: fylo-rust-windows-x64.exe
+                    - os: windows-2025
+                      target: windows-x64-2025
+                      asset: fylo-rust-windows-x64.exe
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install dependencies
+              run: bun install --frozen-lockfile
+
+            - name: Install verified vendor binaries
+              shell: bash
+              run: |
+                  sh ./scripts/install-vendor-bins.sh
+                  if command -v cygpath >/dev/null 2>&1; then
+                      cygpath -w "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  else
+                      echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+                  fi
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
+            - name: Lint native target-specific paths
+              run: bun run rust:clippy
+
+            - name: Test native storage, engine, machine, and CLI
+              run: >-
+                  bun ./scripts/run-rust.mjs cargo test --locked
+                  -p fylo-storage-native -p fylo-engine -p fylo-machine -p fylo-cli
+
+            - name: Build exact Rust candidate
+              shell: bash
+              env:
+                  ASSET: ${{ matrix.asset }}
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_BUILD_KIND: native-rust-preview
+              run: bun ./scripts/build-executable.mjs --outfile "target/native/$ASSET"
+
+            - name: Verify exact binary identity and root ownership
+              env:
+                  FYLO_BINARY: target/native/${{ matrix.asset }}
+                  FYLO_REQUIRE_NATIVE_BINARY: '1'
+                  FYLO_EXPECT_BUILD_KIND: native-rust-preview
+                  FYLO_EXPECT_COMMIT: ${{ github.sha }}
+              run: bun test tests/interop/native-release-root-lease.test.js --timeout 120000 --parallel=1
+
+            - name: Verify native Windows filesystem behavior
+              if: runner.os == 'Windows'
+              env:
+                  FYLO_REQUIRE_WINDOWS_NATIVE: '1'
+                  FYLO_WINDOWS_BINARY: target/native/${{ matrix.asset }}
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_EXPECT_BUILD_KIND: native-rust-preview
+                  FYLO_EXPECT_COMMIT: ${{ github.sha }}
+              run: bun test tests/interop/windows-native-binary.test.js --timeout 120000 --parallel=1
+
+            - name: Recover every interrupted durable transition
+              run: bun run rust:crash:matrix
+
+            - name: Run model-checked Rust soak smoke
+              shell: bash
+              env:
+                  FYLO_RUST_BINARY: target/native/${{ matrix.asset }}
+                  FYLO_SKIP_RUST_BUILD: '1'
+              run: >-
+                  bun ./scripts/run-rust-soak.mjs --iterations 100
+                  --output target/soak/${{ matrix.target }}.json
+
+            - name: Stage checksummed candidate
+              shell: bash
+              env:
+                  FYLO_CANDIDATE_LABEL: ${{ matrix.target }}
+              run: >-
+                  bun ./scripts/stage-rust-candidate.mjs
+                  --binary target/native/${{ matrix.asset }}
+                  --label "$FYLO_CANDIDATE_LABEL"
+                  --output target/candidate
+
+            - name: Retain native candidate and soak evidence
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: rust-native-${{ matrix.target }}-${{ github.sha }}
+                  path: |
+                      target/candidate
+                      target/soak/${{ matrix.target }}.json
+                  if-no-files-found: error
+                  retention-days: 90
+
+    browser:
+        name: Browser Wasm and OPFS (${{ matrix.browser }})
+        runs-on: ubuntu-24.04
         timeout-minutes: 30
         strategy:
             fail-fast: false
             matrix:
-                os: [windows-2022, windows-2025]
+                browser: [chromium, firefox, webkit]
 
         steps:
             - name: Checkout
@@ -31,113 +196,55 @@ jobs:
               with:
                   bun-version-file: .bun-version
 
-            - name: Assert native Windows x64 runner
-              shell: pwsh
+            - name: Install dependencies and browser
               run: |
-                  if (-not [Environment]::Is64BitOperatingSystem) {
-                    throw 'The Windows storage gate requires a 64-bit operating system.'
-                  }
-                  if ($env:RUNNER_OS -ne 'Windows') {
-                    throw "The Windows storage gate cannot run on $env:RUNNER_OS."
-                  }
-                  $platform = bun -p "process.platform"
-                  $architecture = bun -p "process.arch"
-                  if ($platform -ne 'win32' -or $architecture -ne 'x64') {
-                    throw "Expected native win32/x64 Bun, received $platform/$architecture."
-                  }
+                  bun install --frozen-lockfile
+                  node ./node_modules/@playwright/test/cli.js install --with-deps ${{ matrix.browser }}
 
-            - name: Install dependencies
-              run: bun install --frozen-lockfile
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
 
-            - name: Install verified Windows vendor binaries
-              shell: pwsh
-              env:
-                  GITHUB_TOKEN: ${{ github.token }}
-              run: ./scripts/install-vendor-bins.ps1
+            - name: Build browser host and Wasm kernel
+              run: bun run build:web:wasm
 
-            - name: Verify native lock crash and reclaim
-              run: |
-                  bun test tests/integration/fs-lock.test.js --timeout 120000 --parallel=1
-                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                  bun test tests/integration/machine-hardening.test.js --test-name-pattern 'exclusive root ownership' --timeout 120000 --parallel=1
+            - name: Enforce browser payload budgets
+              run: >-
+                  bun ./scripts/verify-browser-wasm-budgets.mjs
+                  --output target/wasm-budget-${{ matrix.browser }}.json
 
-            - name: Verify interrupted transaction recovery
-              run: |
-                  bun test tests/integration/transactions.test.js --test-name-pattern 'startup read rolls back a transaction interrupted by SIGKILL|rollback restores document xattrs exactly|recovery rejects symlinked capture paths without changing an outside sentinel|recovery rolls forward after the durable commit marker' --timeout 120000 --parallel=1
-                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                  bun test tests/integration/crash-recovery.test.js --timeout 120000 --parallel=1
+            - name: Run real-browser OPFS, restart, and fallback corpus
+              run: node ./node_modules/@playwright/test/cli.js test --project=${{ matrix.browser }}
 
-            - name: Verify NTFS junction and reparse-point defenses
-              run: bun test tests/integration/document-path-security.test.js tests/integration/secure-open.test.js --timeout 120000 --parallel=1
-
-            - name: Run Windows storage regression suite
-              run: bun test tests/integration/xattr.test.js tests/integration/durable.test.js tests/integration/filesystem.test.js tests/integration/raw-files.test.js tests/integration/collection-lock.test.js tests/integration/vcs-recovery.test.js tests/integration/s3-backup.test.js tests/integration/s3-restore.test.js --timeout 300000 --parallel=1
-
-            - name: Build native Windows executable
-              shell: pwsh
-              run: |
-                  New-Item -ItemType Directory -Force dist-bin | Out-Null
-                  bun ./scripts/build-executable.mjs --outfile ./dist-bin/fylo.exe
-
-            - name: Verify compiled Windows executable behavior
-              env:
-                  FYLO_REQUIRE_WINDOWS_NATIVE: '1'
-              run: bun test tests/interop/windows-native-binary.test.js --timeout 120000 --parallel=1
-
-    test:
-        name: Test (pinned Bun)
-        runs-on: ubuntu-latest
-        timeout-minutes: 20
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-            - name: Setup Node
-              uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+            - name: Retain browser evidence
+              if: always()
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
               with:
-                  node-version: '24'
-
-            - name: Setup Bun
-              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-              with:
-                  bun-version-file: .bun-version
-
-            - name: Install dependencies
-              run: bun install --frozen-lockfile
-
-            - name: Install CHEX and TTID binaries
-              run: |
-                  sh ./scripts/install-vendor-bins.sh
-                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-            - name: Type check
-              run: bun run typecheck
-
-            - name: Lint
-              run: bun run lint
-
-            - name: Run tests
-              run: bun run test
+                  name: rust-browser-${{ matrix.browser }}-${{ github.sha }}
+                  path: |
+                      target/wasm-budget-${{ matrix.browser }}.json
+                      test-results
+                      playwright-report
+                  if-no-files-found: warn
+                  retention-days: 90
 
     binary-interop:
-        name: Compiled Binary Interop
-        runs-on: macos-latest
-        timeout-minutes: 30
+        name: Compiled binary and published clients
+        runs-on: macos-15
+        timeout-minutes: 40
 
         steps:
             - name: Checkout
               uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-            - name: Setup Node
-              uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-              with:
-                  node-version: '24'
-
             - name: Setup Bun
               uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
               with:
                   bun-version-file: .bun-version
+
+            - name: Setup Node
+              uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+              with:
+                  node-version: '24'
 
             - name: Setup Dart
               uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
@@ -157,33 +264,50 @@ jobs:
               with:
                   go-version: '1.22'
 
-            - name: Install Kotlin compiler
-              run: sh ./scripts/install-kotlin-compiler.sh
-
-            - name: Install dependencies
+            - name: Install Kotlin compiler and project dependencies
               run: |
+                  sh ./scripts/install-kotlin-compiler.sh
                   bun install --frozen-lockfile
                   (cd website && bun install --frozen-lockfile)
                   (cd explorer && bun install --frozen-lockfile)
-
-            - name: Install CHEX and TTID binaries
-              run: |
                   sh ./scripts/install-vendor-bins.sh
                   echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-            - name: Verify interop language toolchains
-              run: |
-                  python3 --version
-                  ruby --version
-                  php --version
-                  dart --version
-                  javac -version
-                  java -version
-                  dotnet --version
-                  c++ --version
-                  swift --version
-                  kotlinc -version
-                  rustc --version
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
 
-            - name: Run compiled binary interop tests
+            - name: Build native Rust executable
+              env:
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_BUILD_KIND: native-rust-preview
+              run: bun run build:exe
+
+            - name: Run binary, client, installer, website, and Explorer interop
+              env:
+                  FYLO_SKIP_BINARY_BUILD: '1'
+                  FYLO_EXPECT_BUILD_KIND: native-rust-preview
+                  FYLO_EXPECT_COMMIT: ${{ github.sha }}
               run: bun run test:interop
+
+            - name: Run every published language client against Rust
+              env:
+                  FYLO_RUST_BINARY: dist-bin/fylo
+                  FYLO_SKIP_RUST_BUILD: '1'
+              run: bun ./scripts/verify-rust-language-clients.mjs
+
+    miri:
+        name: Portable kernel under Miri
+        runs-on: ubuntu-24.04
+        timeout-minutes: 20
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Install pinned Miri toolchain
+              run: |
+                  rustup toolchain install nightly-2026-07-20 --profile minimal --component miri
+                  cargo +nightly-2026-07-20 miri setup
+
+            - name: Run portable crates under Miri
+              run: cargo +nightly-2026-07-20 miri test -p fylo-format -p fylo-query --lib --tests

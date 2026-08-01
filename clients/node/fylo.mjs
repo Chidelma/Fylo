@@ -1,3 +1,4 @@
+// @ts-nocheck -- dependency-free drop-in shim; behavior is verified by the cross-language corpus.
 // Fylo client — drives the `fylo` binary's persistent NDJSON loop.
 //
 // For JS/TS apps that consume the compiled binary instead of importing the npm
@@ -55,11 +56,10 @@ const FACADE = {
 export class Fylo {
     /**
      * @param {string} root
-     * @param {{ binary?: string, worm?: boolean, exclusiveRoot?: boolean, maxRequestBytes?: number, maxResponseBytes?: number }} [opts]
+     * @param {{ binary?: string, exclusiveRoot?: boolean, maxRequestBytes?: number, maxResponseBytes?: number }} [opts]
      */
     constructor(root, opts = {}) {
         const args = ['exec', '--loop', '--root', root]
-        if (opts.worm) args.push('--worm')
         if (opts.exclusiveRoot) args.push('--exclusive-root')
         this.maxRequestBytes = frameLimit(
             opts.maxRequestBytes,

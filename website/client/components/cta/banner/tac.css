@@ -1,6 +1,12 @@
 .cta-card {
-  padding: 3rem 2rem;
+  position: relative;
+  overflow: hidden;
+  padding: 3.5rem 2rem;
   text-align: center;
+  /* Glow layered over the card's tonal fill, not replacing it. */
+  background:
+    radial-gradient(ellipse 70% 100% at 50% 0%, rgba(248, 155, 75, 0.16), transparent 70%),
+    var(--w-primary-container);
 }
 
 .cta-card h2 {

@@ -8,11 +8,11 @@ import packageManifest from '../../package.json' with { type: 'json' }
 const roots = []
 const workspaces = []
 const repoRoot = process.cwd()
-const binaryPath = path.join(
-    repoRoot,
-    'dist-bin',
-    process.platform === 'win32' ? 'fylo.exe' : 'fylo'
+const binaryPath = path.resolve(
+    process.env.FYLO_BINARY ??
+        path.join(repoRoot, 'dist-bin', process.platform === 'win32' ? 'fylo.exe' : 'fylo')
 )
+const expectedVersion = process.env.FYLO_EXPECT_BINARY_VERSION ?? packageManifest.version
 
 /**
  * @param {string[]} args
@@ -75,6 +75,7 @@ async function requireCommand(command) {
 
 beforeAll(async () => {
     await mkdir(path.dirname(binaryPath), { recursive: true })
+    if (process.env.FYLO_SKIP_BINARY_BUILD === '1') return
     const build = await run(['bun', 'run', 'build:exe'], { timeout: 120_000 })
     expectSuccess('bun run build:exe', build)
 })
@@ -110,7 +111,7 @@ describe('compiled binary language interop', () => {
         }
         for (const accepted of puts.slice(3)) expect(accepted.ok).toBe(true)
 
-        // Documents live in TTID-prefix shard directories, so count the files themselves.
+        // Documents live in trailing-TTID shard directories, so count the files themselves.
         const docs = await readdir(path.join(root, 'db', '.collections', 'events', 'docs'), {
             recursive: true
         })
@@ -120,7 +121,7 @@ describe('compiled binary language interop', () => {
     test('compiled CLI and loop expose the same immutable runtime identity', async () => {
         const version = await run([binaryPath, '--version'])
         expectSuccess('compiled --version', version)
-        expect(version.stdout.trim()).toBe(packageManifest.version)
+        expect(version.stdout.trim()).toBe(expectedVersion)
 
         const cli = await run([binaryPath, 'version', '--output', 'json'])
         expectSuccess('compiled version JSON', cli)
@@ -133,21 +134,79 @@ describe('compiled binary language interop', () => {
         const handshake = JSON.parse(loop.stdout)
         const configuredCommit = process.env.FYLO_BUILD_COMMIT ?? process.env.GITHUB_SHA ?? ''
         const releaseBuild = /^[0-9a-f]{40}$/i.test(configuredCommit)
+        const expectedBuildKind =
+            process.env.FYLO_EXPECT_BUILD_KIND ??
+            (releaseBuild ? 'release' : 'development-compiled')
+        const expectedCommit =
+            process.env.FYLO_EXPECT_COMMIT ?? (releaseBuild ? configuredCommit : 'unknown')
+        const expectedTarget =
+            process.env.FYLO_EXPECT_TARGET ??
+            `${process.platform === 'darwin' ? 'macos' : process.platform}-${process.arch}`
 
         expect(handshake.protocolVersion).toBe(cliIdentity.protocolVersion)
         expect(handshake.result).toEqual(cliIdentity)
-        expect(cliIdentity.runtimeVersion).toBe(packageManifest.version)
-        expect(cliIdentity.buildKind).toBe(releaseBuild ? 'release' : 'development-compiled')
-        expect(cliIdentity.buildTarget).toBe(
-            `${process.platform === 'darwin' ? 'macos' : process.platform}-${process.arch}`
-        )
-        if (cliIdentity.buildKind === 'release') {
+        expect(cliIdentity.runtimeVersion).toBe(expectedVersion)
+        expect(cliIdentity.buildKind).toBe(expectedBuildKind)
+        expect(cliIdentity.buildTarget).toBe(expectedTarget)
+        expect(cliIdentity.commit).toBe(expectedCommit)
+        if (cliIdentity.buildKind === 'release')
             expect(cliIdentity.commit).toMatch(/^[0-9a-f]{40}$/)
-        } else {
-            expect(cliIdentity.commit).toBe('unknown')
-        }
         expect(cliIdentity.dependencies.chex.requiredVersion).toBe('26.28.02')
         expect(cliIdentity.dependencies.ttid.requiredVersion).toBe('26.28.02')
+        expect(cliIdentity.capabilities.documentBuckets).toEqual({
+            version: 1,
+            collectionKind: 'file',
+            operations: [
+                'createCollection',
+                'dropCollection',
+                'inspectCollection',
+                'rebuildCollection',
+                'verifyCollection',
+                'getDoc',
+                'getLatest',
+                'getMeta',
+                'setMeta',
+                'findDocs',
+                'findDeletedDocs',
+                'restoreDoc',
+                'putData',
+                'patchDoc',
+                'patchDocs',
+                'delDoc',
+                'delDocs'
+            ],
+            putInputs: ['path', 'url'],
+            integrity: 'sha256-full-content'
+        })
+        if (!['darwin', 'linux'].includes(process.platform)) {
+            expect(cliIdentity.capabilities.machineAccess).toBeUndefined()
+        } else {
+            expect(cliIdentity.capabilities.machineAccess).toEqual({
+                version: 1,
+                operations: [
+                    'executeSQL',
+                    'getDoc',
+                    'getLatest',
+                    'getMeta',
+                    'setMeta',
+                    'findDocs',
+                    'findDeletedDocs',
+                    'restoreDoc',
+                    'joinDocs',
+                    'putData',
+                    'batchPutData',
+                    'patchDoc',
+                    'patchDocs',
+                    'delDoc',
+                    'delDocs',
+                    'importBulkData'
+                ],
+                writeDescriptorFields: ['uid', 'gid', 'mode'],
+                actorFields: ['uid', 'groups'],
+                directDenial: 'EACCES',
+                queryDenial: 'omit'
+            })
+        }
     })
 
     test('Python can drive FYLO through the machine JSON protocol', async () => {
@@ -1005,8 +1064,8 @@ import (
 )
 
 func main() {
-	// args: [binaryPath, root]; Open takes (root, binary, worm).
-	db, err := fylo.Open(os.Args[2], os.Args[1], false)
+	// args: [binaryPath, root]; Open takes (root, binary).
+	db, err := fylo.Open(os.Args[2], os.Args[1])
 	if err != nil {
 		panic(err)
 	}
@@ -1063,7 +1122,7 @@ fn main() {
     let root = std::env::args().nth(2).unwrap();
     let uid = std::env::args().nth(3).unwrap().parse::<u32>().unwrap();
     let gid = std::env::args().nth(4).unwrap().parse::<u32>().unwrap();
-    let mut db = Fylo::open(&root, &binary, false).unwrap();
+    let mut db = Fylo::open(&root, &binary).unwrap();
     db.create_collection("users", "document").unwrap();
     let put = db
         .put_data(
@@ -1155,7 +1214,7 @@ import java.util.Map;
 
 public class Interop {
     public static void main(String[] a) throws Exception {
-        try (Fylo db = new Fylo(a[1], a[0], false)) {
+        try (Fylo db = new Fylo(a[1], a[0])) {
             int uid = Integer.parseInt(a[2]);
             db.createCollection("users");
             String put = db.putData("users", Map.of("name", "Ada", "role", "admin", "age", 30));
@@ -1214,7 +1273,7 @@ public class Interop {
             path.join(ws, 'Program.cs'),
             String.raw`using System.Collections.Generic;
 
-var db = new Fylo.Fylo(args[1], args[0], false);
+var db = new Fylo.Fylo(args[1], args[0]);
 var uid = int.Parse(args[2]);
 db.CreateCollection("users");
 var data = new Dictionary<string, object> { ["name"] = "Ada", ["role"] = "admin", ["age"] = 30 };

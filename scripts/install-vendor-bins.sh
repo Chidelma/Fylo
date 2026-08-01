@@ -33,11 +33,22 @@ case "$(uname -s)-$(uname -m)" in
         CHEX_ASSET='chex-macos-x64'
         CHEX_SHA256='a1668b30e9b11cc495f04a986b3fb572cdddb6d325d9723184d2d75c36de84e9'
         ;;
+    MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64)
+        TTID_ASSET='ttid-windows-x64.exe'
+        TTID_SHA256='b4beab399741b46a82d037cfef2b298418e7596245684aed91154aee8d6771aa'
+        CHEX_ASSET='chex-windows-x64.exe'
+        CHEX_SHA256='d00d48eeaf5f24fa39ec8dfc2f6963ab8ab1a38e20523e239bea63498815bd18'
+        EXECUTABLE_SUFFIX='.exe'
+        ;;
     *)
         echo "Unsupported vendor-binary platform: $(uname -s)/$(uname -m)" >&2
         exit 1
         ;;
 esac
+
+# Windows needs the extension to be executable; every other platform must not
+# have one, so callers can always spawn a bare `ttid`/`chex`.
+EXECUTABLE_SUFFIX=${EXECUTABLE_SUFFIX:-}
 
 verify_sha256() {
     file=$1
@@ -72,9 +83,9 @@ install_binary() {
 }
 
 mkdir -p "$DESTINATION"
-install_binary 'd31ma/TTID' "$TTID_VERSION" "$TTID_ASSET" "$TTID_SHA256" 'ttid'
-install_binary 'd31ma/CHEX' "$CHEX_VERSION" "$CHEX_ASSET" "$CHEX_SHA256" 'chex'
+install_binary 'd31ma/TTID' "$TTID_VERSION" "$TTID_ASSET" "$TTID_SHA256" "ttid$EXECUTABLE_SUFFIX"
+install_binary 'd31ma/CHEX' "$CHEX_VERSION" "$CHEX_ASSET" "$CHEX_SHA256" "chex$EXECUTABLE_SUFFIX"
 
-"$DESTINATION/ttid" --help >/dev/null
-"$DESTINATION/chex" --help >/dev/null
+"$DESTINATION/ttid$EXECUTABLE_SUFFIX" --help >/dev/null
+"$DESTINATION/chex$EXECUTABLE_SUFFIX" --help >/dev/null
 echo "Verified TTID and CHEX in $DESTINATION."

@@ -10,6 +10,9 @@ import { rawInfo, canDecodeImage, canPlayMedia } from './raw-preview.js'
 import { readVersions, vcsObjectPath, readWriteActivity } from './versioning.js'
 import { fileIconSvg, folderIconSvg } from './file-icons.js'
 import { highlightToHtml } from './highlight.js'
+import { normalizeShardLayout, shardCandidates, shardOf } from './sharding.js'
+
+export { historicalShardCandidates, legacyShardOf, shardCandidates, shardOf } from './sharding.js'
 
 const DOC_LIST_CAP = 500 // ponytail: flat cap; add paging when a root outgrows it
 const FILE_SEARCH_CAP = 500
@@ -798,6 +801,16 @@ export default class {
         this.kinds = safeRecord()
         for (const name of this.collections) this.kinds[name] = 'document'
         for (const name of this.buckets) this.kinds[name] = 'file'
+        this.shardLayouts = safeRecord()
+        await Promise.all(
+            [...this.collections, ...this.buckets].map(async (name) => {
+                const descriptor = await this._fs
+                    .readText(`/.fylo-catalog/collections/${name}.json`)
+                    .then(JSON.parse)
+                    .catch(() => ({}))
+                this.shardLayouts[name] = normalizeShardLayout(descriptor)
+            })
+        )
         this.view = 'docs'
         this.rootName = handle.name
         this.writable = writable
@@ -814,6 +827,35 @@ export default class {
     // .collections. Every filesystem path in the Explorer routes through this.
     baseDir(collection) {
         return this.kinds[collection] === 'file' ? '.buckets' : '.collections'
+    }
+
+    shardLayout(collection) {
+        return this.shardLayouts?.[collection] ?? normalizeShardLayout()
+    }
+
+    recordShards(collection, id) {
+        return shardCandidates(id, this.shardLayout(collection))
+    }
+
+    recordDirectory(collection, namespace, shard) {
+        const root = `/${this.baseDir(collection)}/${collection}/${namespace}`
+        return shard ? `${root}/${shard}` : root
+    }
+
+    writeRecordDirectory(collection, namespace, id) {
+        return this.recordDirectory(
+            collection,
+            namespace,
+            shardOf(id, this.shardLayout(collection).width)
+        )
+    }
+
+    async recordPath(collection, namespace, id, suffix) {
+        for (const shard of this.recordShards(collection, id)) {
+            const path = `${this.recordDirectory(collection, namespace, shard)}/${id}${suffix}`
+            if (await this._fs.exists(path)) return path
+        }
+        return `${this.writeRecordDirectory(collection, namespace, id)}/${id}${suffix}`
     }
 
     // Advisory only — there is no cross-process locking between a browser tab
@@ -1033,16 +1075,19 @@ export default class {
 
     /** Physical bytes path + extension for a file id. */
     async fileBytesPath(collection, id) {
-        const base = `/${this.baseDir(collection)}/${collection}/docs/${id.slice(0, 2)}`
-        let names
-        try {
-            names = await this._fs.list(base)
-        } catch (error) {
-            if (isMissingFilesystemEntry(error)) return null
-            throw error
+        for (const shard of this.recordShards(collection, id)) {
+            const base = this.recordDirectory(collection, 'docs', shard)
+            let names
+            try {
+                names = await this._fs.list(base)
+            } catch (error) {
+                if (isMissingFilesystemEntry(error)) continue
+                throw error
+            }
+            const name = names.find((entry) => entry === id || entry.startsWith(`${id}.`))
+            if (name) return { path: `${base}/${name}`, ext: name.slice(id.length) }
         }
-        const name = names.find((entry) => entry === id || entry.startsWith(`${id}.`))
-        return name ? { path: `${base}/${name}`, ext: name.slice(id.length) } : null
+        return null
     }
 
     /** Append lines to keys.wal, then refresh the key map + columns. */
@@ -1100,7 +1145,7 @@ export default class {
             const newId = TTID.generate()
             const bytes = await this._fs.readBytes(src.path)
             await this._fs.writeBytes(
-                `/${this.baseDir(this.active)}/${this.active}/docs/${newId.slice(0, 2)}/${newId}${src.ext}`,
+                `${this.writeRecordDirectory(this.active, 'docs', newId)}/${newId}${src.ext}`,
                 bytes
             )
             lines.push(`+\tkey/eq/${this.encodeKeyEntry(newKey)}/${newId}\n`)
@@ -1464,7 +1509,7 @@ export default class {
             try {
                 const src = await this.fileBytesPath(this.active, id)
                 if (src) {
-                    const deletedDir = `/${this.baseDir(this.active)}/${this.active}/.deleted/${id.slice(0, 2)}`
+                    const deletedDir = this.writeRecordDirectory(this.active, '.deleted', id)
                     await this._fs.mkdir(deletedDir, { recursive: true })
                     await this._fs.move(src.path, `${deletedDir}/${id}${src.ext}`)
                 }
@@ -1812,7 +1857,7 @@ export default class {
     // Browser-readable metadata for a document: id, size (compact JSON bytes on
     // disk), field count, schema version (_v), and the file's mtime.
     async buildDocMeta(id, obj) {
-        const path = `/${this.baseDir(this.active)}/${this.active}/docs/${id.slice(0, 2)}/${id}.json`
+        const path = await this.recordPath(this.active, 'docs', id, '.json')
         const modifiedMs = await this._fs.mtimeMs(path).catch(() => 0)
         const bytes = new TextEncoder().encode(JSON.stringify(obj)).byteLength
         const isObject = obj && typeof obj === 'object' && !Array.isArray(obj)
@@ -1830,7 +1875,12 @@ export default class {
 
     async loadVersions(id) {
         const filename = this.isFileCollection() ? this.rawName : `${id}.json`
-        this.versions = await readVersions(this._fs, { collection: this.active, id, filename })
+        this.versions = await readVersions(this._fs, {
+            collection: this.active,
+            id,
+            filename,
+            shardLayout: this.shardLayout(this.active)
+        })
     }
 
     // Metadata rows for the <explorer-meta> panes (document + file details).
@@ -1926,15 +1976,14 @@ export default class {
     // Raw-file collections store bytes under the doc id with the original
     // extension — locate by listing the bucket, then preview/download.
     async loadRaw(id) {
-        const base = `/${this.baseDir(this.active)}/${this.active}/docs/${id.slice(0, 2)}`
-        const names = await this._fs.list(base).catch(() => [])
-        const name = names.find((entry) => entry === id || entry.startsWith(`${id}.`))
-        if (!name) {
+        const stored = await this.fileBytesPath(this.active, id)
+        if (!stored) {
             this.error = `Could not read ${id}`
             return
         }
         try {
-            const path = `${base}/${name}`
+            const path = stored.path
+            const name = path.slice(path.lastIndexOf('/') + 1)
             const size = await this._fs.size(path)
             if (size > EXPLORER_LIMITS.rawPreviewBytes) {
                 throw new Error(limitError('Raw preview', size, EXPLORER_LIMITS.rawPreviewBytes))
@@ -2386,7 +2435,7 @@ export default class {
                 const chunks = []
                 let bytes = 0
                 for (const id of ids) {
-                    const path = `/${this.baseDir(name)}/${name}/docs/${id.slice(0, 2)}/${id}.json`
+                    const path = await this.recordPath(name, 'docs', id, '.json')
                     const storedBytes = await this._fs.size(path)
                     if (bytes + storedBytes > EXPLORER_LIMITS.exportBytes) {
                         throw new Error(
@@ -2755,7 +2804,7 @@ export default class {
                 const key = `${this.folderPath}${file.name}`
                 const root = `/${this.baseDir(this.active)}/${this.active}`
                 await this._fs.writeBytes(
-                    `${root}/docs/${id.slice(0, 2)}/${id}${ext}`,
+                    `${this.writeRecordDirectory(this.active, 'docs', id)}/${id}${ext}`,
                     new Uint8Array(await file.arrayBuffer())
                 )
                 // key/eq entry, double-encoded to match the index format.

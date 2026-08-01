@@ -1,0 +1,65 @@
+{
+    "schemaVersion": 1,
+    "queryFormat": "fylo.query.v1",
+    "producer": "fylo-js",
+    "snapshot": "score/n/400fffffffffffff/4VRNF52JPCO\nscore/n/bff0000000000000/4VRNF52JQHC\nscore/nr/400fffffffffffff/4VRNF52JPCO\nscore/nr/bff0000000000000/4VRNF52JQHC\nstatus/eq/active/4VRNF52JPCO\nstatus/eq/active/4VRNF52JQHC\ntitle/f/prefix%20a/4VRNF52JPCO\ntitle/f/prefix%20b/4VRNF52JQHC\n",
+    "cases": [
+        {
+            "name": "forward prefix",
+            "queries": [
+                {
+                    "prefix": "title/f/prefix%20",
+                    "rootPrefix": "title/f/"
+                }
+            ],
+            "expected": ["4VRNF52JPCO", "4VRNF52JQHC"]
+        },
+        {
+            "name": "numeric range",
+            "queries": [
+                {
+                    "prefix": "score/n/",
+                    "rootPrefix": "score/n/",
+                    "range": { "op": "$gte", "value": "8000000000000000" }
+                }
+            ],
+            "expected": ["4VRNF52JQHC"]
+        },
+        {
+            "name": "stable intersection",
+            "queries": [
+                {
+                    "prefix": "status/eq/active/",
+                    "rootPrefix": "status/eq/"
+                },
+                {
+                    "prefix": "score/n/",
+                    "rootPrefix": "score/n/",
+                    "range": { "op": "$gte", "value": "8000000000000000" }
+                }
+            ],
+            "expected": ["4VRNF52JQHC"]
+        },
+        {
+            "name": "reverse range",
+            "queries": [
+                {
+                    "prefix": "score/nr/",
+                    "rootPrefix": "score/nr/",
+                    "range": { "op": "$lt", "value": "8000000000000000" }
+                }
+            ],
+            "expected": ["4VRNF52JQHC"]
+        },
+        {
+            "name": "missing prefix",
+            "queries": [
+                {
+                    "prefix": "missing/eq/value/",
+                    "rootPrefix": "missing/eq/"
+                }
+            ],
+            "expected": []
+        }
+    ]
+}

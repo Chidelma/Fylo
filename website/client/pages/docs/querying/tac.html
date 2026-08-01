@@ -1,0 +1,129 @@
+<style>
+  #home-content {
+    display: none;
+  }
+</style>
+
+<div class="doc-shell">
+  <docs-nav />
+
+  <div class="doc-main doc-page">
+    <span class="eyebrow">Guide</span>
+    <h1>Querying &amp; SQL</h1>
+    <p class="doc-lede">
+      A query narrows through the prefix index first and hydrates only the documents
+      that matched. The same engine answers both the operator API and SQL, so choosing
+      between them is a matter of taste rather than capability.
+    </p>
+
+    <div class="doc-section">
+      <h2>Operators</h2>
+      <docs-sample topic="find-ops" />
+      <p>
+        Conditions inside one <code>$ops</code> entry are ANDed; separate entries are
+        ORed. Nothing needs declaring up front — every field of every document was
+        indexed as it was written.
+      </p>
+    </div>
+
+    <div class="doc-section doc-section--wide">
+      <h2>Which index each operator uses</h2>
+      <p>
+        Worth knowing before you design a hot path: three of these can fall back to a
+        full scan, and one of them verifies after hydrating.
+      </p>
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead>
+            <tr><th>Operator</th><th>Index used</th><th>Fallback</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>$eq</code></td><td>Exact match key (<code>eq</code>)</td><td>—</td></tr>
+            <tr><td><code>$gt</code> <code>$gte</code> <code>$lt</code> <code>$lte</code></td><td>Sortable numeric key (<code>n</code>/<code>nr</code>)</td><td>Full scan if non-numeric</td></tr>
+            <tr><td><code>$contains</code></td><td>Exact match on array members</td><td>—</td></tr>
+            <tr><td><code>$like 'ali%'</code></td><td>Forward prefix (<code>f</code>)</td><td>Full scan</td></tr>
+            <tr><td><code>$like '%ice'</code></td><td>Reversed prefix (<code>r</code>)</td><td>Full scan</td></tr>
+            <tr><td><code>$like '%lic%'</code></td><td>Trigram (<code>g3</code>) → hydrate → verify</td><td>Full scan</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="doc-section">
+      <h2>SQL</h2>
+      <p>
+        SQL is a front-end over the same collections and the same indexes — a table
+        <em>is</em> a collection. Tagged-template parameters are bound, never
+        interpolated into the statement text.
+      </p>
+      <docs-sample topic="sql" />
+      <p>
+        <code>UPDATE</code> and <code>DELETE</code> are atomic within their collection:
+        either every matched document, its xattrs, and its index entries commit, or the
+        statement restores all before-images.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>Reading the plan</h2>
+      <p>
+        <code>EXPLAIN</code> reports the chosen access path without executing;
+        <code>EXPLAIN ANALYZE</code> executes and adds elapsed time and the result.
+        Every language sends the same statement through the machine protocol.
+      </p>
+      <div class="doc-note">
+        <p>
+          The Node shim provides the safe tagged-template <code>sql</code> helper. Other
+          languages send the statement through <code>executeSQL</code>; <code>EXPLAIN</code>
+          remains part of the SQL text. See <a href="/docs/clients">Language clients</a>.
+        </p>
+      </div>
+      <pre class="code-block"><code>{explainCode}</code></pre>
+      <p>The CLI accepts the same syntax:</p>
+      <pre class="code-block"><code>{cliSqlCode}</code></pre>
+    </div>
+
+    <div class="doc-section">
+      <h2>Pagination</h2>
+      <p>
+        Over the machine protocol, <code>findDocs</code> and
+        <code>findDeletedDocs</code> support bounded continuation on a persistent loop,
+        so a large result never has to fit in one response frame.
+      </p>
+      <pre class="code-block"><code>{pageCode}</code></pre>
+      <p>
+        The result is <code>items</code>, <code>nextCursor</code>, and
+        <code>page</code>. The first request materializes an immutable, disk-backed
+        process-scoped snapshot ordered by TTID binary text, so concurrent mutations
+        cannot duplicate or skip entries.
+      </p>
+      <div class="doc-note">
+        <p>
+          Cursors are scoped to the operation, collection, query, and access identity.
+          They expire after 15 minutes and become invalid when the loop exits. On
+          <code>EINVALIDCURSOR</code> or a child restart, discard partial state and
+          restart from page one — resuming is not safe.
+        </p>
+      </div>
+      <p>
+        Snapshot state is private to the native process, released on completion, expiry,
+        or shutdown, and capped at 1 GiB.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>PostgREST-style filters</h2>
+      <p>
+        The PostgREST filter grammar lives on as a query front-end for HTTP-shaped
+        inputs. <code>queryFromSearch</code> in <code>src/query/postgrest.js</code>
+        translates it into an ordinary query.
+      </p>
+      <pre class="code-block"><code>{postgrestCode}</code></pre>
+    </div>
+
+    <div class="doc-pager">
+      <a href="/docs/buckets">← Buckets &amp; raw files</a>
+      <a href="/docs/schemas">Schemas &amp; migrations →</a>
+    </div>
+  </div>
+</div>

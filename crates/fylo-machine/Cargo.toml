@@ -1,0 +1,21 @@
+[package]
+name = "fylo-machine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fylo-engine = { version = "0.1.0", path = "../fylo-engine" }
+fylo-query = { version = "0.1.0", path = "../fylo-query" }
+fylo-storage-native = { version = "0.1.0", path = "../fylo-storage-native" }
+base64.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

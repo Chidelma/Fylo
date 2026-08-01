@@ -1,0 +1,148 @@
+{
+    "schemaVersion": 1,
+    "queryFormat": "fylo.structured-query.v1",
+    "producer": "fylo-js",
+    "cases": [
+        {
+            "name": "nested coercion range like and contains",
+            "document": {
+                "name": "Ada Lovelace",
+                "score": "42",
+                "active": true,
+                "tags": ["math", 7],
+                "profile": { "city": "London" }
+            },
+            "query": {
+                "$ops": [
+                    {
+                        "score": { "$gte": 40, "$lt": 50 },
+                        "active": { "$eq": 1 },
+                        "name": { "$like": "Ada%" },
+                        "tags": { "$contains": "math" },
+                        "profile.city": { "$eq": "London" }
+                    }
+                ],
+                "$created": { "$lte": 10 },
+                "$updated": { "$gt": 10 }
+            },
+            "timestamps": { "createdAt": 10, "updatedAt": 20 },
+            "expected": true
+        },
+        {
+            "name": "or of and operations",
+            "document": { "role": "editor", "enabled": true },
+            "query": {
+                "$ops": [
+                    { "role": { "$eq": "admin" }, "enabled": { "$eq": true } },
+                    { "role": { "$eq": "editor" }, "enabled": { "$eq": true } }
+                ]
+            },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": true
+        },
+        {
+            "name": "missing loosely equals null",
+            "document": {},
+            "query": { "$ops": [{ "missing": { "$eq": null } }] },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": true
+        },
+        {
+            "name": "utf16 underscore is one code unit",
+            "document": { "symbol": "😀" },
+            "query": { "$ops": [{ "symbol": { "$like": "_" } }] },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": false
+        },
+        {
+            "name": "utf16 surrogate pair takes two underscores",
+            "document": { "symbol": "😀" },
+            "query": { "$ops": [{ "symbol": { "$like": "__" } }] },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": true
+        },
+        {
+            "name": "timestamp rejection",
+            "document": { "name": "Ada" },
+            "query": { "$updated": { "$lt": 20 } },
+            "timestamps": { "createdAt": 10, "updatedAt": 20 },
+            "expected": false
+        },
+        {
+            "name": "null numeric coercion",
+            "document": { "score": null },
+            "query": { "$ops": [{ "score": { "$gte": 0, "$lte": 0 } }] },
+            "timestamps": { "createdAt": 1, "updatedAt": 1 },
+            "expected": true
+        }
+    ],
+    "resultCases": [
+        {
+            "name": "stable input order with limit",
+            "query": {
+                "$ops": [{ "role": { "$eq": "admin" } }, { "role": { "$eq": "editor" } }],
+                "$limit": 2
+            },
+            "rows": [
+                {
+                    "id": "doc-c",
+                    "document": { "role": "editor" },
+                    "timestamps": { "createdAt": 3, "updatedAt": 30 }
+                },
+                {
+                    "id": "doc-a",
+                    "document": { "role": "admin" },
+                    "timestamps": { "createdAt": 1, "updatedAt": 10 }
+                },
+                {
+                    "id": "doc-b",
+                    "document": { "role": "editor" },
+                    "timestamps": { "createdAt": 2, "updatedAt": 20 }
+                }
+            ],
+            "expectedIds": ["doc-c", "doc-a"]
+        },
+        {
+            "name": "zero limit retains historical unlimited behavior",
+            "query": { "$ops": [], "$limit": 0 },
+            "rows": [
+                {
+                    "id": "doc-b",
+                    "document": { "value": 2 },
+                    "timestamps": { "createdAt": 2, "updatedAt": 20 }
+                },
+                {
+                    "id": "doc-a",
+                    "document": { "value": 1 },
+                    "timestamps": { "createdAt": 1, "updatedAt": 10 }
+                }
+            ],
+            "expectedIds": ["doc-b", "doc-a"]
+        },
+        {
+            "name": "timestamp filtering happens before pagination",
+            "query": {
+                "$updated": { "$gte": 20 },
+                "$limit": 1
+            },
+            "rows": [
+                {
+                    "id": "old",
+                    "document": { "value": 1 },
+                    "timestamps": { "createdAt": 1, "updatedAt": 10 }
+                },
+                {
+                    "id": "first-match",
+                    "document": { "value": 2 },
+                    "timestamps": { "createdAt": 2, "updatedAt": 20 }
+                },
+                {
+                    "id": "second-match",
+                    "document": { "value": 3 },
+                    "timestamps": { "createdAt": 3, "updatedAt": 30 }
+                }
+            ],
+            "expectedIds": ["first-match"]
+        }
+    ]
+}

@@ -9,13 +9,13 @@ export default class extends Tac {
             area: 'Storage',
             color: 'primary',
             title: 'Documents are truth',
-            text: 'Each document is one canonical JSON file on disk, sharded by TTID prefix. Easy to inspect, debug, back up, and rebuild from.'
+            text: 'Each document is one canonical JSON file on disk, sharded by the trailing characters of its creation TTID. Easy to inspect, debug, back up, and rebuild from.'
         },
         {
             area: 'Indexing',
             color: 'primary',
             title: 'Zero-payload prefix indexes',
-            text: "S3-style key-only index entries in an mmap'd sorted catalog. Queries narrow by binary search, then hydrate only matching documents."
+            text: "Path-encoded key-only index entries in an mmap'd sorted catalog. Queries narrow by binary search, then hydrate only matching documents."
         },
         {
             area: 'Query',
@@ -38,14 +38,14 @@ export default class extends Tac {
         {
             area: 'Security',
             color: 'error',
-            title: 'Encryption, POSIX access & WORM',
-            text: 'AES-GCM field encryption with HMAC blind indexes, per-record POSIX UID/GID/mode enforcement, trusted group membership, and strict write-once WORM collections.'
+            title: 'Encryption & POSIX access',
+            text: 'AES-GCM field encryption with HMAC blind indexes, per-record POSIX UID/GID/mode enforcement, and trusted group membership.'
         },
         {
-            area: 'Replication',
+            area: 'Recovery',
             color: 'warning',
-            title: 'Whole-root S3 backup & sync hooks',
-            text: 'Point sync.s3 at a dedicated bucket prefix to mirror the entire root to S3 (mirror-on-write plus on-demand reconcile), or wire your own onWrite / onDelete hooks in await-sync or fire-and-forget mode. Durable local queue included.'
+            title: 'Filesystem snapshots',
+            text: 'Quiesce the writer, copy the complete root with native metadata intact, then verify and restore into a new path. Remote copy and synchronization remain deployment choices outside the engine.'
         },
         {
             area: 'Architecture',

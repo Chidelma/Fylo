@@ -45,12 +45,12 @@
 
 .key-kind {
   background: rgba(76, 175, 130, 0.18);
-  color: var(--w-success, #4caf82);
+  color: var(--fylo-key-kind);
 }
 
 .key-value {
   background: rgba(100, 160, 255, 0.16);
-  color: #7ab0ff;
+  color: var(--fylo-key-value);
 }
 
 .key-id {

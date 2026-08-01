@@ -1,0 +1,12 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://fylo.del.ma/api/storage/v1/index-manifest.schema.json",
+    "title": "FYLO local prefix index manifest v1",
+    "type": "object",
+    "required": ["format", "createdAt"],
+    "properties": {
+        "format": { "const": "fylo.local-fs.index.v1" },
+        "createdAt": { "type": "number", "minimum": 0 }
+    },
+    "additionalProperties": false
+}

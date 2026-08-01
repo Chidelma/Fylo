@@ -1,92 +1,98 @@
 .docs-head {
-  max-width: 44rem;
-  margin-bottom: 2rem;
+    max-width: 44rem;
+    margin-bottom: 2rem;
 }
 
 .docs-head h1 {
-  margin: 0.4rem 0 0.75rem;
-  font-size: clamp(1.8rem, 4vw, 2.5rem);
-  letter-spacing: -0.02em;
+    margin: 0.4rem 0 0.75rem;
+    font-size: clamp(1.8rem, 4vw, 2.5rem);
+    letter-spacing: -0.02em;
 }
 
 .docs-head p {
-  margin: 0;
-  color: var(--w-text-subtle);
-  line-height: 1.7;
+    margin: 0;
+    color: var(--w-text-subtle);
+    line-height: 1.7;
 }
 
 .docs-head a {
-  color: var(--w-primary);
+    color: var(--w-primary);
 }
 
 .docs-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin-bottom: 1.5rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--w-divider);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--w-divider);
 }
 
 .docs-tabs .w-btn {
-  flex-shrink: 0;
-  white-space: nowrap;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .docs-langs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin: -0.75rem 0 1.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin: -0.75rem 0 1.5rem;
 }
 
 .docs-langs .w-btn {
-  flex-shrink: 0;
-  white-space: nowrap;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .docs-panel h2 {
-  margin: 0 0 0.75rem;
-  font-size: 1.35rem;
-  letter-spacing: -0.01em;
+    margin: 0 0 0.75rem;
+    font-size: 1.35rem;
+    letter-spacing: -0.01em;
 }
 
 .docs-panel h3 {
-  margin: 1.5rem 0 0.75rem;
-  font-size: 1.05rem;
+    margin: 1.5rem 0 0.75rem;
+    font-size: 1.05rem;
 }
 
 .docs-panel p {
-  max-width: 46rem;
-  color: var(--w-text-subtle);
-  line-height: 1.8;
-  margin: 0 0 1rem;
+    max-width: 46rem;
+    color: var(--w-text-subtle);
+    line-height: 1.8;
+    margin: 0 0 1rem;
 }
 
 .docs-panel code {
-  font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 0.9em;
-  color: var(--w-primary);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    color: var(--w-primary);
 }
 
 .docs-panel .code-block code {
-  color: var(--w-text);
+    color: var(--w-text);
 }
 
 @media (max-width: 599.98px) {
-  /* Full-bleed swipeable strips — buttons keep their natural width. */
-  .docs-tabs,
-  .docs-langs {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    margin-inline: -1rem;
-    padding-inline: 1rem;
-    scroll-padding-inline: 1rem;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-  }
-  .docs-tabs::-webkit-scrollbar,
-  .docs-langs::-webkit-scrollbar {
-    display: none;
-  }
+    .docs-tabs .w-btn,
+    .docs-langs .w-btn {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    /* Full-bleed swipeable strips — buttons keep their natural width. */
+    .docs-tabs,
+    .docs-langs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        margin-inline: -1rem;
+        padding-inline: 1rem;
+        scroll-padding-inline: 1rem;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+    .docs-tabs::-webkit-scrollbar,
+    .docs-langs::-webkit-scrollbar {
+        display: none;
+    }
 }

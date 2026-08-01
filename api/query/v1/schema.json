@@ -1,0 +1,25 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://d31ma.github.io/Fylo/api/query/v1/schema.json",
+    "title": "FYLO portable query v1",
+    "type": "array",
+    "minItems": 1,
+    "maxItems": 64,
+    "items": {
+        "type": "object",
+        "required": ["prefix"],
+        "properties": {
+            "prefix": { "type": "string", "maxLength": 8192 },
+            "range": {
+                "type": "object",
+                "required": ["op", "value"],
+                "properties": {
+                    "op": { "enum": ["$gt", "$gte", "$lt", "$lte"] },
+                    "value": { "type": "string", "maxLength": 8192 }
+                },
+                "additionalProperties": true
+            }
+        },
+        "additionalProperties": true
+    }
+}

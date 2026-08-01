@@ -1,6 +1,8 @@
 // Reads FYLO's git-like `.fylo-vcs` store straight from the filesystem — the
 // browser engine doesn't expose version control, so the Explorer walks it.
 
+import { historicalShardCandidates, normalizeShardLayout } from './sharding.js'
+
 const VCS = '/.fylo-vcs'
 
 const safeRecord = () => Object.create(null)
@@ -109,7 +111,7 @@ export async function readWriteActivity(fs, buckets = 24) {
  * entry is recorded each time the content hash changes (newest first). Missing
  * or uncommitted stores yield [] — the browser never writes commits.
  */
-export async function readVersions(fs, { collection, id, filename }) {
+export async function readVersions(fs, { collection, id, filename, shardLayout }) {
     if (!fs || !filename) return []
     try {
         const head = await fs.readText(`${VCS}/HEAD`)
@@ -117,7 +119,7 @@ export async function readVersions(fs, { collection, id, filename }) {
         if (!branch) return []
         const ref = JSON.parse(await fs.readText(`${VCS}/refs/heads/${branch}.json`))
         let commitId = ref?.head
-        const bucket = id.slice(0, 2)
+        const buckets = historicalShardCandidates(id, normalizeShardLayout(shardLayout))
         const out = []
         let last = null
         let guard = 0
@@ -131,9 +133,13 @@ export async function readVersions(fs, { collection, id, filename }) {
             const tree = JSON.parse(
                 await fs.readText(`${VCS}/commits/${commitId}/tree.json`).catch(() => '{}')
             )
-            const hash = tree.root
-                ? await vcsBlobHash(fs, tree.root, collection, bucket, filename)
-                : null
+            let hash = null
+            if (tree.root) {
+                for (const bucket of buckets) {
+                    hash = await vcsBlobHash(fs, tree.root, collection, bucket, filename)
+                    if (hash) break
+                }
+            }
             if (hash && hash !== last) {
                 out.push({
                     commit: commitId,

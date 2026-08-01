@@ -29,7 +29,7 @@ class Fylo
     private $stdin;
     private $stdout;
 
-    public function __construct(string $root, string $binary = 'fylo', bool $worm = false)
+    public function __construct(string $root, string $binary = 'fylo')
     {
         $args = [
             $binary,
@@ -42,9 +42,6 @@ class Fylo
             '--max-response-bytes',
             (string) self::MAX_RESPONSE_BYTES,
         ];
-        if ($worm) {
-            $args[] = '--worm';
-        }
         $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', 'php://stderr', 'w']];
         $this->proc = proc_open($args, $descriptors, $pipes);
         if (!is_resource($this->proc)) {

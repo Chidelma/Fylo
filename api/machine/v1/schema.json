@@ -1,0 +1,159 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://fylo.del.ma/api/machine/v1/schema.json",
+    "title": "FYLO machine protocol v1",
+    "$defs": {
+        "access": {
+            "type": "object",
+            "properties": {
+                "uid": { "type": "integer", "minimum": 0 },
+                "gid": { "type": "integer", "minimum": 0 },
+                "mode": { "type": "integer", "minimum": 0, "maximum": 4095 },
+                "groups": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "uniqueItems": true
+                }
+            },
+            "additionalProperties": false
+        },
+        "request": {
+            "type": "object",
+            "required": ["op"],
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": [
+                        "handshake",
+                        "executeSQL",
+                        "createCollection",
+                        "dropCollection",
+                        "inspectCollection",
+                        "rebuildCollection",
+                        "verifyCollection",
+                        "getDoc",
+                        "getLatest",
+                        "getMeta",
+                        "setMeta",
+                        "findDocs",
+                        "findDeletedDocs",
+                        "restoreDoc",
+                        "joinDocs",
+                        "putData",
+                        "batchPutData",
+                        "patchDoc",
+                        "patchDocs",
+                        "delDoc",
+                        "delDocs",
+                        "importBulkData",
+                        "checkout",
+                        "branch",
+                        "commit",
+                        "log",
+                        "status",
+                        "diff",
+                        "restoreCommit",
+                        "merge",
+                        "schemaInspect",
+                        "schemaCurrent",
+                        "schemaHistory",
+                        "schemaDoctor",
+                        "schemaValidate",
+                        "schemaMaterialize"
+                    ]
+                },
+                "requestId": { "type": "string", "maxLength": 1024 },
+                "root": { "type": "string" },
+                "schemaDir": { "type": "string" },
+                "worm": { "type": ["boolean", "object"] },
+                "versioning": { "type": "object" },
+                "collection": { "type": "string", "minLength": 1 },
+                "kind": { "enum": ["document", "file"] },
+                "branch": { "type": "string" },
+                "create": { "type": "boolean" },
+                "force": { "type": "boolean" },
+                "message": { "type": "string" },
+                "source": { "type": "string" },
+                "from": { "type": "string" },
+                "to": { "type": "string" },
+                "id": { "type": "string" },
+                "onlyId": { "type": "boolean" },
+                "sql": { "type": "string" },
+                "access": { "$ref": "#/$defs/access" },
+                "query": { "type": "object" },
+                "page": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "minimum": 1 },
+                        "cursor": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                },
+                "join": { "type": "object" },
+                "document": { "type": "object" },
+                "data": { "type": "object" },
+                "file": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "url": { "type": "string" },
+                        "key": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                },
+                "fileOptions": { "type": "object" },
+                "meta": { "type": "object" },
+                "batch": { "type": "array", "items": { "type": "object" } },
+                "newDoc": { "type": "object" },
+                "oldDoc": { "type": "object" },
+                "update": { "type": "object" },
+                "delete": { "type": "object" },
+                "options": { "type": "object" },
+                "url": { "type": "string" },
+                "limitOrOptions": { "type": ["integer", "object"] }
+            },
+            "additionalProperties": false
+        },
+        "success": {
+            "type": "object",
+            "required": ["protocolVersion", "ok", "op", "requestId", "durationMs", "result"],
+            "properties": {
+                "protocolVersion": { "const": 1 },
+                "ok": { "const": true },
+                "op": { "type": "string" },
+                "requestId": { "type": ["string", "null"] },
+                "durationMs": { "type": "number", "minimum": 0 },
+                "result": true
+            },
+            "additionalProperties": false
+        },
+        "error": {
+            "type": "object",
+            "required": ["name", "message", "code"],
+            "properties": {
+                "name": { "type": "string" },
+                "message": { "type": "string" },
+                "code": { "type": "string", "pattern": "^E[A-Z0-9_]+$" }
+            },
+            "additionalProperties": false
+        },
+        "failure": {
+            "type": "object",
+            "required": ["protocolVersion", "ok", "op", "requestId", "durationMs", "error"],
+            "properties": {
+                "protocolVersion": { "const": 1 },
+                "ok": { "const": false },
+                "op": { "type": ["string", "null"] },
+                "requestId": { "type": ["string", "null"] },
+                "durationMs": { "type": "number", "minimum": 0 },
+                "error": { "$ref": "#/$defs/error" }
+            },
+            "additionalProperties": false
+        }
+    },
+    "oneOf": [
+        { "$ref": "#/$defs/request" },
+        { "$ref": "#/$defs/success" },
+        { "$ref": "#/$defs/failure" }
+    ]
+}

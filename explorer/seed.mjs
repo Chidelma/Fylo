@@ -1,16 +1,26 @@
 // Seeds explorer/db with demo data for the FYLO Explorer.
 // Run: bun run seed   (then open the Explorer and pick explorer/db as the root)
-import { readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
-import Fylo from '../src/index.js'
+import { Fylo } from '../clients/node/fylo.mjs'
 
 const root = path.join(import.meta.dir, 'db')
 await rm(root, { recursive: true, force: true })
 
-const db = new Fylo(root, { versioning: { autoCommit: false } })
+const binary = path.resolve(
+    import.meta.dir,
+    '..',
+    'target',
+    'debug',
+    process.platform === 'win32' ? 'fylo-rust.exe' : 'fylo-rust'
+)
+const staging = await mkdtemp(path.join(os.tmpdir(), 'fylo-explorer-seed-'))
+const db = new Fylo(root, { binary, exclusiveRoot: true })
+await db.ready
 
 // --- users: a document collection with varied fields for filter/SQL demos ---
-await db.users.create()
+await db.createCollection('users')
 const USERS = [
     { name: 'Ada Lovelace', role: 'admin', age: 36, team: 'engines' },
     { name: 'Grace Hopper', role: 'admin', age: 85, team: 'compilers' },
@@ -25,10 +35,10 @@ const USERS = [
 ]
 /** @type {string[]} */
 const userIds = []
-for (const user of USERS) userIds.push(await db.users.put(user))
+for (const user of USERS) userIds.push(await db.putData('users', user))
 
 // --- posts: cross-references users, arrays for $contains demos ---
-await db.posts.create()
+await db.createCollection('posts')
 const POSTS = [
     { title: 'Notes on the Analytical Engine', tags: ['history', 'engines'], published: true },
     { title: 'Compiling the future', tags: ['compilers'], published: true },
@@ -40,11 +50,15 @@ const POSTS = [
     { title: 'Literate programming', tags: ['essays', 'books'], published: true }
 ]
 for (let i = 0; i < POSTS.length; i++) {
-    await db.posts.put({ ...POSTS[i], authorId: userIds[i % userIds.length], likes: i * 7 })
+    await db.putData('posts', {
+        ...POSTS[i],
+        authorId: userIds[i % userIds.length],
+        likes: i * 7
+    })
 }
 
 // --- assets: a bucket with every previewable file type at random depths ---
-await db.assets.create({ kind: 'file' })
+await db.createCollection('assets', 'file')
 
 const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" fill="#f89b4b"/><path d="M20 10h18l12 12v28a4 4 0 0 1-4 4H20a4 4 0 0 1-4-4V14a4 4 0 0 1 4-4Z" fill="#171007"/><circle cx="26" cy="30" r="3.4" fill="#f89b4b"/><circle cx="26" cy="45" r="3.4" fill="#f89b4b"/><circle cx="39" cy="34" r="3.4" fill="#f89b4b"/><path d="M26 33.4v8.2M39 37.4a10.5 10.5 0 0 1-9.2 7.3" fill="none" stroke="#f89b4b" stroke-width="2.5" stroke-linecap="round"/></svg>`
 
@@ -149,12 +163,16 @@ const FOLDERS = [
 ]
 for (const asset of ASSETS) {
     const folder = FOLDERS[Math.floor(Math.random() * FOLDERS.length)]
-    await db.assets.put(new File([asset.data], asset.name), { key: `${folder}${asset.name}` })
+    const source = path.join(staging, asset.name)
+    await writeFile(source, asset.data)
+    await db.putFile('assets', { path: source, key: `${folder}${asset.name}` })
 }
 
-const users = await db.users.inspect()
-const posts = await db.posts.inspect()
-const assets = await db.assets.inspect()
+const users = await db.inspectCollection('users')
+const posts = await db.inspectCollection('posts')
+const assets = await db.inspectCollection('assets')
+await db.close()
+await rm(staging, { recursive: true, force: true })
 console.log(`Seeded ${root}`)
 console.log(`  users:  ${users.docsStored} documents`)
 console.log(`  posts:  ${posts.docsStored} documents`)

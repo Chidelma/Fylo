@@ -144,8 +144,8 @@ export function relative(from, to) {
 }
 
 /**
- * Throws if `target` is not inside `parent`. Mirrors the security check in
- * `src/core/doc-id.js` that protects against path traversal in document paths.
+ * Throws if `target` is not inside `parent`. Mirrors the native engine check
+ * that protects against path traversal in document paths.
  *
  * @param {string} parent
  * @param {string} target

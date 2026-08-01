@@ -29,10 +29,7 @@
 - [Schema Versioning](#schema-versioning)
 - [Encryption](#encryption)
 - [POSTIX Access Control](#postix-access-control-uid-gid-and-mode)
-- [WORM Mode](#worm-mode)
-- [Syncing & Replication](#syncing--replication)
 - [Remote Access](#remote-access)
-- [Local Queue](#local-queue)
 - [CLI & Machine Interface](#cli--machine-interface)
 - [Recovery & Rebuild](#recovery--rebuild)
 - [Limitations](#limitations)
@@ -44,14 +41,14 @@
 
 FYLO trades complexity for clarity. Documents are plain JSON files on disk. Indexes are zero-byte key entries that accelerate queries without duplicating data. If the index ever drifts, FYLO rebuilds it from the documents — the files are always the source of truth.
 
-| Principle                    | Implementation                                                                           |
-| ---------------------------- | ---------------------------------------------------------------------------------------- |
-| **Documents are truth**      | One `.json` file per document, sharded by TTID prefix                                    |
-| **Indexes are accelerators** | Zero-payload prefix keys in a sorted catalog file                                        |
-| **Rebuildable, not sacred**  | `fylo.<collection>.rebuild()` reconstructs indexes from data                             |
-| **Zero-dependency core**     | Embedded SQLite catalog, memory-mapped I/O, native S3 backup — one self-contained binary |
-| **Filesystem-first**         | One engine. Back up to S3 or attach custom sync hooks when needed                        |
-| **Browser: local-only**      | OPFS engine in the browser — each device owns its own store, fully offline               |
+| Principle                    | Implementation                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
+| **Documents are truth**      | One `.json` file per document, sharded by trailing TTID creation characters          |
+| **Indexes are accelerators** | Zero-payload prefix keys in a sorted catalog file                                    |
+| **Rebuildable, not sacred**  | `fylo.<collection>.rebuild()` reconstructs indexes from data                         |
+| **Self-contained core**      | Rust storage, query, recovery, and machine protocol in one native executable         |
+| **Filesystem-only**          | One local engine; mount, snapshot, and back up the root with filesystem-native tools |
+| **Browser: local-only**      | OPFS engine in the browser — each device owns its own store, fully offline           |
 
 ---
 
@@ -134,7 +131,7 @@ values:
 ```
 
 FYLO keeps the logical transaction journal outside collection trees so it is
-not mistaken for a document, indexed, versioned, or mirrored to S3:
+not mistaken for a document, indexed, versioned, or copied as record payload:
 
 ```text
 <root>/.fylo-transactions/<namespace>/<collection>/
@@ -178,7 +175,7 @@ hash, and object hashes are verified before restore or merge. Restore and merge
 materialization uses a durable staging transaction; startup deterministically
 rolls an interrupted swap backward or forward before collections are opened.
 
-**Index keys** look like S3 object keys — field path, kind, value, doc ID:
+**Index keys** are slash-delimited — field path, kind, value, doc ID:
 
 ```text
 name/f/alice/4UUB32VGUDW
@@ -197,8 +194,8 @@ age/nr/3fc1ffffffffffff/4UUB32VGUDW
 
 The prefix index is always **local**: an mmap'd sorted file + WAL (binary
 search, zero JS heap). Documents are truth; the index is a local accelerator
-that can always be rebuilt from them. S3 is never in the query hot path — it is
-only a [backup target](#syncing--replication).
+that can always be rebuilt from them. Remote copies and sync hooks are never in
+the query or transaction path.
 
 ---
 
@@ -343,66 +340,8 @@ should not share its JavaScript execution boundary.
 | `FYLO_ENCRYPTION_KEY` | AES-GCM key for `$encrypted` fields (≥32 chars) | —              |
 | `FYLO_CIPHER_SALT`    | Salt for blind index derivation                 | —              |
 | `FYLO_LOGGING`        | Enable logging (`"1"`)                          | —              |
-| `FYLO_REDIS_URL`      | FYLO-specific Redis URL for query caching       | —              |
-
-S3 backup credentials (resolved in order: explicit options → `AWS_*` → `FYLO_S3_*`):
-
-| Variable                    | AWS equivalent                             |
-| --------------------------- | ------------------------------------------ |
-| `FYLO_S3_ACCESS_KEY_ID`     | `AWS_ACCESS_KEY_ID`                        |
-| `FYLO_S3_SECRET_ACCESS_KEY` | `AWS_SECRET_ACCESS_KEY`                    |
-| `FYLO_S3_SESSION_TOKEN`     | `AWS_SESSION_TOKEN`                        |
-| `FYLO_S3_ENDPOINT`          | `AWS_ENDPOINT_URL_S3` / `AWS_ENDPOINT_URL` |
-| `FYLO_S3_REGION`            | `AWS_REGION` / `AWS_DEFAULT_REGION`        |
 
 Copy `.env.example` to `.env` and fill in your values.
-
-### Query Cache
-
-Query caching is off by default. When enabled, FYLO caches matched TTID lists
-and still hydrates documents from the canonical storage files.
-
-```ts
-const fylo = new Fylo('/mnt/fylo', {
-    cache: true // memory cache, method: 'cache-aside', ttl: 30
-})
-```
-
-Use a Redis client for shared production caches:
-
-```ts
-const fylo = new Fylo('/mnt/fylo', {
-    cache: {
-        backend: 'redis',
-        method: 'cache-aside',
-        ttl: 60,
-        redis: {
-            url: process.env.FYLO_REDIS_URL
-        }
-    }
-})
-```
-
-If `cache.redis.url` is omitted, FYLO checks `FYLO_REDIS_URL`; otherwise the
-Redis client resolves its own defaults (`REDIS_URL`, `VALKEY_URL`, then local
-Redis). Cache invalidation is version-based per collection, so writes bump the
-collection version and old Redis keys expire naturally by TTL.
-
-Supported cache methods:
-
-| Method          | FYLO behavior                                                                |
-| --------------- | ---------------------------------------------------------------------------- |
-| `cache-aside`   | Read checks cache first, loads from FYLO storage on miss, then caches TTIDs. |
-| `read-through`  | Same storage path as cache-aside, exposed as a cache-fronted read strategy.  |
-| `write-through` | Writes require the cache version bump to succeed before the call returns.    |
-| `write-around`  | Writes avoid payload caching and only bump the collection cache version.     |
-
-FYLO currently caches TTID result lists, not full document payloads. This keeps
-Redis free of decrypted user documents while still avoiding repeated index
-lookups on hot queries. Identical in-process misses are single-flighted to avoid
-local cache stampedes.
-
----
 
 ## CRUD Operations
 
@@ -425,7 +364,7 @@ const id = await db.users.put({
 ### Read
 
 ```ts
-const doc = await db.users.get(id).once()
+const doc = await db.users.get(id)
 ```
 
 ### Update (preserves the document TTID)
@@ -446,14 +385,9 @@ and become read-only (`0444`). They are excluded from ordinary queries.
 ### Recover Deleted Documents
 
 ```ts
-const deleted = {}
-for await (const doc of db.users.find
-    .deleted({
-        $deleted: { $gte: Date.parse('2026-05-01T00:00:00Z') }
-    })
-    .collect()) {
-    Object.assign(deleted, doc)
-}
+const deleted = await db.findDeletedDocs('users', {
+    $deleted: { $gte: Date.parse('2026-05-01T00:00:00Z') }
+})
 
 await db.users.restore(sameId)
 ```
@@ -485,7 +419,7 @@ const blob = await db.assets.get(id).blob()
 const stream = await db.assets.get(id).stream()
 ```
 
-File collections also support S3-style logical object keys. `/` is the default;
+File collections also support slash-delimited logical object keys. `/` is the default;
 root and trailing-slash keys append the generated TTID filename, while an exact
 key is preserved as supplied:
 
@@ -593,9 +527,9 @@ await db.assets.get(id).metadata()
 
 Canonical fields take precedence if a custom metadata key uses the same name.
 
-Those fluent signatures belong to the native JavaScript and browser collection
-facades. Binary-backed language shims expose the same behavior as
-`getMeta(collection, id)` and `setMeta(collection, id, record)`, with
+Those fluent signatures belong to the browser collection facade. Native
+language shims expose the same behavior as `getMeta(collection, id)` and
+`setMeta(collection, id, record)`, with
 language-specific casing and collection-scoped forms documented in
 [`clients/README.md`](clients/README.md). All surfaces use the same `getMeta`,
 `setMeta`, and metadata-bearing `putData` machine operations; the shims do not
@@ -618,18 +552,16 @@ await db.assets.find({ $ops: [{ ['meta/rating']: { $gte: 4 } }] })
 ```
 
 Metadata survives soft delete, restore, and version-control
-restores (it is snapshotted with each commit), and is frozen alongside the
-bytes in WORM mode. If a store directory is ever copied by an xattr-dropping
+restores because it is snapshotted with each commit. If a store directory is ever copied by an xattr-dropping
 tool, `rebuild()` repairs each stripped file to its default `/<filename>` key
 (emitting a `file.key-repaired` event; custom keys are not recoverable from
 bytes alone — use a version-control restore for full fidelity). Filesystem-backed
 document and file collections use native xattrs on macOS/Linux and an NTFS
 Alternate Data Stream manifest on Windows. Browser document collections use the
 durable OPFS sidecar instead.
-Metadata is per-version on filesystem-backed JSON documents (a `patch` writes
-a new version file). The machine ops `getMeta`/`setMeta` cover it from any
-client shim. The low-level helpers `getXattr` / `setXattr` / `listXattr` /
-`removeXattr` are exported from the package for raw byte-level access.
+Metadata is per-version on filesystem-backed JSON documents. The machine ops
+`getMeta` and `setMeta` cover it from every client shim; native metadata remains
+an engine implementation detail rather than a package-level byte API.
 
 `URL` ingestion snapshots the content at write time. `file:` URLs work
 server-side; browser runtimes accept `Blob`, `File`, and network URLs. The
@@ -661,70 +593,47 @@ FYLO queries use prefix indexes first, then hydrate only matching documents.
 
 ```ts
 // Exact match
-const results = {}
-for await (const doc of db.users
-    .find({
-        $ops: [{ name: { $eq: 'Alice' } }]
-    })
-    .collect()) {
-    Object.assign(results, doc)
-}
+const results = await db.users.find({
+    $ops: [{ name: { $eq: 'Alice' } }]
+})
 
 // Range query (numeric fields)
-for await (const doc of db.users
-    .find({
-        $ops: [{ age: { $gte: 18 } }]
-    })
-    .collect()) {
-    Object.assign(results, doc)
-}
+const adults = await db.users.find({
+    $ops: [{ age: { $gte: 18 } }]
+})
 
 // Contains (array membership)
-for await (const doc of db.users
-    .find({
-        $ops: [{ tags: { $contains: 'engineering' } }]
-    })
-    .collect()) {
-    Object.assign(results, doc)
-}
+const engineers = await db.users.find({
+    $ops: [{ tags: { $contains: 'engineering' } }]
+})
 
 // OR across conditions
-for await (const doc of db.users
-    .find({
-        $ops: [{ role: { $eq: 'admin' } }, { role: { $eq: 'owner' } }]
-    })
-    .collect()) {
-    Object.assign(results, doc)
-}
+const privileged = await db.users.find({
+    $ops: [{ role: { $eq: 'admin' } }, { role: { $eq: 'owner' } }]
+})
 ```
 
 ### SQL Support
 
 ```ts
-const { sql } = new Fylo('/mnt/fylo')
+const db = new Fylo('/mnt/fylo')
 
-await sql`CREATE TABLE posts`
-const id = await sql`INSERT INTO posts (title, published) VALUES (${'Hello'}, ${true})`
-const posts = await sql`SELECT * FROM posts WHERE published = ${true}`
+await db.sql`CREATE TABLE posts`
+const id = await db.sql`INSERT INTO posts (title, published) VALUES (${'Hello'}, ${true})`
+const posts = await db.sql`SELECT * FROM posts WHERE published = ${true}`
 ```
 
 `UPDATE` and `DELETE` statements are atomic within their collection: either
-every matched document, its xattrs, index entries, and local event records
-commit, or the statement restores all before-images. External sync hooks and
-queue publication run only after the local commit is durable.
+every matched document, its native metadata, and index entries commit, or the
+statement restores all before-images.
 
 Use `EXPLAIN` to inspect the selected access path without executing the
 statement, or `EXPLAIN ANALYZE` to execute it and include elapsed time and the
 result:
 
 ```ts
-const plan = await db._sql("EXPLAIN SELECT * FROM posts WHERE title = 'Hello'")
+const plan = await db.executeSQL("EXPLAIN SELECT * FROM posts WHERE title = 'Hello'")
 // { operation: 'SELECT', collection: 'posts', access: [...], executed: false }
-
-const prepared = db.prepare('SELECT * FROM posts WHERE published = true')
-prepared.explain() // synchronous plan description
-const first = await prepared.execute()
-const second = await prepared.execute() // reuses the parsed plan
 ```
 
 The CLI accepts the same syntax:
@@ -778,23 +687,8 @@ the record GID, otherwise other bits. Membership does not fall through to
 modify and delete only when the group write bit is set, so use `0o660` rather
 than `0o600` for a group-readable and group-writable record.
 
-By default Fylo resolves membership from the host POSIX group database. An
-application using virtual users or an external identity provider can supply a
-trusted resolver when it opens the database:
-
-```js
-const db = new Fylo('/mnt/fylo', {
-    access: {
-        groupsForUid: async (uid) => identityProvider.groupIdsFor(uid)
-    }
-})
-```
-
-In-process operation callers provide only `{ uid }`; they cannot assert their
-own group membership. Resolver failures fail closed.
-
-The standalone binary also supports application-authenticated virtual
-identities over its local NDJSON boundary. Every document and raw-file
+The binary supports application-authenticated virtual identities over its
+local NDJSON boundary. Every document and raw-file
 CRUD/query request accepts `access`; the shipped Node client exposes it through
 the same fluent syntax:
 
@@ -837,9 +731,8 @@ Canonical metadata includes `uid`, `gid`, and `mode` for protected records:
 
 ```js
 const { uid, gid, mode, createdAt, updatedAt, mtime } = await db.documents
-    .get(id)
+    .getMeta(id)
     .as({ uid: 1001 })
-    .metadata()
 ```
 
 ### Query Strategy
@@ -960,229 +853,6 @@ hold a plaintext value for it.
 
 ---
 
-## WORM Mode
-
-Strict write-once storage for immutable documents:
-
-```ts
-const db = new Fylo('/mnt/fylo', {
-    worm: {
-        mode: 'strict'
-    }
-})
-
-const id = await db.posts.put({ title: 'retain me' })
-await db.posts.patch(id, { title: 'changed' }) // throws
-await db.posts.delete(id) // throws
-```
-
-- A WORM document is written once and its local file is changed to read-only (`0444`)
-- Update, delete, and dropping a non-empty WORM collection are rejected
-- WORM does not create document versions or document history
-- `createdAt` is derived from the TTID; `updatedAt` is derived from file metadata
-- Collections containing legacy `heads/` or `versions/` WORM metadata fail closed and must be migrated before use
-
----
-
-## Syncing & Replication
-
-FYLO owns document storage and querying. **You** own how the root directory reaches remote storage.
-
-Sync hooks let FYLO notify your storage client:
-
-```ts
-const fylo = new Fylo('/mnt/fylo', {
-    syncMode: 'await-sync', // or 'fire-and-forget'
-    sync: {
-        async onWrite(event) {
-            await s3.putObject({
-                key: `${event.collection}/${event.docId}.json`,
-                body: await readFile(event.path)
-            })
-        },
-        async onDelete(event) {
-            await s3.deleteObject({
-                key: `${event.collection}/${event.docId}.json`
-            })
-        }
-    }
-})
-```
-
-| Mode              | Behavior                                       |
-| ----------------- | ---------------------------------------------- |
-| `await-sync`      | Waits for hook, throws if sync fails           |
-| `fire-and-forget` | Commits locally first, runs hook in background |
-
-Strict WORM mode emits its initial write sync event only; mutation callbacks cannot occur because updates and deletes are rejected.
-
-### Built-in S3 backup
-
-Instead of writing hooks, point `sync.s3` at a bucket and FYLO mirrors the
-**whole root** (documents, buckets, index, catalog, vcs) to S3 as a backup. The
-local filesystem stays the source of truth; S3 is a copy, never queried.
-
-```ts
-const fylo = new Fylo('/mnt/fylo', {
-    sync: {
-        s3: {
-            bucket: 'fylo-backup',
-            prefix: 'prod/fylo', // required safety boundary in a shared bucket
-            region: 'us-east-1',
-            reconcileIntervalMs: 60_000, // minimum 1 second; omit to disable
-            concurrency: 4, // maximum simultaneous S3 requests
-            maxFileBytes: 64 * 1024 * 1024,
-            maxManifestBytes: 1024 * 1024,
-            maxReconcileSnapshotBytes: 512 * 1024 * 1024, // default whole-pass snapshot cap
-            retry: { attempts: 3, baseDelayMs: 100, maxDelayMs: 5_000 }
-        }
-    }
-})
-
-await fylo.reconcile() // force a full whole-root reconcile on demand (alias: backup())
-console.log(fylo.backupStatus()) // state, attempted runs, and last pass details
-await fylo.close() // cancels pending passes and drains active remote work
-```
-
-Two passes work together: touched files are **mirrored after local commit**
-(under the same `syncMode`), and `reconcile()` walks the whole root to make S3 match
-exactly — uploading changed files and deleting objects with no local
-counterpart. Credentials resolve from explicit options, then `AWS_*` env vars,
-then `FYLO_S3_*` aliases. `sync.s3` and custom `onWrite`/`onDelete` hooks can be
-used together. The local `.fylo-transactions/` recovery journal is intentionally
-excluded from backup; only committed data and durable database metadata belong
-in the remote mirror.
-
-`backupStatus()` returns `undefined` when S3 backup is not configured. Otherwise
-its `runs` count includes both successful and failed reconcile attempts; inspect
-`state`, `lastSuccessAt`, `lastFailureAt`, and `lastError` together.
-
-Only one reconcile pass runs at a time. Requests received during a pass coalesce
-into at most one pending pass, while mirror, delete, and reconcile mutations
-share one ordered lane. Transient throttling, timeout, network, and 5xx failures
-use bounded exponential backoff with jitter; permanent 4xx failures fail
-immediately. Files larger than `maxFileBytes` and remote metadata manifests
-larger than `maxManifestBytes` are rejected before processing. Reconciliation
-also materializes one immutable view of the local root before changing S3;
-`maxReconcileSnapshotBytes` caps the sum of file bytes and encoded xattr values
-held for that view (default 512 MiB). The cap is an accounting guard, not a
-process RSS ceiling: allow additional memory for object/map overhead, one more
-file validation snapshot up to `maxFileBytes`, S3 requests, and the Bun runtime.
-Each pass emits
-`backup.reconcile.started`, `.succeeded`, or `.failed`;
-individual retry attempts emit `backup.retry`. See
-[`ops/s3-backup.md`](ops/s3-backup.md) for inspection and recovery guidance.
-
-`prefix` is required by default because reconciliation deletes stale objects
-inside its scope. Use a dedicated bucket or a unique prefix per FYLO root and
-grant only `s3:ListBucket` for that prefix plus `s3:GetObject`, `s3:PutObject`,
-and `s3:DeleteObject` for `arn:aws:s3:::BUCKET/PREFIX/*`. Bucket-root backup is
-available only as the explicit `allowBucketRoot: true` opt-in and should be used
-only with a dedicated bucket and a least-privilege IAM identity.
-
-```json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": "s3:ListBucket",
-            "Resource": "arn:aws:s3:::BUCKET",
-            "Condition": {
-                "StringLike": { "s3:prefix": ["prod/fylo", "prod/fylo/*"] }
-            }
-        },
-        {
-            "Effect": "Allow",
-            "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-            "Resource": "arn:aws:s3:::BUCKET/prod/fylo/*"
-        }
-    ]
-}
-```
-
-Every data object has a versioned, platform-specific recovery manifest under
-`.fylo-backup/xattrs/<base64url-object-key>.json`. The manifest records the data
-key, byte length, SHA-256 digest, native mode/mtime, and FYLO metadata from the
-same pinned descriptor as the bytes. POSIX manifests preserve xattrs, including
-access descriptors and `user.fylo.meta.*` developer metadata. NTFS manifests
-preserve FYLO alternate-data-stream metadata and the native read-only/writeable
-mode projection. Recovery rejects a manifest created for a different platform
-family instead of silently dropping ownership or access semantics.
-
-#### S3 recovery runbook
-
-Recovery always targets a **new, nonexistent directory**. It lists every S3
-page, validates the key and sidecar before accepting bytes, streams with bounded
-memory and concurrency, restores xattrs, and atomically renames a complete
-staging root into place. It never merges into or overwrites an existing root.
-
-1. Stop writers to the affected root. Preserve the failed root separately; do
-   not point recovery at its path.
-2. Give the recovery identity only `s3:ListBucket` on the selected prefix and
-   `s3:GetObject` on `BUCKET/PREFIX/*`.
-3. Verify first. The command exits nonzero on a missing/invalid manifest,
-   unsafe key, empty prefix, size mismatch, checksum mismatch, cancellation, or
-   exhausted S3 retry.
-
-```bash
-fylo backup verify \
-  --backup-bucket fylo-backup \
-  --backup-prefix prod/fylo \
-  --backup-region us-east-1 \
-  --json
-```
-
-4. Restore to a new sibling path. Progress is emitted as NDJSON on stderr and
-   the final result as JSON on stdout.
-
-```bash
-fylo backup restore \
-  --backup-bucket fylo-backup \
-  --backup-prefix prod/fylo \
-  --backup-region us-east-1 \
-  --destination /mnt/fylo-restored \
-  --backup-concurrency 4 \
-  --json
-```
-
-5. With application writers still stopped, open the restored root and run
-   collection verification. Switch the application mount/service configuration
-   during a maintenance window. Keep the old root and S3 backup until
-   post-recovery validation completes.
-
-The same workflow is available programmatically:
-
-```js
-import { FyloS3Restore } from '@d31ma/fylo'
-
-const recovery = new FyloS3Restore(
-    { bucket: 'fylo-backup', prefix: 'prod/fylo', region: 'us-east-1' },
-    '/mnt/fylo-restored'
-)
-await recovery.verify()
-await recovery.restore({ concurrency: 4, signal: abortController.signal })
-```
-
-The binary also accepts `--backup-endpoint` for any S3-compatible provider.
-Credentials are read from `AWS_*` or `FYLO_S3_*` environment variables and are
-never placed in machine requests, handshakes, logs, or status results. A restore
-holds the same canonical root reservation used by an exclusive machine loop;
-an active owner returns `EROOTLOCKED` before any remote request.
-
-Windows backup and restore require local x64 Windows on NTFS. Native Windows CI
-tests the exact descriptor/ADS path and restored FYLO access metadata. POSIX and
-NTFS manifests are intentionally not portable across families because neither
-native UID/GID ownership nor NTFS access semantics can be translated without
-loss.
-
-An interrupted or failed restore removes its uniquely named staging directory.
-If the process is killed before cleanup runs, remove only a matching
-`<destination>.fylo-restore-*.tmp` directory after confirming no recovery
-process is active; never rename an unverified staging directory into service.
-
----
-
 ## Remote Access
 
 There is none — by design. FYLO has no server and speaks no network protocol.
@@ -1195,47 +865,6 @@ concern (a mounted drive, a synced directory) — not FYLO's.
 The PostgREST-style filter grammar (`role=eq.admin&age=gte.30`) lives on as a
 query front-end: `queryFromSearch` in `src/query/postgrest.js` translates it
 into a `findDocs` query.
-
----
-
-## Local Queue
-
-Opt-in durable local queue for event-driven workflows. This is an in-process
-API — use it when embedding FYLO from source (`src/`):
-
-```ts
-import Fylo from './src/index.js'
-import { consume, publish } from './src/queue/local.js'
-
-const db = new Fylo('/mnt/fylo', { queue: true })
-
-class UserConsumer {
-    @consume('users.insert', { group: 'email-service', autoAck: false })
-    async welcome(message, context) {
-        await sendWelcomeEmail(message.payload.doc.email)
-        context.ack()
-    }
-}
-
-class UserService {
-    @publish('users.created')
-    async createUser(input) {
-        return { id: 'u1', email: input.email }
-    }
-}
-
-await db.queue.drainRegistered(new UserConsumer())
-```
-
-Queue files:
-
-```text
-<root>/.queue/topics/<topic>.ndjson
-<root>/.queue/consumers/<group>/<topic>.json
-<root>/.queue/dlq/<topic>.ndjson
-```
-
-At-least-once delivery, consumer-group checkpoints, advisory leases, retry tracking, dead-letter files. Handlers should be idempotent.
 
 ---
 
@@ -1279,8 +908,7 @@ create noisy diffs.
 
 Document writes are auto-committed by default. `put`, `patch`, `delete`, and
 `restore` create commit snapshots after the local filesystem write succeeds;
-failed writes and no-op mutations do not create empty commits. Strict WORM
-collections are excluded so WORM remains write-once without version history.
+failed writes and no-op mutations do not create empty commits.
 
 Commit storage is content-addressed: each document version is stored once as a
 deduplicated blob, so commits share unchanged bytes across history and branches
@@ -1359,7 +987,17 @@ executions explicitly report an unknown commit; release builds embed the
 immutable source revision and build target. A handshake is side-effect-free
 and does not create the configured root or initialize a collection.
 
-Supported operations: `handshake`, `executeSQL`, `createCollection`, `dropCollection`, `inspectCollection`, `rebuildCollection`, `getDoc`, `getLatest`, `getMeta`, `setMeta`, `findDocs`, `findDeletedDocs`, `restoreDoc`, `joinDocs`, `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`, `delDocs`, `importBulkData`, `backupStatus`, `backupReconcile`, `checkout`, `branch`, `commit`, `log`, `status`, `diff`, `restoreCommit`, `merge`, `schemaInspect`, `schemaCurrent`, `schemaHistory`, `schemaDoctor`, `schemaValidate`, `schemaMaterialize`.
+Capability records are versioned contracts. `documentBuckets.version === 1`
+advertises raw-file collections (`kind: "file"`), their supported machine
+operations, path/URL ingestion, and full-content SHA-256 verification.
+`machineAccess.version === 1` advertises the operations that enforce trusted
+POSTIX access, the accepted descriptor and actor fields, and the `EACCES` /
+query-omission denial semantics. `machineAccess` is present only in macOS and
+Linux builds; its absence means the runtime does not provide that authorization
+boundary. Consumers should reject a missing or unknown capability version
+before touching a production root.
+
+Supported operations: `handshake`, `executeSQL`, `createCollection`, `dropCollection`, `inspectCollection`, `rebuildCollection`, `getDoc`, `getLatest`, `getMeta`, `setMeta`, `findDocs`, `findDeletedDocs`, `restoreDoc`, `joinDocs`, `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`, `delDocs`, `importBulkData`, `checkout`, `branch`, `commit`, `log`, `status`, `diff`, `restoreCommit`, `merge`, `schemaInspect`, `schemaCurrent`, `schemaHistory`, `schemaDoctor`, `schemaValidate`, `schemaMaterialize`.
 
 Document and raw-file CRUD/query operations accept an optional `access`
 object. Puts accept `{ uid?, gid?, mode? }`; reads, metadata, queries, updates,
@@ -1398,13 +1036,13 @@ Responses never silently cross the advertised maximum. `findDocs` and
 ```
 
 The result is `{ items, nextCursor, page: { count, limit } }`. The first request
-materializes an immutable, disk-backed snapshot ordered by TTID binary text, so
+materializes an immutable, process-scoped snapshot ordered by TTID binary text, so
 concurrent mutations cannot duplicate or skip entries. Cursors are scoped to
 the operation, collection, query, and access identity; they expire after 15
 minutes and become invalid when the loop exits. On `EINVALIDCURSOR` or child
-restart, discard partial state and restart from page one. Snapshot storage is
-private, cleaned on completion/expiry/shutdown, capped at 1 GiB, and never
-loads the complete result into the JavaScript heap.
+restart, discard partial state and restart from page one. Snapshot state is
+private to the native process, cleaned on completion/expiry/shutdown, and capped
+at 1 GiB.
 
 Unpaged operations that exceed the frame still return
 `EFRAME_RESPONSE_TOO_LARGE` while preserving stream synchronization. A single
@@ -1420,20 +1058,20 @@ is additive: new codes may appear in later releases, and an existing code
 keeps its meaning. Clients should branch on `error.code`, never on message
 text.
 
-| Code                                                                   | Meaning                                                                    | Retry guidance                                               |
-| ---------------------------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `EBADREQUEST`                                                          | The request shape, field types, access object, or page options are invalid | Do not retry; fix the request                                |
-| `EUNSUPPORTEDOP`                                                       | The operation is unknown to this runtime                                   | Do not retry; check the handshake capabilities               |
-| `EINVALIDDOCID`                                                        | The supplied document ID is not a valid TTID                               | Do not retry; fix the ID                                     |
-| `EARRAYOFOBJECTS`                                                      | The document contains an array of objects, which the data model rejects    | Do not retry; restructure per the document-model rule below  |
-| `EACCES`                                                               | The access context is not permitted to perform the operation               | Do not retry with the same identity                          |
-| `EDECRYPTFAILED`                                                       | An `$encrypted` field could not be decrypted with the configured key       | Do not retry; fix the key configuration                      |
-| `EINVALIDCURSOR`                                                       | The pagination cursor is invalid, expired, or from another process         | Restart the traversal from page one                          |
-| `EROOTLOCKED` / `EROOTLEASELOST`                                       | Exclusive root ownership was unavailable or lost                           | Fail over per your supervisor policy                         |
-| `EBACKUPNOTCONFIGURED`                                                 | A backup operation was sent to a loop without backup configuration         | Do not retry without configuration                           |
-| `EFRAME_*`                                                             | Frame-contract violations, as documented above                             | Per the framing rules above                                  |
-| `EQUERYLOOPREQUIRED` / `EQUERYITEMTOOLARGE` / `EQUERYSNAPSHOTTOOLARGE` | Pagination contract violations, as documented above                        | Per the pagination rules above                               |
-| `EUNKNOWN`                                                             | An engine failure without a more specific classification                   | Treat conservatively; inspect `error.message` diagnostically |
+| Code                                                                   | Meaning                                                                    | Retry guidance                                                   |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `EBADREQUEST`                                                          | The request shape, field types, access object, or page options are invalid | Do not retry; fix the request                                    |
+| `EUNSUPPORTEDOP`                                                       | The operation is unknown to this runtime                                   | Do not retry; check the handshake capabilities                   |
+| `EINVALIDDOCID`                                                        | The supplied document ID is not a valid TTID                               | Do not retry; fix the ID                                         |
+| `EARRAYOFOBJECTS`                                                      | The document contains an array of objects, which the data model rejects    | Do not retry; restructure per the document-model rule below      |
+| `EACCES`                                                               | The access context is not permitted to perform the operation               | Do not retry with the same identity                              |
+| `EDECRYPTFAILED`                                                       | An `$encrypted` field could not be decrypted with the configured key       | Do not retry; fix the key configuration                          |
+| `EINVALIDCURSOR`                                                       | The pagination cursor is invalid, expired, or from another process         | Restart the traversal from page one                              |
+| `EROOTLOCKED` / `EROOTLEASELOST`                                       | Exclusive root ownership was unavailable or lost                           | Fail over per your supervisor policy                             |
+| `EFRAME_*`                                                             | Frame-contract violations, as documented above                             | Per the framing rules above                                      |
+| `EQUERYLOOPREQUIRED` / `EQUERYITEMTOOLARGE` / `EQUERYSNAPSHOTTOOLARGE` | Pagination contract violations, as documented above                        | Per the pagination rules above                                   |
+| `ENATIVE_IO`                                                           | Native filesystem I/O failed, including disk pressure or xattr operations  | Treat a mutation as ambiguous; inspect the cause before retrying |
+| `EUNKNOWN`                                                             | An engine failure without a more specific classification                   | Treat conservatively; inspect `error.message` diagnostically     |
 
 Storage-level failures may carry additional stable codes (for example
 `FYLO_COLLECTION_NOT_FOUND`); those retain their meaning across releases under
@@ -1453,9 +1091,8 @@ key, so every field is independently indexable.
 
 The first document is accepted; the second is rejected before any disk work
 with `EARRAYOFOBJECTS` and a message naming the offending field path. The
-rejection is deterministic and leaves no partial state — the write never
-starts. This applies equally to `putData`, `batchPutData`, patches, and the
-in-process API.
+rejection is deterministic and leaves no partial state—the write never starts.
+This applies equally to `putData`, `batchPutData`, patches, and SQL.
 
 To model a collection of records, store them in their own collection and
 reference them by key or public ID. To keep an opaque payload that is never
@@ -1514,7 +1151,6 @@ Documents are truth. Indexes are derived. When they drift:
 const result = await db.posts.rebuild()
 // {
 //   collection: 'posts',
-//   worm: true,
 //   docsScanned: 42,
 //   indexedDocs: 42
 // }
@@ -1528,56 +1164,14 @@ Use `db.<collection>.rebuild()` after operator-level recovery or when external
 processes have modified data files directly.
 
 Version-control restore and merge operations maintain a durable transaction
-under `.fylo-vcs/staging/`. `VersionRepository.init()` recovers interrupted
-transactions before collection bootstrap. The shared staging directory is a
-permanent coordination root; completed transaction directories are removed.
-Multiple processes may initialize concurrently: one recovery owner performs the
-work while the others wait and then observe the recovered tree and ref.
+under `.fylo-vcs/staging/`; ordinary mutations use `.fylo-transactions/`. The
+native engine recovers both before opening a collection. An active transaction
+rolls back, a committed transaction rolls forward, and derived indexes are
+rebuilt when recovery changes documents. Reopening is idempotent.
 
-Ordinary collection writes use a separate logical journal under
-`.fylo-transactions/`. If a process dies before the commit marker, recovery
-restores document bytes, file modes, mtimes, xattrs, and the event-journal
-offset, then rebuilds the derived index. If it dies after the marker, recovery
-keeps the committed files and completes publication of the stable generation.
-
-Inspect a collection without reading journal files directly:
-
-```js
-const status = await fylo.recoveryStatus('posts')
-// {
-//   collection: 'posts',
-//   generation: 7,
-//   state: 'stable', // or 'writing' / 'corrupt'
-//   activity: { status: 'idle', lastAction: 'recovery', ... }
-// }
-```
-
-`state` and `generation` come from the durable collection-generation record;
-`transactionId` is also present while that record is `writing`. `activity`
-reports the latest rollback or startup recovery observed by the current FYLO
-instance: `rolling-back`, `recovering`, `idle`, or `failed`, with transaction,
-operation, phase, timestamps, and failure detail when available. A malformed
-durable record returns `state: 'corrupt'` with `detail`. Treat `writing`,
-when no collection transaction is currently in flight, `corrupt`, or
-`activity.status === 'failed'` after initialization as an operator incident:
-stop writers, preserve the root, inspect the emitted error, and repair the
-filesystem or restore a verified backup. Do not hand-edit the journal or
-generation record.
-
-Configure `onEvent` to forward recovery lifecycle events:
-
-- `transaction.rollback.started|succeeded|failed` covers rollback in the
-  process that attempted the operation;
-- `transaction.recovery.started|succeeded|failed` covers reopening an
-  interrupted journal; `phase: 'active'` rolls back and `phase: 'committed'`
-  rolls forward;
-- `index.rebuilt` confirms the derived index was regenerated during rollback
-  or recovery.
-
-Alert on every `.failed` event and record elapsed time from the paired
-timestamps. Event handlers are best-effort observability hooks, not a durable
-audit log; FYLO catches handler failures so monitoring code cannot break the
-storage operation.
+Treat a failed startup recovery as an operator incident: stop writers, preserve
+the root, and restore a verified snapshot rather than hand-editing journal or
+generation files.
 
 The same crash contract is release-gated on local macOS/Linux filesystems and
 native x64 Windows on NTFS. On Windows, kernel-owned `LockFileEx` claims are
@@ -1592,10 +1186,9 @@ atomic link/rename semantics supported storage targets.
 
 | Limitation                           | Detail                                                                                                                                                                                               |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Filesystem-first engine**          | One engine writes to a local path. S3 is a backup mirror, not a query or transaction backend.                                                                                                        |
+| **Filesystem-only engine**           | One engine writes to one supported local path. Snapshot, replication, and remote-copy tooling remain deployment concerns outside FYLO.                                                               |
 | **Local-filesystem locking**         | PID-aware lock files plus kernel-owned takeover claims; live owners are never evicted by TTL. Use local POSIX filesystems or NTFS, not network/sync filesystems without equivalent atomic semantics. |
 | **Indexes are derived**              | External writes to data files won't update indexes. Use `db.<collection>.rebuild()`.                                                                                                                 |
-| **Local strict WORM**                | FYLO rejects mutation and applies `0444`; privileged filesystem administrators can bypass it.                                                                                                        |
 | **Frequency leaks on encryption**    | HMAC blind indexes for `$eq` reveal value repetition even without decryption.                                                                                                                        |
 | **Process-global cipher**            | One key per process for all `$encrypted` fields. No per-collection key rotation built in.                                                                                                            |
 | **No cross-collection transactions** | SQL mutations and ordinary writes are atomic within one collection; there is no atomic multi-collection commit.                                                                                      |

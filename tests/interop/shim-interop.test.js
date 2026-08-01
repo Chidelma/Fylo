@@ -65,6 +65,7 @@ async function requireCommand(command) {
 
 beforeAll(async () => {
     await mkdir(path.dirname(binaryPath), { recursive: true })
+    if (process.env.FYLO_SKIP_BINARY_BUILD === '1') return
     const build = await run(['bun', 'run', 'build:exe'], { timeout: 120_000 })
     expectSuccess('bun run build:exe', build)
 })

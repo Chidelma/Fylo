@@ -1,0 +1,130 @@
+<style>
+  #home-content {
+    display: none;
+  }
+</style>
+
+<div class="doc-shell">
+  <docs-nav />
+
+  <div class="doc-main doc-page">
+    <span class="eyebrow">Guide</span>
+    <h1>Recovery &amp; rebuild</h1>
+    <p class="doc-lede">
+      Documents are truth; indexes are derived. That single rule is what makes recovery
+      tractable — the worst case for a corrupted index is a rebuild, not data loss. This
+      page covers what happens when a process dies mid-write, how to read the state
+      afterwards, and when to intervene.
+    </p>
+
+    <div class="doc-section">
+      <h2>Rebuilding an index</h2>
+      <p>
+        Run this after operator-level recovery, or whenever an external process has
+        modified data files directly — FYLO cannot see writes it did not make.
+      </p>
+      <docs-sample topic="rebuild" />
+      <pre class="code-block"><code>{rebuildCliCode}</code></pre>
+      <p>
+        A rebuild also repairs bucket files whose key xattr was stripped by a copy tool,
+        restoring each to its default key and emitting <code>file.key-repaired</code>.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>The transaction journal</h2>
+      <p>
+        Ordinary collection writes use a logical journal kept outside the collection tree,
+        so it is never mistaken for a document, indexed, or versioned.
+      </p>
+      <pre class="code-block"><code>{journalCode}</code></pre>
+      <p>
+        If a process dies <em>before</em> the commit marker, recovery restores document
+        bytes, file modes, mtimes, xattrs, and the event-journal offset, then rebuilds the
+        derived index. If it dies <em>after</em> the marker, recovery keeps the committed
+        files and completes publication of the stable generation.
+      </p>
+      <p>
+        Version-control restore and merge use a separate durable transaction under
+        <code>.fylo-vcs/staging/</code>. <code>VersionRepository.init()</code> recovers
+        interrupted transactions before collection bootstrap. Multiple processes may
+        initialize concurrently: one recovery owner does the work while the others wait
+        and then observe the recovered tree and ref.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>Reading the state</h2>
+      <p>Inspect a collection without opening journal files by hand:</p>
+      <pre class="code-block"><code>{statusCode}</code></pre>
+      <p>
+        <code>state</code> and <code>generation</code> come from the durable
+        collection-generation record; <code>transactionId</code> is also present while
+        that record is <code>writing</code>. <code>activity</code> reports the latest
+        rollback or startup recovery this FYLO instance observed —
+        <code>rolling-back</code>, <code>recovering</code>, <code>idle</code>, or
+        <code>failed</code> — with transaction, operation, phase, timestamps, and failure
+        detail where available. A malformed durable record returns
+        <code>state: 'corrupt'</code> with a <code>detail</code> field.
+      </p>
+      <div class="doc-note doc-note--warn">
+        <p>
+          Treat these three as an operator incident: <code>writing</code> when no
+          collection transaction is in flight, <code>corrupt</code>, or
+          <code>activity.status === 'failed'</code> after initialization.
+        </p>
+        <p>
+          Stop writers, preserve the root, inspect the emitted error, then repair the
+          filesystem or restore a verified backup. Do not hand-edit the journal or the
+          generation record.
+        </p>
+      </div>
+    </div>
+
+    <div class="doc-section">
+      <h2>Events to alert on</h2>
+      <p>Configure <code>onEvent</code> to forward recovery lifecycle events:</p>
+      <ul>
+        <li>
+          <code>transaction.rollback.started|succeeded|failed</code> — rollback in the
+          process that attempted the operation.
+        </li>
+        <li>
+          <code>transaction.recovery.started|succeeded|failed</code> — reopening an
+          interrupted journal. <code>phase: 'active'</code> rolls back;
+          <code>phase: 'committed'</code> rolls forward.
+        </li>
+        <li>
+          <code>index.rebuilt</code> — the derived index was regenerated during rollback
+          or recovery.
+        </li>
+      </ul>
+      <p>
+        Alert on every <code>.failed</code> event and record elapsed time from the paired
+        timestamps. Event handlers are best-effort observability hooks, not a durable
+        audit log: FYLO catches handler failures so monitoring code cannot break a storage
+        operation.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>Where the crash contract holds</h2>
+      <p>
+        The contract is release-gated on local macOS and Linux filesystems and on native
+        x64 Windows over NTFS. On Windows, kernel-owned <code>LockFileEx</code> claims are
+        released when a process dies, and recovery uses directory handles while rejecting
+        junction and reparse-point traversal before any rename or deletion.
+      </p>
+      <p>
+        This does not extend to arbitrary network shares, sync folders, or filesystems
+        without local atomic link and rename semantics. Those are not supported storage
+        targets.
+      </p>
+    </div>
+
+    <div class="doc-pager">
+      <a href="/docs/versioning">← Version control</a>
+      <a href="/docs/operations">Configuration →</a>
+    </div>
+  </div>
+</div>

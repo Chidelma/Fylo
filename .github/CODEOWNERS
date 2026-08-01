@@ -1,0 +1,21 @@
+# Replace the organization fallback with individual/team handles as maintainers
+# are assigned. More specific security/storage/release paths intentionally
+# require their domain owners in branch protection.
+* @d31ma
+
+/api/ @d31ma
+/crates/fylo-format/ @d31ma
+/crates/fylo-query/ @d31ma
+/crates/fylo-storage-native/ @d31ma
+/crates/fylo-engine/ @d31ma
+/crates/fylo-machine/ @d31ma
+/crates/fylo-cli/ @d31ma
+/crates/fylo-wasm/ @d31ma
+/src/browser/ @d31ma
+/src/browser/wasm/ @d31ma
+/clients/ @d31ma
+/docs/adr/ @d31ma
+/docs/security/ @d31ma
+/.github/workflows/ @d31ma
+/scripts/build-* @d31ma
+/scripts/verify-* @d31ma

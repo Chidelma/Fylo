@@ -250,18 +250,14 @@ const SCAFFOLD = {
         open: [
             'import fylo "yourapp/fylo"',
             '',
-            'db, _ := fylo.Open("/mnt/fylo", "fylo", false)',
+            'db, _ := fylo.Open("/mnt/fylo", "fylo")',
             'defer db.Close()'
         ],
         indent: '',
         close: []
     },
     rust: {
-        open: [
-            'use fylo::{Fylo, Json};',
-            '',
-            'let mut db = Fylo::open("/mnt/fylo", "fylo", false)?;'
-        ],
+        open: ['use fylo::{Fylo, Json};', '', 'let mut db = Fylo::open("/mnt/fylo", "fylo")?;'],
         indent: '',
         close: []
     },
@@ -652,9 +648,7 @@ export default class extends Tac {
             '# 2. POSTIX: bind a POSIX UID, GID, and mode to a record:',
             '# Native binary and binary-backed shims on macOS/Linux POSIX hosts only.',
             '# Windows, Browser, Explorer, and WebView/mobile clients require an authenticated native POSIX gateway.',
-            "const db = new Fylo('/mnt/fylo', {",
-            '  access: { groupsForUid: async (uid) => identityProvider.groupIdsFor(uid) }',
-            '})',
+            "const db = new Fylo('/mnt/fylo')",
             '',
             "const id = await db.users.put({ name: 'Ada' }).as({ uid: 1001, mode: 0o600 })",
             "const managedId = await db.users.put({ name: 'Lin' }).as({ uid: 1001, gid: editorsGid, mode: 0o660 })",
@@ -668,10 +662,7 @@ export default class extends Tac {
             '# put/INSERT accept UID, GID, both, or mode alone; omitted mode defaults to 0o600.',
             '# Never forward uid/groups from an end-user payload; the local NDJSON boundary is privileged.',
             '# Owner, group, then other mode bits apply.',
-            '# Records written without .as() remain open.',
-            '',
-            '# 3. WORM (write-once) is a per-open flag, honored by every client:',
-            'fylo exec --loop --root /mnt/fylo --worm'
+            '# Records written without .as() remain open.'
         ].join('\n')
     }
 

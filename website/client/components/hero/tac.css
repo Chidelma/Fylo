@@ -1,17 +1,28 @@
 .hero {
   position: relative;
   overflow: hidden;
-  padding: 5.5rem 1rem 4rem;
+  padding: 6.5rem 1rem 5rem;
   text-align: center;
+  /* Two offset glows read as ambient light rather than one flat wash. */
   background:
-    radial-gradient(ellipse 70% 55% at 50% 0%, rgba(248, 155, 75, 0.16) 0%, transparent 70%);
+    radial-gradient(ellipse 60% 45% at 50% -5%, rgba(248, 155, 75, 0.22) 0%, transparent 70%),
+    radial-gradient(ellipse 90% 60% at 50% 0%, rgba(248, 155, 75, 0.08) 0%, transparent 75%);
+}
+
+/* Hairline that fades out at the edges, so the hero ends without a hard rule. */
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--w-border), transparent);
 }
 
 .hero-inner {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1.5rem;
+  gap: 1.75rem;
 }
 
 .hero h1 {
@@ -24,7 +35,7 @@
 
 .hero-grad {
   display: block;
-  background: linear-gradient(90deg, var(--w-text) 20%, #f89b4b 90%);
+  background: linear-gradient(90deg, var(--w-text) 20%, var(--w-primary) 90%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -53,6 +64,14 @@
   background: var(--w-surface-container-low);
   cursor: pointer;
   max-width: 100%;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.hero-install:hover {
+  border-color: rgba(248, 155, 75, 0.4);
+  background: var(--w-surface-container-high);
 }
 
 .hero-prompt {

@@ -1,110 +1,127 @@
 .showcase {
-  padding: 4.5rem 1rem;
+    /* Matches .section in site.css — this used to be 4.5rem, which left the
+     showcase visibly tighter than the sections above and below it. */
+    padding: clamp(4rem, 7vw, 6.5rem) 1rem;
 }
 
 .showcase-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
 }
 
 .showcase-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
 }
 
 .showcase-tabs .w-btn {
-  flex-shrink: 0;
-  white-space: nowrap;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .showcase-langs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
-  margin-bottom: 1rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-bottom: 1rem;
 }
 
 .showcase-langs .w-btn {
-  flex-shrink: 0;
-  white-space: nowrap;
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .collection-field {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.8rem;
-  color: var(--w-text-subtle);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--w-text-subtle);
 }
 
 .collection-field input {
-  width: 9rem;
-  padding: 0.45rem 0.75rem;
-  border: 1px solid var(--w-border);
-  border-radius: var(--w-radius);
-  background: var(--w-surface-container-low);
-  color: var(--w-primary);
-  font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 0.85rem;
+    width: 9rem;
+    padding: 0.45rem 0.75rem;
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius);
+    background: var(--w-surface-container-low);
+    color: var(--w-primary);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
 }
 
 .collection-field input:focus {
-  outline: 2px solid var(--w-primary);
-  outline-offset: 1px;
+    outline: 2px solid var(--w-primary);
+    outline-offset: 1px;
 }
 
 .showcase-panel {
-  position: relative;
+    position: relative;
 }
 
+/* Enough to stop the page jumping between samples, without leaving the short
+   ones sitting in a half-empty box. */
 .showcase-panel .code-block {
-  min-height: 18rem;
+    min-height: 13rem;
+    padding: 1.4rem 1.5rem;
 }
 
 .showcase-copy {
-  position: absolute;
-  top: 0.6rem;
-  right: 0.6rem;
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
 }
 
 @media (max-width: 599.98px) {
-  .showcase-tabs {
-    width: 100%;
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    padding-bottom: 0.25rem;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-  }
-  .showcase-tabs::-webkit-scrollbar {
-    display: none;
-  }
-  /* Match the docs page's full-bleed, swipeable language strip. */
-  .showcase-langs {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    margin-inline: -1rem;
-    padding-inline: 1rem;
-    scroll-padding-inline: 1rem;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-  }
-  .showcase-langs::-webkit-scrollbar {
-    display: none;
-  }
-  .collection-field {
-    width: 100%;
-  }
-  .collection-field input {
-    flex: 1;
-  }
-  .showcase-panel .code-block {
-    min-height: 20rem;
-    font-size: 0.78rem;
-  }
+    .showcase-tabs .w-btn,
+    .showcase-langs .w-btn {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    .collection-field input,
+    .showcase-copy {
+        min-height: 44px;
+    }
+
+    .showcase-tabs {
+        width: 100%;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        padding-bottom: 0.25rem;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+    .showcase-tabs::-webkit-scrollbar {
+        display: none;
+    }
+    /* Match the docs page's full-bleed, swipeable language strip. */
+    .showcase-langs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        margin-inline: -1rem;
+        padding-inline: 1rem;
+        scroll-padding-inline: 1rem;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+    }
+    .showcase-langs::-webkit-scrollbar {
+        display: none;
+    }
+    .collection-field {
+        width: 100%;
+    }
+    .collection-field input {
+        flex: 1;
+    }
+    .showcase-panel .code-block {
+        min-height: 15rem;
+        padding: 1.1rem 1.25rem;
+        font-size: 0.78rem;
+    }
 }

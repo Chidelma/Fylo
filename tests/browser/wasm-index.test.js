@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import { existsSync, readFileSync } from 'node:fs'
 import { BrowserCore } from '../../src/browser/core/engine.js'
 import { createMemoryFilesystem } from '../../src/browser/core/memory-filesystem.js'
+import { FyloWasmError, WasmIndexScanner } from '../../src/browser/wasm/index-scanner.js'
 
 const DECODER = new TextDecoder()
 
@@ -53,6 +55,80 @@ class TestIndexScannerFactory {
 }
 
 describe('browser Wasm index integration', () => {
+    test('executes the versioned compiled Wasm module against the golden query fixture', async () => {
+        const wasmUrl = new URL('../../dist-web/fylo-index.wasm', import.meta.url)
+        if (!existsSync(wasmUrl)) {
+            if (process.env.FYLO_REQUIRE_WASM === '1') {
+                throw new Error('dist-web/fylo-index.wasm is required by this test run')
+            }
+            return
+        }
+        const fixture = await Bun.file(
+            new URL('../fixtures/rust-query-v1.json', import.meta.url)
+        ).json()
+        const module = await WebAssembly.compile(readFileSync(wasmUrl))
+        const instance = await WebAssembly.instantiate(module, {})
+        const scanner = new WasmIndexScanner(instance)
+        try {
+            scanner.loadSnapshot(new TextEncoder().encode(fixture.snapshot))
+            for (const testCase of fixture.cases) {
+                expect(scanner.scanQueries(testCase.queries)).toEqual(testCase.expected)
+            }
+        } finally {
+            scanner.close()
+        }
+    })
+
+    test('rejects an incompatible Wasm ABI before copying memory', () => {
+        const memory = new WebAssembly.Memory({ initial: 1 })
+        expect(
+            () =>
+                new WasmIndexScanner(
+                    /** @type {WebAssembly.Instance} */ ({
+                        exports: {
+                            memory,
+                            abi_version: () => 2,
+                            allocate() {},
+                            deallocate() {},
+                            load_snapshot() {},
+                            scan_queries() {}
+                        }
+                    })
+                )
+        ).toThrow('Unsupported FYLO Wasm index ABI 2; expected 1')
+    })
+
+    test('rejects an invalid snapshot with a stable fallback reason', async () => {
+        const wasmUrl = new URL('../../dist-web/fylo-index.wasm', import.meta.url)
+        if (!existsSync(wasmUrl)) return
+        const module = await WebAssembly.compile(readFileSync(wasmUrl))
+        const scanner = new WasmIndexScanner(await WebAssembly.instantiate(module, {}))
+        try {
+            expect(() => scanner.loadSnapshot(new TextEncoder().encode('z/doc\na/doc\n'))).toThrow(
+                '[EWASM_SNAPSHOT]'
+            )
+        } finally {
+            scanner.close()
+        }
+    })
+
+    test('maps invalid allocator regions to a stable memory failure', () => {
+        const memory = new WebAssembly.Memory({ initial: 1 })
+        const scanner = new WasmIndexScanner(
+            /** @type {WebAssembly.Instance} */ ({
+                exports: {
+                    memory,
+                    abi_version: () => 1,
+                    allocate: () => memory.buffer.byteLength,
+                    deallocate() {},
+                    load_snapshot: () => 0,
+                    scan_queries: () => 0
+                }
+            })
+        )
+        expect(() => scanner.loadSnapshot(new Uint8Array([1]))).toThrow('[EWASM_MEMORY]')
+    })
+
     test('propagates the worker build token to the default Wasm URL', async () => {
         const token = 'v=release-test'
         const module = await import(`../../src/browser/wasm/index-scanner.js?${token}`)
@@ -85,7 +161,15 @@ describe('browser Wasm index integration', () => {
         await fylo.index.compact('users')
         expect(Object.keys(await collect(fylo, { $ops: [{ score: { $lt: 15 } }] }))).toEqual([high])
         expect(factory.scanners[0].loads).toBe(2)
-        expect(fylo.index.accelerationStatus()).toMatchObject({ mode: 'wasm', state: 'active' })
+        expect(fylo.index.accelerationStatus()).toMatchObject({
+            mode: 'wasm',
+            state: 'active',
+            metrics: {
+                snapshotReads: 3,
+                snapshotLoads: 2,
+                scans: 3
+            }
+        })
     })
 
     test('loads a persisted snapshot again after a core restart', async () => {
@@ -119,10 +203,37 @@ describe('browser Wasm index integration', () => {
         expect(Object.keys(await collect(fylo, { $ops: [{ name: { $eq: 'Fallback' } }] }))).toEqual(
             [id]
         )
-        expect(fylo.index.accelerationStatus()).toEqual({
+        expect(fylo.index.accelerationStatus()).toMatchObject({
             mode: 'wasm',
             state: 'fallback',
+            reasonCode: 'EWASM_INSTANTIATE',
             error: 'Wasm unavailable'
+        })
+    })
+
+    test('falls back with the stable memory-pressure reason code', async () => {
+        const fs = createMemoryFilesystem()
+        const factory = new TestIndexScannerFactory()
+        factory.create = async () => ({
+            loadSnapshot() {
+                throw new FyloWasmError('EWASM_MEMORY', 'simulated memory pressure')
+            },
+            scanQueries() {
+                return []
+            }
+        })
+        const fylo = new BrowserCore({ fs, root: '/', indexScannerFactory: factory })
+        await fylo.users.create()
+        const id = await fylo.users.put({ name: 'Fallback', score: 7 })
+        await fylo.index.compact('users')
+
+        expect(Object.keys(await collect(fylo, { $ops: [{ name: { $eq: 'Fallback' } }] }))).toEqual(
+            [id]
+        )
+        expect(fylo.index.accelerationStatus()).toMatchObject({
+            mode: 'wasm',
+            state: 'fallback',
+            reasonCode: 'EWASM_MEMORY'
         })
     })
 })

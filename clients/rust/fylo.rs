@@ -6,7 +6,7 @@
 //!
 //! ```no_run
 //! use fylo::{Fylo, Json};
-//! let mut db = Fylo::open("/path/to/db", "fylo", false).unwrap();
+//! let mut db = Fylo::open("/path/to/db", "fylo").unwrap();
 //! db.create_collection("users", "document").unwrap();
 //! db.put_data("users", Json::obj(vec![("name", "Ada".into()), ("role", "admin".into())])).unwrap();
 //! // responses are raw JSON lines: {"ok":true,"result":"<id>",...}
@@ -35,16 +35,13 @@ pub struct Fylo {
 
 impl Fylo {
     /// Start a warm fylo process rooted at `root`. `binary` is usually "fylo".
-    pub fn open(root: &str, binary: &str, worm: bool) -> std::io::Result<Fylo> {
+    pub fn open(root: &str, binary: &str) -> std::io::Result<Fylo> {
         let mut cmd = Command::new(binary);
         cmd.args(["exec", "--loop", "--root", root]);
         cmd.arg("--max-request-bytes")
             .arg(MAX_REQUEST_BYTES.to_string())
             .arg("--max-response-bytes")
             .arg(MAX_RESPONSE_BYTES.to_string());
-        if worm {
-            cmd.arg("--worm");
-        }
         let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));

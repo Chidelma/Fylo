@@ -1,0 +1,99 @@
+{
+    "schemaVersion": 1,
+    "producer": {
+        "implementation": "fylo-js",
+        "runtimeVersion": "26.30.05-1",
+        "documentFormat": "fylo.document.json.v1"
+    },
+    "documents": [
+        {
+            "name": "ordered nested document",
+            "input": { "z": 1, "a": { "city": "Toronto" }, "tags": ["a", 2, true, null] },
+            "valid": true,
+            "encoded": "{\"z\":1,\"a\":{\"city\":\"Toronto\"},\"tags\":[\"a\",2,true,null]}"
+        },
+        {
+            "name": "non-object root",
+            "input": ["not", "a", "document"],
+            "valid": false,
+            "errorCode": "EDOCUMENTROOT"
+        },
+        {
+            "name": "array of objects",
+            "input": { "profile": { "members": [{ "name": "Ada" }] } },
+            "valid": false,
+            "errorCode": "EARRAYOFOBJECTS"
+        },
+        {
+            "name": "nested array",
+            "input": {
+                "matrix": [
+                    [1, 2],
+                    [3, 4]
+                ]
+            },
+            "valid": false,
+            "errorCode": "EARRAYOFOBJECTS"
+        }
+    ],
+    "encodedDocuments": [
+        {
+            "name": "canonical bytes preserve insertion order",
+            "input": "{\"z\":1,\"a\":{\"city\":\"Toronto\"}}",
+            "valid": true,
+            "encoded": "{\"z\":1,\"a\":{\"city\":\"Toronto\"}}"
+        },
+        {
+            "name": "malformed JSON",
+            "input": "{\"name\":",
+            "valid": false,
+            "errorCode": "EFORMAT_JSON"
+        },
+        {
+            "name": "document byte limit",
+            "input": "{\"name\":\"Ada\"}",
+            "limits": { "maxBytes": 4 },
+            "valid": false,
+            "errorCode": "EFORMAT_SIZE"
+        },
+        {
+            "name": "document depth limit",
+            "input": "{\"profile\":{\"city\":\"Toronto\"}}",
+            "limits": { "maxDepth": 1 },
+            "valid": false,
+            "errorCode": "EFORMAT_DEPTH"
+        },
+        {
+            "name": "document node limit",
+            "input": "{\"a\":1,\"b\":2}",
+            "limits": { "maxNodes": 2 },
+            "valid": false,
+            "errorCode": "EFORMAT_NODES"
+        }
+    ],
+    "metadata": [
+        {
+            "name": "canonical fields win",
+            "custom": {
+                "owner": "editors",
+                "id": "spoofed",
+                "createdAt": 0,
+                "updatedAt": 0,
+                "mtime": 0
+            },
+            "canonical": {
+                "id": "01DOCUMENT",
+                "createdAt": 10,
+                "updatedAt": 30,
+                "mtime": 30
+            },
+            "expected": {
+                "owner": "editors",
+                "id": "01DOCUMENT",
+                "createdAt": 10,
+                "updatedAt": 30,
+                "mtime": 30
+            }
+        }
+    ]
+}

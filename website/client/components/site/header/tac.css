@@ -1,91 +1,97 @@
 .site-header {
-  z-index: 50;
+    z-index: 50;
 }
 
 .header-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 .brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-right: auto;
-  text-decoration: none;
-  color: var(--w-text);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-right: auto;
+    text-decoration: none;
+    color: var(--w-text);
 }
 
 .brand-mark {
-  width: 26px;
-  height: 26px;
+    width: 26px;
+    height: 26px;
 }
 
 .brand-name {
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    font-size: 1.05rem;
 }
 
 .header-nav {
-  display: flex;
-  align-items: center;
-  gap: 0.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
 }
 
 /* Burger: shown only where the inline nav is hidden (≤760px). The `menu-open`
    class is toggled on `.site-header` itself (delegated JS in imports.js), so
    these selectors stay inside the scoped header CSS. */
 .header-burger {
-  display: none;
+    display: none;
 }
 
 .burger-close {
-  display: none;
+    display: none;
 }
 
 .site-header.menu-open .burger-open {
-  display: none;
+    display: none;
 }
 
 .site-header.menu-open .burger-close {
-  display: inline;
+    display: inline;
 }
 
 /* Mobile dropdown menu, revealed by the burger. Hidden on desktop. Positioned
    absolutely so it drops full-width below the app bar instead of becoming a
    flex sibling of the header row. */
 .header-mobile-menu {
-  display: none;
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  flex-direction: column;
-  gap: 0.25rem;
-  padding: 0.5rem 1rem calc(0.5rem + env(safe-area-inset-bottom));
-  border-top: 1px solid var(--w-divider);
-  background: var(--w-surface-container-high, var(--w-surface));
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.5rem 1rem calc(0.5rem + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--w-divider);
+    background: var(--w-surface-container-high, var(--w-surface));
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 
 .header-mobile-menu .w-btn {
-  justify-content: flex-start;
+    justify-content: flex-start;
 }
 
 .site-header.menu-open .header-mobile-menu {
-  display: flex;
+    display: flex;
 }
 
 @media (max-width: 760px) {
-  .header-burger {
-    display: inline-flex;
-  }
+    .brand,
+    .header-row .w-btn {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    .header-burger {
+        display: inline-flex;
+    }
 }
 
 @media (min-width: 761px) {
-  .header-mobile-menu {
-    display: none !important;
-  }
+    .header-mobile-menu {
+        display: none !important;
+    }
 }

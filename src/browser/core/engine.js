@@ -1,4 +1,5 @@
 import TTID from '../vendor/ttid.mjs'
+import { shardOf } from '../../core/shard.js'
 import { copySafeJson, safeRecord } from '../../query/safe-record.js'
 import { CollectionNotFoundError, validateCollectionName } from '../../core/collection.js'
 import { FyloQueryPlanner } from '../../query/planner.js'
@@ -11,6 +12,56 @@ import { BrowserPrefixIndex } from './prefix-index.js'
 import { BrowserQueryEngine } from './query.js'
 import { assertPathInside, join } from './path.js'
 import '../../core/extensions.js'
+
+/**
+ * Comparison operators available to a join's `$on` clause.
+ * @type {Record<string, (leftValue: unknown, rightValue: unknown) => boolean>}
+ */
+const JOIN_COMPARATORS = {
+    $eq: (leftValue, rightValue) => leftValue === rightValue,
+    $ne: (leftValue, rightValue) => leftValue !== rightValue,
+    $gt: (leftValue, rightValue) => Number(leftValue) > Number(rightValue),
+    $lt: (leftValue, rightValue) => Number(leftValue) < Number(rightValue),
+    $gte: (leftValue, rightValue) => Number(leftValue) >= Number(rightValue),
+    $lte: (leftValue, rightValue) => Number(leftValue) <= Number(rightValue)
+}
+
+/**
+ * How each join mode combines a matched pair. `inner` and `outer` merge into a
+ * prototype-less record.
+ * @type {Record<string, (leftData: Record<string, any>, rightData: Record<string, any>) => Record<string, any>>}
+ */
+const JOIN_MODES = {
+    inner: (leftData, rightData) => Object.assign(safeRecord(), leftData, rightData),
+    outer: (leftData, rightData) => Object.assign(safeRecord(), leftData, rightData),
+    left: (leftData) => leftData,
+    right: (leftData, rightData) => rightData
+}
+
+/**
+ * Buckets joined rows by `$groupby`, returning ids only when the join asked
+ * for them. Every accumulator is prototype-less because group keys come from
+ * document data.
+ * @param {any} join
+ * @param {Record<string, Record<string, any>>} docs
+ */
+function groupJoinedDocs(join, docs) {
+    /** @type {Record<string, Record<string, Record<string, any>>>} */
+    const groupedDocs = safeRecord()
+    for (const ids of Object.keys(docs)) {
+        const data = docs[ids]
+        const key = String(data[join.$groupby])
+        if (!Object.hasOwn(groupedDocs, key)) groupedDocs[key] = safeRecord()
+        groupedDocs[key][ids] = data
+    }
+    if (!join.$onlyIds) return groupedDocs
+    /** @type {Record<string, string[]>} */
+    const groupedIds = safeRecord()
+    for (const key of Object.keys(groupedDocs)) {
+        groupedIds[key] = Object.keys(groupedDocs[key]).flat()
+    }
+    return groupedIds
+}
 
 /**
  * @typedef {import('./types.js').TTID} TTIDValue
@@ -157,7 +208,7 @@ export class BrowserCore {
     docPath(collection, docId) {
         validateDocId(docId)
         const root = this.docsRoot(collection)
-        const target = join(root, docId.slice(0, 2), `${docId}.json`)
+        const target = join(root, shardOf(docId), `${docId}.json`)
         assertPathInside(root, target)
         return target
     }
@@ -166,7 +217,7 @@ export class BrowserCore {
     deletedPath(collection, docId) {
         validateDocId(docId)
         const root = this.deletedRoot(collection)
-        const target = join(root, docId.slice(0, 2), `${docId}.json`)
+        const target = join(root, shardOf(docId), `${docId}.json`)
         assertPathInside(root, target)
         return target
     }
@@ -644,79 +695,59 @@ export class BrowserCore {
         const rightDocs = await this.docResults(join.$rightCollection)
         /** @type {Record<string, Record<string, any>>} */
         const docs = safeRecord()
-        /** @type {Record<string, (leftVal: unknown, rightVal: unknown) => boolean>} */
-        const compareMap = {
-            $eq: (leftVal, rightVal) => leftVal === rightVal,
-            $ne: (leftVal, rightVal) => leftVal !== rightVal,
-            $gt: (leftVal, rightVal) => Number(leftVal) > Number(rightVal),
-            $lt: (leftVal, rightVal) => Number(leftVal) < Number(rightVal),
-            $gte: (leftVal, rightVal) => Number(leftVal) >= Number(rightVal),
-            $lte: (leftVal, rightVal) => Number(leftVal) <= Number(rightVal)
-        }
         for (const leftEntry of leftDocs) {
             const [leftId, leftData] = Object.entries(leftEntry)[0]
             for (const rightEntry of rightDocs) {
                 const [rightId, rightData] = Object.entries(rightEntry)[0]
-                let matched = false
-                for (const [field, operand] of Object.entries(join.$on)) {
-                    if (!operand) continue
-                    for (const opKey of Object.keys(compareMap)) {
-                        const rightField = operand[/** @type {keyof typeof operand} */ (opKey)]
-                        if (!rightField) continue
-                        const leftValue = this.queryEngine.getValueByPath(leftData, String(field))
-                        const rightValue = this.queryEngine.getValueByPath(
-                            rightData,
-                            String(rightField)
-                        )
-                        if (compareMap[opKey]?.(leftValue, rightValue)) matched = true
-                    }
-                }
-                if (!matched) continue
-                switch (join.$mode) {
-                    case 'inner':
-                    case 'outer':
-                        docs[`${leftId}, ${rightId}`] = Object.assign(
-                            safeRecord(),
-                            leftData,
-                            rightData
-                        )
-                        break
-                    case 'left':
-                        docs[`${leftId}, ${rightId}`] = leftData
-                        break
-                    case 'right':
-                        docs[`${leftId}, ${rightId}`] = rightData
-                        break
-                }
-                let projected = docs[`${leftId}, ${rightId}`]
-                if (join.$select?.length)
-                    projected = this.queryEngine.selectValues(join.$select, projected)
-                if (join.$rename) projected = this.queryEngine.renameFields(join.$rename, projected)
-                docs[`${leftId}, ${rightId}`] = projected
+                if (!this.joinRowMatches(join, leftData, rightData)) continue
+                docs[`${leftId}, ${rightId}`] = this.projectJoinRow(join, leftData, rightData)
                 if (join.$limit && Object.keys(docs).length >= join.$limit) break
             }
             if (join.$limit && Object.keys(docs).length >= join.$limit) break
         }
-        if (join.$groupby) {
-            /** @type {Record<string, Record<string, Record<string, any>>>} */
-            const groupedDocs = safeRecord()
-            for (const ids of Object.keys(docs)) {
-                const data = docs[ids]
-                const key = String(data[join.$groupby])
-                if (!Object.hasOwn(groupedDocs, key)) groupedDocs[key] = safeRecord()
-                groupedDocs[key][ids] = data
-            }
-            if (join.$onlyIds) {
-                /** @type {Record<string, string[]>} */
-                const groupedIds = safeRecord()
-                for (const key of Object.keys(groupedDocs))
-                    groupedIds[key] = Object.keys(groupedDocs[key]).flat()
-                return groupedIds
-            }
-            return groupedDocs
-        }
+        if (join.$groupby) return groupJoinedDocs(join, docs)
         if (join.$onlyIds) return Array.from(new Set(Object.keys(docs).flat()))
         return docs
+    }
+
+    /**
+     * Whether one left/right pair satisfies any comparison in `$on`.
+     * @param {any} join
+     * @param {Record<string, any>} leftData
+     * @param {Record<string, any>} rightData
+     * @returns {boolean}
+     */
+    joinRowMatches(join, leftData, rightData) {
+        for (const [field, operand] of Object.entries(join.$on)) {
+            if (!operand) continue
+            for (const opKey of Object.keys(JOIN_COMPARATORS)) {
+                const rightField = /** @type {Record<string, any>} */ (operand)[opKey]
+                if (!rightField) continue
+                const leftValue = this.queryEngine.getValueByPath(leftData, String(field))
+                const rightValue = this.queryEngine.getValueByPath(rightData, String(rightField))
+                if (JOIN_COMPARATORS[opKey](leftValue, rightValue)) return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Shapes one matched pair per the join mode, then applies `$select` and
+     * `$rename`. Merged rows use a prototype-less record so joined field names
+     * can never reach Object.prototype.
+     * @param {any} join
+     * @param {Record<string, any>} leftData
+     * @param {Record<string, any>} rightData
+     * @returns {Record<string, any>}
+     */
+    projectJoinRow(join, leftData, rightData) {
+        const combine = JOIN_MODES[join.$mode]
+        let projected = /** @type {Record<string, any>} */ (
+            combine ? combine(leftData, rightData) : undefined
+        )
+        if (join.$select?.length) projected = this.queryEngine.selectValues(join.$select, projected)
+        if (join.$rename) projected = this.queryEngine.renameFields(join.$rename, projected)
+        return projected
     }
 
     /** @param {string} SQL @returns {Promise<unknown>} */

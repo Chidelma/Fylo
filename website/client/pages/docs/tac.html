@@ -4,4 +4,108 @@
   }
 </style>
 
-<docs-content />
+<div class="doc-shell">
+  <docs-nav />
+
+  <div class="doc-main doc-page">
+    <span class="eyebrow">Documentation</span>
+    <h1>FYLO, end to end.</h1>
+    <p class="doc-lede">
+      FYLO is a document store that ships as one self-contained binary. Documents are
+      plain JSON files on disk; indexes are zero-payload keys that accelerate queries
+      without duplicating data. There is no server and no network protocol — your
+      process owns the directory. This page takes you from an empty machine to a
+      first query; everything else is linked below.
+    </p>
+
+    <div class="doc-section">
+      <h2>1. Install the binary</h2>
+      <p>
+        FYLO is distributed through GitHub Releases, not a package registry. The
+        installer detects your OS and architecture, verifies the release checksum, and
+        puts <code>fylo</code> on your PATH.
+      </p>
+      <pre class="code-block"><code>{installCode}</code></pre>
+      <p>
+        Set <code>FYLO_VERIFY_PROVENANCE=1</code> before running the installer to also
+        require signed GitHub artifact provenance. It fails closed before installing
+        and needs an authenticated GitHub CLI. Per-platform archives and checksums are
+        on the <a href="/download">download page</a>.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>2. Add a client to your project</h2>
+      <p>
+        Your application never links a library — it spawns the binary and talks JSON to
+        it. Each client is a single dependency-free file you copy in from the
+        version-matched <code>fylo-clients.tar.gz</code> attached to the release. It owns
+        the subprocess, the framing, and typed errors; it never owns a storage decision.
+      </p>
+      <docs-sample topic="first-write" />
+      <p>
+        Thirteen clients ship today: Python, Ruby, Node/TypeScript, PHP, Go, Rust, C#,
+        Java, and Dart drive the binary, while the browser, iOS, Android, and Flutter
+        clients embed the engine on-device. See
+        <a href="/docs/clients">Language clients</a> for the same call sequence in each
+        one.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>3. Ask a question</h2>
+      <p>
+        There is no index to declare and no migration to run before a query. Every field
+        of every document is written into the prefix index as the document lands, so a
+        query narrows by binary search and hydrates only the documents that matched.
+      </p>
+      <docs-sample topic="query" />
+      <p>
+        Which index each operator uses — and where it falls back to a scan — is spelled
+        out in <a href="/docs/querying">Querying &amp; SQL</a>.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>4. Know what is on disk</h2>
+      <p>
+        Nothing about a FYLO root is opaque. You can read a document with
+        <code>cat</code>, diff a collection in Git, and restore one file from a backup
+        without the engine's help.
+      </p>
+      <pre class="code-block"><code>{layoutCode}</code></pre>
+      <div class="doc-note">
+        <p>
+          Only <code>docs/</code> and <code>.deleted/</code> are the source of truth.
+          <code>index/</code> is derived and can be thrown away at any time —
+          <code>fylo rebuild &lt;collection&gt;</code> reconstructs it from the documents.
+          That single property is what makes the rest of the design possible.
+        </p>
+      </div>
+    </div>
+
+    <div class="doc-section">
+      <h2>What FYLO is not</h2>
+      <p>
+        Reading this early saves time later. FYLO has no server, so there is nothing to
+        connect to over a network — if a root must be reached from another machine, that
+        is a filesystem concern (a mounted volume, a synced directory), not FYLO's. No
+        remote object store is in the query path. There are no cross-collection
+        transactions: a write or a SQL mutation is atomic within one collection. And a
+        document may not contain an array of objects at any depth — that shape wants to
+        be its own collection.
+      </p>
+      <p>
+        The full list, with the reasoning behind each one, is on
+        <a href="/docs/limitations">Limitations</a>.
+      </p>
+    </div>
+
+    <docs-guides />
+
+    <div class="doc-pager">
+      <span></span>
+      <a href="/docs/concepts">Concepts →</a>
+    </div>
+  </div>
+</div>

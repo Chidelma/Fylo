@@ -1,12 +1,13 @@
 node_modules
 dist
 dist-bin
+target/
 .env
 db
 docker-compose.yml
 Dockerfile
 .vscode
-bin
+/bin
 .DS_Store
 __pycache__/
 *.py[cod]
@@ -22,9 +23,7 @@ AGENTS.md
 # Untrack markdown except README
 *.md
 !README.md
-!ops/s3-backup.md
-!docs/operations/web-release.md
-!docs/operations/windows-ci.md
+!docs/**/*.md
 !examples/
 !examples/**/*.md
 !examples/db/
@@ -35,3 +34,6 @@ dist-web
 dist-staging-*
 src/browser/wasm/target/
 benchmarks/
+coverage/
+test-results/
+playwright-report/

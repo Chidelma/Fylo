@@ -85,7 +85,7 @@ batch, bulk, deleted-document, and join helpers. Compact compiled-language
 shims intentionally expose a smaller dedicated-method set. Use the raw
 `request(op)` escape hatch for an operation that has no dedicated method in your
 language (including branching and schema administration); the authoritative
-operation list is in `fylo --help` and `src/cli/machine.js`.
+operation list is in `fylo --help` and `api/machine/v1/operations.json`.
 
 Most shims unwrap and return the operation's `result`. Rust and Java return the
 validated raw response JSON string from their dedicated methods, so callers
@@ -116,7 +116,7 @@ name — `db.users.put(data)` (Node), `db.users.put(data)` (Python), `db.users.p
 (Ruby), `$db->users->put($data)` (PHP). The method-per-op API (`db.putData("users",
 data)`) stays available everywhere; the facade is additive sugar over it.
 
-The native JavaScript/browser facade offers the fluent signatures
+The browser facade offers the fluent signatures
 `put(id, documentOrFile).metadata(meta)`, `put(id).metadata(meta)`, and
 `get(id).metadata()`. Thin binary shims map those semantics to the machine
 protocol's explicit metadata calls: `getMeta(collection, id)` and

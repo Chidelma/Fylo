@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { readdir, rm } from 'node:fs/promises'
-import Fylo from '../../src/index.js'
+import path from 'node:path'
+import { Fylo } from '../../clients/node/fylo.mjs'
 import { createBrowserClient } from '../../src/browser/client.js'
 import { mockDirectoryHandle } from './helpers/fsa-mock.js'
 import { createTestRoot } from '../helpers/root.js'
@@ -17,6 +18,11 @@ async function collect(cursor) {
 }
 
 const root = await createTestRoot('fylo-fsa-')
+const binary = path.resolve(
+    'target',
+    'debug',
+    process.platform === 'win32' ? 'fylo-rust.exe' : 'fylo-rust'
+)
 
 afterAll(async () => {
     await rm(root, { recursive: true, force: true })
@@ -25,10 +31,12 @@ afterAll(async () => {
 describe('browser engine over a desktop-written root (FSA adapter)', () => {
     test('reads, queries, and stays strictly read-only through the overlay', async () => {
         // Write the root with the desktop engine.
-        const desktop = new Fylo(root, { versioning: { autoCommit: false } })
-        await desktop.users.create()
-        const adaId = await desktop.users.put({ name: 'Ada', role: 'admin', age: 45 })
-        await desktop.users.put({ name: 'Bob', role: 'viewer', age: 30 })
+        const desktop = new Fylo(root, { binary, exclusiveRoot: true })
+        await desktop.ready
+        await desktop.createCollection('users')
+        const adaId = await desktop.putData('users', { name: 'Ada', role: 'admin', age: 45 })
+        await desktop.putData('users', { name: 'Bob', role: 'viewer', age: 30 })
+        await desktop.close()
 
         const before = await snapshotTree(root)
 

@@ -37,16 +37,15 @@ public final class Fylo implements AutoCloseable {
     private final byte[] responseBuffer = new byte[MAX_RESPONSE_BYTES + 1];
 
     public Fylo(String root) throws IOException {
-        this(root, "fylo", false);
+        this(root, "fylo");
     }
 
-    public Fylo(String root, String binary, boolean worm) throws IOException {
+    public Fylo(String root, String binary) throws IOException {
         List<String> args = new ArrayList<>(List.of(binary, "exec", "--loop", "--root", root));
         args.add("--max-request-bytes");
         args.add(Integer.toString(MAX_REQUEST_BYTES));
         args.add("--max-response-bytes");
         args.add(Integer.toString(MAX_RESPONSE_BYTES));
-        if (worm) args.add("--worm");
         this.proc = new ProcessBuilder(args)
                 .redirectError(ProcessBuilder.Redirect.INHERIT)
                 .start();

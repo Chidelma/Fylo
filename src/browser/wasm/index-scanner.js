@@ -1,7 +1,24 @@
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
 const WASM_ERROR = -1
+const WASM_ABI_VERSION = 1
 const INITIAL_OUTPUT_CAPACITY = 64 * 1024
+const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
+const MAX_QUERY_BYTES = 1024 * 1024
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+export class FyloWasmError extends Error {
+    /**
+     * @param {'EWASM_FETCH' | 'EWASM_COMPILE' | 'EWASM_INSTANTIATE' | 'EWASM_ABI' | 'EWASM_SNAPSHOT' | 'EWASM_QUERY' | 'EWASM_MEMORY'} code
+     * @param {string} message
+     * @param {{ cause?: unknown }=} options
+     */
+    constructor(code, message, options = {}) {
+        super(`[${code}] ${message}`, options)
+        this.name = 'FyloWasmError'
+        this.code = code
+    }
+}
 
 /** @type {Map<string, Promise<WebAssembly.Module>>} */
 const MODULE_CACHE = new Map()
@@ -33,12 +50,33 @@ export class WasmIndexScannerFactory {
         const key = this.url.href
         let pending = MODULE_CACHE.get(key)
         if (!pending) {
-            pending = fetch(this.url).then(async (response) => {
-                if (!response.ok) {
-                    throw new Error(`Unable to load FYLO Wasm index scanner: ${response.status}`)
+            pending = (async () => {
+                let response
+                try {
+                    response = await fetch(this.url)
+                } catch (cause) {
+                    throw new FyloWasmError(
+                        'EWASM_FETCH',
+                        `Unable to fetch FYLO Wasm index scanner from ${this.url.href}`,
+                        { cause }
+                    )
                 }
-                return await WebAssembly.compile(await response.arrayBuffer())
-            })
+                if (!response.ok) {
+                    throw new FyloWasmError(
+                        'EWASM_FETCH',
+                        `Unable to load FYLO Wasm index scanner: HTTP ${response.status}`
+                    )
+                }
+                try {
+                    return await WebAssembly.compile(await response.arrayBuffer())
+                } catch (cause) {
+                    throw new FyloWasmError(
+                        'EWASM_COMPILE',
+                        'Unable to compile FYLO Wasm index scanner',
+                        { cause }
+                    )
+                }
+            })()
             MODULE_CACHE.set(key, pending)
             pending.catch(() => MODULE_CACHE.delete(key))
         }
@@ -48,8 +86,17 @@ export class WasmIndexScannerFactory {
 
     /** @returns {Promise<WasmIndexScanner>} */
     async create() {
-        const instance = await WebAssembly.instantiate(await this.loadModule(), {})
-        return new WasmIndexScanner(instance)
+        try {
+            const instance = await WebAssembly.instantiate(await this.loadModule(), {})
+            return new WasmIndexScanner(instance)
+        } catch (cause) {
+            if (cause instanceof FyloWasmError) throw cause
+            throw new FyloWasmError(
+                'EWASM_INSTANTIATE',
+                'Unable to instantiate FYLO Wasm index scanner',
+                { cause }
+            )
+        }
     }
 }
 
@@ -58,12 +105,28 @@ export class WasmIndexScanner {
     constructor(instance) {
         const exports = /** @type {Record<string, any>} */ (instance.exports)
         if (!(exports.memory instanceof WebAssembly.Memory)) {
-            throw new Error('FYLO Wasm index scanner did not export memory')
+            throw new FyloWasmError('EWASM_ABI', 'FYLO Wasm index scanner did not export memory')
         }
-        for (const name of ['allocate', 'deallocate', 'load_snapshot', 'scan_queries']) {
+        for (const name of [
+            'abi_version',
+            'allocate',
+            'deallocate',
+            'load_snapshot',
+            'scan_queries'
+        ]) {
             if (typeof exports[name] !== 'function') {
-                throw new Error(`FYLO Wasm index scanner did not export ${name}`)
+                throw new FyloWasmError(
+                    'EWASM_ABI',
+                    `FYLO Wasm index scanner did not export ${name}`
+                )
             }
+        }
+        const actualVersion = exports.abi_version()
+        if (actualVersion !== WASM_ABI_VERSION) {
+            throw new FyloWasmError(
+                'EWASM_ABI',
+                `Unsupported FYLO Wasm index ABI ${actualVersion}; expected ${WASM_ABI_VERSION}`
+            )
         }
         this.memory = exports.memory
         this.allocate = exports.allocate
@@ -77,13 +140,30 @@ export class WasmIndexScanner {
     /** @param {Uint8Array} snapshot */
     loadSnapshot(snapshot) {
         const bytes = snapshot instanceof Uint8Array ? snapshot : new Uint8Array(snapshot)
-        const pointer = this.allocate(bytes.byteLength)
+        if (bytes.byteLength > MAX_SNAPSHOT_BYTES) {
+            throw new FyloWasmError(
+                'EWASM_SNAPSHOT',
+                `FYLO Wasm snapshot exceeds ${MAX_SNAPSHOT_BYTES} bytes`
+            )
+        }
+        const pointer = this.allocateRegion(bytes.byteLength, 'snapshot')
         try {
             if (bytes.byteLength > 0) {
-                new Uint8Array(this.memory.buffer, pointer, bytes.byteLength).set(bytes)
+                try {
+                    new Uint8Array(this.memory.buffer, pointer, bytes.byteLength).set(bytes)
+                } catch (cause) {
+                    throw new FyloWasmError(
+                        'EWASM_MEMORY',
+                        'Unable to copy the FYLO index snapshot into Wasm memory',
+                        { cause }
+                    )
+                }
             }
             if (this.loadSnapshotExport(pointer, bytes.byteLength) === WASM_ERROR) {
-                throw new Error('FYLO Wasm index scanner rejected the snapshot')
+                throw new FyloWasmError(
+                    'EWASM_SNAPSHOT',
+                    'FYLO Wasm index scanner rejected the snapshot'
+                )
             }
         } finally {
             this.deallocate(pointer, bytes.byteLength)
@@ -95,9 +175,31 @@ export class WasmIndexScanner {
      * @returns {string[]}
      */
     scanQueries(queries) {
-        const input = ENCODER.encode(JSON.stringify(queries))
-        const inputPointer = this.allocate(input.byteLength)
-        new Uint8Array(this.memory.buffer, inputPointer, input.byteLength).set(input)
+        let input
+        try {
+            input = ENCODER.encode(JSON.stringify(queries))
+        } catch (cause) {
+            throw new FyloWasmError('EWASM_QUERY', 'Unable to encode the FYLO Wasm query', {
+                cause
+            })
+        }
+        if (input.byteLength > MAX_QUERY_BYTES) {
+            throw new FyloWasmError(
+                'EWASM_QUERY',
+                `FYLO Wasm query exceeds ${MAX_QUERY_BYTES} bytes`
+            )
+        }
+        const inputPointer = this.allocateRegion(input.byteLength, 'query')
+        try {
+            new Uint8Array(this.memory.buffer, inputPointer, input.byteLength).set(input)
+        } catch (cause) {
+            this.deallocate(inputPointer, input.byteLength)
+            throw new FyloWasmError(
+                'EWASM_MEMORY',
+                'Unable to copy the FYLO query into Wasm memory',
+                { cause }
+            )
+        }
         this.ensureOutput(Math.max(this.outputCapacity, INITIAL_OUTPUT_CAPACITY))
         try {
             let required = this.scanQueriesExport(
@@ -107,8 +209,14 @@ export class WasmIndexScanner {
                 this.outputCapacity
             )
             if (required === WASM_ERROR)
-                throw new Error('FYLO Wasm index scanner rejected the query')
+                throw new FyloWasmError('EWASM_QUERY', 'FYLO Wasm index scanner rejected the query')
             if (required > this.outputCapacity) {
+                if (required > MAX_OUTPUT_BYTES) {
+                    throw new FyloWasmError(
+                        'EWASM_MEMORY',
+                        `FYLO Wasm scan output exceeds ${MAX_OUTPUT_BYTES} bytes`
+                    )
+                }
                 this.ensureOutput(required)
                 required = this.scanQueriesExport(
                     inputPointer,
@@ -118,7 +226,10 @@ export class WasmIndexScanner {
                 )
             }
             if (required === WASM_ERROR || required > this.outputCapacity) {
-                throw new Error('FYLO Wasm index scan failed after resizing its output buffer')
+                throw new FyloWasmError(
+                    'EWASM_MEMORY',
+                    'FYLO Wasm index scan failed after resizing its output buffer'
+                )
             }
             return DECODER.decode(new Uint8Array(this.memory.buffer, this.outputPointer, required))
                 .split('\n')
@@ -131,9 +242,42 @@ export class WasmIndexScanner {
     /** @param {number} capacity */
     ensureOutput(capacity) {
         if (capacity <= this.outputCapacity) return
+        if (capacity > MAX_OUTPUT_BYTES) {
+            throw new FyloWasmError(
+                'EWASM_MEMORY',
+                `FYLO Wasm output allocation exceeds ${MAX_OUTPUT_BYTES} bytes`
+            )
+        }
+        const pointer = this.allocateRegion(capacity, 'output')
         if (this.outputPointer) this.deallocate(this.outputPointer, this.outputCapacity)
         this.outputCapacity = capacity
-        this.outputPointer = this.allocate(capacity)
+        this.outputPointer = pointer
+    }
+
+    /**
+     * @param {number} length
+     * @param {'snapshot' | 'query' | 'output'} purpose
+     * @returns {number}
+     */
+    allocateRegion(length, purpose) {
+        try {
+            const pointer = this.allocate(length)
+            if (
+                !Number.isSafeInteger(pointer) ||
+                pointer < 0 ||
+                pointer + length > this.memory.buffer.byteLength
+            ) {
+                throw new RangeError('allocator returned an invalid linear-memory region')
+            }
+            return pointer
+        } catch (cause) {
+            if (cause instanceof FyloWasmError) throw cause
+            throw new FyloWasmError(
+                'EWASM_MEMORY',
+                `Unable to allocate Wasm memory for the FYLO ${purpose}`,
+                { cause }
+            )
+        }
     }
 
     close() {

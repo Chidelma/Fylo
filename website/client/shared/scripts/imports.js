@@ -48,6 +48,33 @@ if (typeof document !== 'undefined') {
         // Any other click (including a menu link) closes the open mobile menu.
         closeMenu()
     })
+
+    // Keep every multi-language sample on a docs page on the same language.
+    // Each <docs-sample> owns its own $lang, so the only way to move them
+    // together is to replay the click — which also keeps each component the
+    // single owner of its own state. The guard stops the replay recursing.
+    let syncingLang = false
+    document.addEventListener('click', (event) => {
+        const button = event.target.closest('.doc-sample-langs button')
+        if (!button || syncingLang) return
+        const label = button.textContent.trim()
+        syncingLang = true
+        try {
+            // Re-query each round: selecting a language morphs that component's
+            // DOM, which detaches nodes captured before the click.
+            const count = document.querySelectorAll('.doc-sample-langs').length
+            for (let i = 0; i < count; i++) {
+                const strip = document.querySelectorAll('.doc-sample-langs')[i]
+                if (!strip) continue
+                const match = [...strip.querySelectorAll('button')].find(
+                    (candidate) => candidate.textContent.trim() === label
+                )
+                if (match && match.getAttribute('aria-selected') !== 'true') match.click()
+            }
+        } finally {
+            syncingLang = false
+        }
+    })
     // Close the mobile menu on SPA navigation.
     window.addEventListener('popstate', closeMenu)
 
@@ -57,15 +84,61 @@ if (typeof document !== 'undefined') {
     const ROUTE_TITLES = {
         '/': 'FYLO — The document store that speaks your language.',
         '/docs': 'Docs — FYLO',
+        '/docs/concepts': 'Concepts — FYLO',
+        '/docs/clients': 'Language clients — FYLO',
+        '/docs/documents': 'Documents & metadata — FYLO',
+        '/docs/buckets': 'Buckets & raw files — FYLO',
+        '/docs/querying': 'Querying & SQL — FYLO',
+        '/docs/schemas': 'Schemas & migrations — FYLO',
+        '/docs/security': 'Encryption & access — FYLO',
+        '/docs/versioning': 'Version control — FYLO',
+        '/docs/recovery': 'Recovery & rebuild — FYLO',
+        '/docs/operations': 'Configuration — FYLO',
+        '/docs/replication': 'Backup & sync — FYLO',
+        '/docs/browser': 'Browser & Explorer — FYLO',
+        '/docs/cli': 'CLI reference — FYLO',
+        '/docs/protocol': 'Machine protocol — FYLO',
+        '/docs/errors': 'Error codes — FYLO',
+        '/docs/limitations': 'Limitations — FYLO',
         '/download': 'Download — FYLO'
     }
+    const currentPath = () => location.pathname.replace(/\/$/, '') || '/'
     const syncTitle = () => {
-        const t = ROUTE_TITLES[location.pathname.replace(/\/$/, '') || '/']
+        const t = ROUTE_TITLES[currentPath()]
         if (t && document.title !== t) document.title = t
     }
-    window.addEventListener('tachyon:navigate', syncTitle)
-    window.addEventListener('popstate', syncTitle)
-    syncTitle()
+
+    // Highlight the docs sidebar entry for the current route. Delegated from
+    // here rather than bound in the component, so it survives Tac rerenders and
+    // SPA navigations that never re-run a page constructor.
+    const syncDocNav = () => {
+        const here = currentPath()
+        for (const link of document.querySelectorAll('.doc-nav-list a')) {
+            const target = link.getAttribute('href').replace(/\/$/, '') || '/'
+            link.classList.toggle('active', target === here)
+            if (target === here) link.setAttribute('aria-current', 'page')
+            else link.removeAttribute('aria-current')
+        }
+    }
+    // On narrow screens the docs sidebar collapses to a horizontal strip, where
+    // the current page can sit off-screen with nothing to suggest it exists.
+    const revealActive = () => {
+        for (const selector of ['.doc-nav-list a.active', '.doc-sample-langs [aria-selected="true"]']) {
+            const active = document.querySelector(selector)
+            const scroller = active?.closest('.doc-nav-inner, .doc-sample-langs')
+            if (!active || !scroller || scroller.scrollWidth <= scroller.clientWidth) continue
+            const offset = active.offsetLeft - (scroller.clientWidth - active.offsetWidth) / 2
+            scroller.scrollTo({ left: Math.max(0, offset) })
+        }
+    }
+    const syncRoute = () => {
+        syncTitle()
+        syncDocNav()
+        revealActive()
+    }
+    window.addEventListener('tachyon:navigate', syncRoute)
+    window.addEventListener('popstate', syncRoute)
+    syncRoute()
 
     // Tac rerenders can rebuild the header (and its [w-theme-icon] span) — keep it in sync.
     new MutationObserver(() => {
@@ -75,6 +148,8 @@ if (typeof document !== 'undefined') {
                 el.textContent = THEME_ICON[theme] || THEME_ICON.dark
             }
         }
+        // A morph can also rebuild the docs sidebar and drop `active`.
+        syncDocNav()
     }).observe(document.documentElement, { childList: true, subtree: true })
 
     // Favicon — the FYLO mark: a document whose contents are a branch history.

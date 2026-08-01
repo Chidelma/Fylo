@@ -1,0 +1,1 @@
+{"$ops":[{"role":{"$eq":"admin"},"score":{"$gte":90}}],"$limit":5}

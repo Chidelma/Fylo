@@ -1,19 +1,9 @@
 /**
- * Public package entry. Re-exports the {@link Fylo} default class plus the
- * named error types consumers can catch on.
+ * Public JavaScript entry for the native Rust engine.
+ *
+ * The JavaScript package is deliberately a thin machine-protocol client. All
+ * native storage, query, permission, recovery, and versioning behavior lives
+ * in the `fylo` executable; importing this module never opens a root directly.
  */
-import Fylo from './api/fylo.js'
-export { CollectionFacade } from './api/fylo.js'
-export { FyloBatchWriteError } from './api/fylo.js'
-
-export { CollectionNotFoundError } from './core/collection.js'
-export { LocalQueue, QueueMessageContext, consume, publish } from './queue/local.js'
-export { FyloPermissionError } from './security/access.js'
-export { FyloSyncError } from './replication/sync.js'
-export { FyloS3Restore } from './replication/s3-restore.js'
-export { getXattr, setXattr, listXattr, removeXattr } from './storage/xattr.js'
-
-const globalScope = /** @type {typeof globalThis & { Fylo?: typeof Fylo }} */ (globalThis)
-globalScope.Fylo ??= Fylo
-
-export default Fylo
+export { Fylo } from '../clients/node/fylo.mjs'
+export { Fylo as default } from '../clients/node/fylo.mjs'

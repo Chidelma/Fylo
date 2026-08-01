@@ -40,7 +40,7 @@ namespace Fylo
         private readonly byte[] _responseBuffer = new byte[MaxResponseBytes + 1];
         private readonly object _lock = new object();
 
-        public Fylo(string root, string binary = "fylo", bool worm = false)
+        public Fylo(string root, string binary = "fylo")
         {
             var psi = new ProcessStartInfo
             {
@@ -60,7 +60,6 @@ namespace Fylo
             psi.ArgumentList.Add(MaxRequestBytes.ToString());
             psi.ArgumentList.Add("--max-response-bytes");
             psi.ArgumentList.Add(MaxResponseBytes.ToString());
-            if (worm) psi.ArgumentList.Add("--worm");
             _proc = Process.Start(psi) ?? throw new InvalidOperationException("failed to start fylo");
             _stdout = _proc.StandardOutput.BaseStream;
         }

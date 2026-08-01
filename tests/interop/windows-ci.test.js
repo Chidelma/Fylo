@@ -4,22 +4,19 @@ const workflows = ['.github/workflows/ci.yml', '.github/workflows/publish.yml']
 
 describe('native Windows release gate', () => {
     for (const workflowPath of workflows) {
-        test(`${workflowPath} requires the complete Windows x64 storage contract`, async () => {
+        test(`${workflowPath} requires the native Rust Windows x64 contract`, async () => {
             const workflow = await Bun.file(workflowPath).text()
 
-            expect(workflow).toContain('os: [windows-2022, windows-2025]')
+            expect(workflow).toContain('windows-2022')
+            expect(workflow).toContain('windows-2025')
             expect(workflow).toContain('bun-version-file: .bun-version')
-            expect(workflow).toContain('./scripts/install-vendor-bins.ps1')
-            expect(workflow).toContain("FYLO_REQUIRE_WINDOWS_NATIVE: '1'")
-            expect(workflow).toContain('tests/integration/fs-lock.test.js')
-            expect(workflow).toContain('tests/integration/machine-hardening.test.js')
-            expect(workflow).toContain('tests/integration/transactions.test.js')
-            expect(workflow).toContain('tests/integration/crash-recovery.test.js')
-            expect(workflow).toContain('tests/integration/document-path-security.test.js')
-            expect(workflow).toContain('tests/integration/secure-open.test.js')
-            expect(workflow).toContain('--timeout 300000 --parallel=1')
-            expect(workflow).toContain('tests/interop/windows-native-binary.test.js')
+            expect(workflow).toContain('cargo test --locked')
+            expect(workflow).toContain('-p fylo-storage-native')
+            expect(workflow).toContain('-p fylo-machine')
+            expect(workflow).toContain('rust:crash:matrix')
+            expect(workflow).not.toContain('tests/integration/')
             expect(workflow).toContain('bun ./scripts/build-executable.mjs --outfile')
+            expect(workflow).toContain('tests/interop/native-release-root-lease.test.js')
         })
     }
 
@@ -34,10 +31,28 @@ describe('native Windows release gate', () => {
         expect(workflow).toContain('name: windows-release-${{ github.sha }}')
         expect(workflow).toContain('path: dist-bin/fylo-windows-x64.exe')
         expect(workflow).toContain('Download native-tested Windows release executable')
-        expect(workflow).toContain(
-            'bun ./scripts/build-executable.mjs --target "$1" --outfile "release-assets/$2"'
-        )
+        expect(workflow).toContain('Native Rust Linux release (${{ matrix.target }})')
+        expect(workflow).toContain('os: ubuntu-24.04-arm')
+        expect(workflow).toContain('name: linux-release-linux-arm64-${{ github.sha }}')
+        expect(workflow).toContain('Download native-tested Linux arm64 release executable')
+        expect(workflow).not.toContain('bun ./scripts/build-executable.mjs --target')
         expect(workflow).not.toContain('build bun-windows-x64')
+    })
+
+    test('the public executable builder and package expose only the Rust native engine', async () => {
+        const [manifest, builder, publicEntry] = await Promise.all([
+            Bun.file('package.json').json(),
+            Bun.file('scripts/build-executable.mjs').text(),
+            Bun.file('src/index.js').text()
+        ])
+
+        expect(manifest.scripts['build:exe']).toBe('bun ./scripts/build-executable.mjs')
+        expect(manifest.scripts['build:exe:javascript']).toBeUndefined()
+        expect(manifest.bin).toBeUndefined()
+        expect(builder).toContain("'cargo',")
+        expect(builder).toContain("'fylo-rust'")
+        expect(builder).not.toContain("'./src/cli/index.js'")
+        expect(publicEntry).toContain('../clients/node/fylo.mjs')
     })
 
     test('Release publishes a CalVer-named self-hosted Explorer archive', async () => {

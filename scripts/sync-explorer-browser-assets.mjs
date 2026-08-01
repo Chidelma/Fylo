@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, rm } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -13,6 +13,10 @@ for (const [from, to = from] of [
     ['fylo-index.wasm']
 ]) {
     const output = new URL(to, destination)
+    // Replace instead of copying over the prior artifact. File Provider roots
+    // may evict generated binaries; copyfile() otherwise tries to inspect the
+    // dataless destination and can time out before publishing the new build.
+    await rm(output, { force: true })
     await copyFile(new URL(from, source), output)
     await chmod(output, 0o644)
 }

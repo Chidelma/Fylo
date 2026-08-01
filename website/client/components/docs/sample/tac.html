@@ -1,0 +1,17 @@
+<div class="doc-sample">
+  <div class="doc-sample-langs" role="tablist" aria-label="Language">
+    <loop :for="let lang of langs">
+      <button
+        type="button"
+        role="tab"
+        :class="$lang === lang.key ? 'w-btn w-btn-tonal w-btn--sm' : 'w-btn w-btn-ghost w-btn--sm'"
+        :aria-selected="$lang === lang.key ? 'true' : 'false'"
+        on:click="showLang(lang.key)"
+      >
+        {lang.label}
+      </button>
+    </loop>
+  </div>
+
+  <pre class="code-block"><code>{code()}</code></pre>
+</div>

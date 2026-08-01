@@ -1,4 +1,5 @@
 import TTID from '../vendor/ttid.mjs'
+import { legacyShardOf } from '../../core/shard.js'
 import { assertPathInside, basename, join } from './path.js'
 
 /**
@@ -17,7 +18,7 @@ import { assertPathInside, basename, join } from './path.js'
  */
 
 /**
- * Browser port of `src/storage/documents.js`. Mirrors the per-document
+ * Browser implementation of the canonical per-document
  * disk layout (`docs/<bucket>/<id>.json`, `.deleted/<bucket>/<id>.json`) but
  * stores `deletedAt` inside the tombstone JSON body rather than setting file
  * `mtime` — OPFS exposes `lastModified` but cannot set it explicitly.
@@ -62,8 +63,9 @@ export class BrowserDocuments {
      */
     async readStoredDoc(collection, docId) {
         this.validateDocId(docId)
-        const target = this.docPath(collection, docId)
-        assertPathInside(this.docsRoot(collection), target)
+        const root = this.docsRoot(collection)
+        const target = await this.existingPath(root, this.docPath(collection, docId), docId)
+        assertPathInside(root, target)
         if (!(await this.fs.exists(target))) return null
         const text = await this.fs.readText(target)
         const raw = this.parseJsonDocumentText(text)
@@ -83,8 +85,9 @@ export class BrowserDocuments {
      */
     async readDeletedDoc(collection, docId) {
         this.validateDocId(docId)
-        const target = this.deletedPath(collection, docId)
-        assertPathInside(this.deletedRoot(collection), target)
+        const root = this.deletedRoot(collection)
+        const target = await this.existingPath(root, this.deletedPath(collection, docId), docId)
+        assertPathInside(root, target)
         if (!(await this.fs.exists(target))) return null
         const text = await this.fs.readText(target)
         const raw = this.parseJsonDocumentText(text)
@@ -112,9 +115,11 @@ export class BrowserDocuments {
         const text = JSON.stringify(data)
         this.assertJsonDocumentText(text)
         await this.fs.writeText(target, text)
+        await this.removeLegacyCopy(this.docsRoot(collection), target, docId)
         // Reconcile any orphan tombstone so the live copy wins.
         const tombstone = this.deletedPath(collection, docId)
         if (await this.fs.exists(tombstone)) await this.fs.remove(tombstone)
+        await this.removeLegacyCopy(this.deletedRoot(collection), tombstone, docId)
     }
 
     /**
@@ -124,8 +129,9 @@ export class BrowserDocuments {
      */
     async removeStoredDoc(collection, docId) {
         this.validateDocId(docId)
-        const target = this.docPath(collection, docId)
-        assertPathInside(this.docsRoot(collection), target)
+        const root = this.docsRoot(collection)
+        const target = await this.existingPath(root, this.docPath(collection, docId), docId)
+        assertPathInside(root, target)
         if (await this.fs.exists(target)) await this.fs.remove(target)
     }
 
@@ -137,7 +143,11 @@ export class BrowserDocuments {
      */
     async softDeleteStoredDoc(collection, docId, deletedAt) {
         this.validateDocId(docId)
-        const source = this.docPath(collection, docId)
+        const source = await this.existingPath(
+            this.docsRoot(collection),
+            this.docPath(collection, docId),
+            docId
+        )
         const target = this.deletedPath(collection, docId)
         assertPathInside(this.docsRoot(collection), source)
         assertPathInside(this.deletedRoot(collection), target)
@@ -163,7 +173,11 @@ export class BrowserDocuments {
      */
     async restoreStoredDoc(collection, docId, _restoredAt) {
         this.validateDocId(docId)
-        const source = this.deletedPath(collection, docId)
+        const source = await this.existingPath(
+            this.deletedRoot(collection),
+            this.deletedPath(collection, docId),
+            docId
+        )
         const target = this.docPath(collection, docId)
         assertPathInside(this.deletedRoot(collection), source)
         assertPathInside(this.docsRoot(collection), target)
@@ -189,6 +203,29 @@ export class BrowserDocuments {
      */
     async makeStoredDocReadOnly(_collection, _docId) {
         // intentionally empty
+    }
+
+    /**
+     * Resolve a record written before ADR 0006 without changing the root.
+     * New writes always use `canonical`; a later mutation removes the old copy.
+     *
+     * @param {string} root
+     * @param {string} canonical
+     * @param {TTIDValue} docId
+     * @returns {Promise<string>}
+     */
+    async existingPath(root, canonical, docId) {
+        if (await this.fs.exists(canonical)) return canonical
+        const legacy = join(root, legacyShardOf(docId), `${docId}.json`)
+        assertPathInside(root, legacy)
+        return legacy !== canonical && (await this.fs.exists(legacy)) ? legacy : canonical
+    }
+
+    /** @param {string} root @param {string} canonical @param {TTIDValue} docId */
+    async removeLegacyCopy(root, canonical, docId) {
+        const legacy = join(root, legacyShardOf(docId), `${docId}.json`)
+        assertPathInside(root, legacy)
+        if (legacy !== canonical && (await this.fs.exists(legacy))) await this.fs.remove(legacy)
     }
 
     /**

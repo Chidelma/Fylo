@@ -1,0 +1,5 @@
+{"op":"handshake","requestId":"fixture-handshake"}
+{"op":"createCollection","requestId":"fixture-create","collection":"users","kind":"document"}
+{"op":"putData","requestId":"fixture-put","collection":"users","data":{"name":"Ada","active":true},"access":{"uid":1000,"gid":100,"mode":416,"groups":[100,101]}}
+{"op":"findDocs","requestId":"fixture-find","collection":"users","query":{"$ops":[{"active":{"$eq":true}}]},"page":{"limit":100}}
+{"op":"getMeta","requestId":"fixture-meta","collection":"users","id":"01DOCUMENT"}

@@ -1,0 +1,28 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://fylo.del.ma/api/storage/v1/generation.schema.json",
+    "title": "FYLO collection generation state v1",
+    "oneOf": [
+        {
+            "type": "object",
+            "required": ["format", "generation", "state"],
+            "properties": {
+                "format": { "const": "fylo.collection-generation.v1" },
+                "generation": { "type": "integer", "minimum": 0 },
+                "state": { "const": "stable" }
+            },
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "required": ["format", "generation", "state", "transactionId"],
+            "properties": {
+                "format": { "const": "fylo.collection-generation.v1" },
+                "generation": { "type": "integer", "minimum": 0 },
+                "state": { "const": "writing" },
+                "transactionId": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+        }
+    ]
+}

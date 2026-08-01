@@ -189,15 +189,14 @@ export class Cipher {
     }
     /**
      * Whether a stored value carries this cipher's wire format. Callers use it
-     * to tell "never encrypted" from "wrong key" without inspecting the value
-     * themselves or quoting it into an error.
+     * to distinguish legacy plaintext from a wrong key without quoting stored
+     * content into an error.
      * @param {string} stored
      * @returns {boolean}
      */
     static isCiphertext(stored) {
         return stored.startsWith('v2.')
     }
-
     /**
      * Decrypts a URL-safe base64 encoded value back to plaintext.
      * @param {string} encoded
