@@ -15,7 +15,7 @@ const LANGS = [
     { key: 'web', label: 'JS (Browser)', cmt: '//' }
 ]
 
-const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.31.06/fylo.js'
+const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.30.06/fylo.js'
 
 // Native object/array literal renderers, one per language.
 function pyLit(v) {

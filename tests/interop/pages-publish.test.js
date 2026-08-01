@@ -70,7 +70,7 @@ describe('GitHub Pages browser client publishing', () => {
     test('documents both pinned and latest Pages URLs', async () => {
         const clients = await Bun.file(path.join(root, 'clients/README.md')).text()
 
-        expect(clients).toContain('https://d31ma.github.io/FYLO/version/26.31.06/fylo.js')
+        expect(clients).toContain('https://d31ma.github.io/FYLO/version/26.30.06/fylo.js')
         expect(clients).toContain('https://d31ma.github.io/FYLO/version/latest/fylo.js')
     })
 
@@ -81,7 +81,7 @@ describe('GitHub Pages browser client publishing', () => {
         ])
 
         for (const example of examples) {
-            expect(example).toContain('https://d31ma.github.io/FYLO/version/26.31.06/fylo.js')
+            expect(example).toContain('https://d31ma.github.io/FYLO/version/26.30.06/fylo.js')
             expect(example).toContain('const db = await Fylo.open({ wasm: true })')
             expect(example).not.toContain("createBrowserClient } from './fylo-web.mjs'")
         }

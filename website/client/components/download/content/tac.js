@@ -7,7 +7,7 @@ export default class extends Tac {
         { label: 'Linux (x64)', file: 'fylo-linux-x64' },
         { label: 'Linux (ARM64)', file: 'fylo-linux-arm64' },
         { label: 'Windows (x64)', file: 'fylo-windows-x64.exe' },
-        { label: 'Web (self-hosted Explorer)', file: 'fylo-explorer-26.31.06.zip' }
+        { label: 'Web (self-hosted Explorer)', file: 'fylo-explorer-26.30.06.zip' }
     ]
 
     assetUrl(file) {
