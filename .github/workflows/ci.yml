@@ -37,9 +37,7 @@ jobs:
                   echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
             - name: Install pinned Rust toolchain
-              run: |
-                  rustup show active-toolchain
-                  rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu aarch64-apple-darwin
+              run: rustup show active-toolchain
 
             - name: Verify Rust-only product boundary and contracts
               run: |
@@ -53,7 +51,6 @@ jobs:
               run: |
                   bun run rust:fmt
                   bun run rust:clippy
-                  bun run rust:clippy:cross
                   bun run rust:test
                   bun ./scripts/run-rust.mjs cargo build --locked -p fylo-cli --bin fylo-rust
 
@@ -114,6 +111,9 @@ jobs:
 
             - name: Install pinned Rust toolchain
               run: rustup show active-toolchain
+
+            - name: Lint native target-specific paths
+              run: bun run rust:clippy
 
             - name: Test native storage, engine, machine, and CLI
               run: >-

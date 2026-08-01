@@ -2893,7 +2893,12 @@ mod tests {
             .collection("users")
             .unwrap();
         let error = collection.read_document("4VRNF52JPCO").unwrap_err();
-        assert_eq!(error.code(), NativeStorageErrorCode::UnsafePath);
+        let expected = if original.exists() {
+            NativeStorageErrorCode::UnsafePath
+        } else {
+            NativeStorageErrorCode::NotFound
+        };
+        assert_eq!(error.code(), expected);
     }
 
     #[cfg(unix)]

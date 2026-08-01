@@ -58,6 +58,9 @@
   retryable `ENATIVE_IO` frames. A failed mutation leaves the machine loop
   synchronized, and validator children cannot keep client stdout open after
   the parent exits (#89).
+- Target-specific Rust code is linted on native Linux, macOS, and Windows
+  runners, and case-alias tests now distinguish case-sensitive Linux lookup
+  semantics from case-insensitive platform rejection.
 - The marketing footer's Explorer link now leads to the browser guide, and
   mobile navigation, documentation controls, and code tabs meet the 44-pixel
   touch-target baseline without horizontal overflow.
