@@ -174,6 +174,84 @@ try {
     )
     await bulkReader.close()
 
+    // find narrows through the prefix index, so a wrong candidate set loses
+    // rows silently instead of erroring. Every shape below is compared against
+    // the JavaScript engine on one root: shapes the index answers, shapes it
+    // cannot answer and must fall back on, and the values most likely to be
+    // planned wrongly.
+    const finder = new Fylo(root, { versioning: { autoCommit: false } })
+    await finder.ready()
+    await finder.catalog.create()
+    await finder.catalog.put('4VRNF52JPF1', {
+        group: 7,
+        tag: 'a',
+        tags: [1, 2, 3],
+        nest: { city: 'Lagos' },
+        note: null
+    })
+    await finder.catalog.put('4VRNF52JPF2', {
+        group: 7,
+        tag: 'b',
+        tags: [3, 4],
+        nest: { city: 'Accra' }
+    })
+    await finder.catalog.put('4VRNF52JPF3', {
+        group: 8,
+        tag: 'a',
+        tags: [5],
+        nest: { city: 'Lagos' }
+    })
+    await finder.catalog.put('4VRNF52JPF4', { group: '7', tag: 'c' })
+
+    const queries = [
+        { $ops: [{ group: { $eq: 7 } }] },
+        // Two fields in one operation intersect.
+        { $ops: [{ group: { $eq: 7 }, tag: { $eq: 'a' } }] },
+        // Two operations union.
+        { $ops: [{ group: { $eq: 8 } }, { tag: { $eq: 'b' } }] },
+        // An array is indexed per element but `$eq` compares the whole value,
+        // so the index offers a candidate the predicate must reject. Empty is
+        // the right answer, and returning the candidate would be the bug.
+        { $ops: [{ tags: { $eq: 3 } }], expectEmpty: true },
+        { $ops: [{ 'nest.city': { $eq: 'Lagos' } }] },
+        // A string 7 and a number 7 must not collapse into each other.
+        { $ops: [{ group: { $eq: '7' } }] },
+        { $ops: [{ note: { $eq: null } }] },
+        // Not planned: the query falls back to a scan and must still be right.
+        { $ops: [{ group: { $gt: 7 } }] },
+        { $ops: [{ tag: { $like: 'a%' } }] },
+        {}
+    ]
+    const nativeFinds = await session(
+        binary,
+        queries.map(({ expectEmpty: _skip, ...query }, index) =>
+            JSON.stringify({
+                op: 'findDocs',
+                requestId: `find${index}`,
+                collection: 'catalog',
+                query
+            })
+        )
+    )
+    for (const [index, { expectEmpty, ...query }] of queries.entries()) {
+        const frame = nativeFinds[index]
+        assert(frame.ok === true, `Rust findDocs failed: ${JSON.stringify(frame.error)}`)
+        const expected = []
+        for await (const row of finder.catalog.find(query).collect()) {
+            expected.push(Object.keys(row)[0])
+        }
+        const actual = frame.result.map((row) => Object.keys(row)[0])
+        assert(
+            expectEmpty ? expected.length === 0 : expected.length > 0,
+            `find case ${index} did not match what it was written to match`
+        )
+        assert(
+            [...actual].sort().join(',') === [...expected].sort().join(','),
+            `Rust find ${index} disagrees with JavaScript:\n  rust ${actual}\n  js   ${expected}`
+        )
+    }
+    await finder.close()
+
     // A join is answered from documents rather than the index, so the only way
     // to know Rust agrees is to ask both engines the same joins and compare.
     // Each case isolates one rule: any-comparison matching, right winning a

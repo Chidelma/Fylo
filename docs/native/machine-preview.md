@@ -122,6 +122,15 @@ not create. It also asserts that a contradicting kind is refused, that dropping
 twice reports `ENATIVE_NOT_FOUND`, and that `FYLO_SHARD_WIDTH` reaches the
 descriptor — with a width past the published maximum refused.
 
+`findDocs` is qualified differentially too, because it narrows through the
+prefix index and a wrong candidate set loses rows silently instead of erroring.
+Ten query shapes run through both engines on one root: shapes the index answers
+(single field, two fields intersecting, two operations unioning, a nested path),
+shapes it cannot answer and must fall back on (`$gt`, `$like`, an empty query),
+and the values most likely to be planned wrongly — a string `"7"` against a
+numeric `7`, an explicit `null`, and an array field, where the index offers a
+candidate that `$eq` must then reject.
+
 `joinDocs` is qualified differentially, because a join is answered from
 documents rather than from the index: eight joins run through both engines on
 one root and the results must agree — any-comparison matching, each mode,

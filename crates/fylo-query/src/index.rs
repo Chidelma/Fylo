@@ -138,6 +138,30 @@ fn add_value<E>(
     Ok(())
 }
 
+/// Encoded key prefix selecting every document whose `field_path` equals
+/// `value`.
+///
+/// This is the read-side counterpart of the `eq` key
+/// [`index_entries_for_document`] writes, so a query can find candidates
+/// without reading every document. The prefix ends with the separator before
+/// the document identifier, so it cannot match a longer value that merely
+/// starts with this one.
+///
+/// Returns `None` for a container, which the index stores per element rather
+/// than as a whole.
+///
+/// Plaintext only: a schema-encrypted field is indexed under a keyed blind
+/// token, so planning one here would need the encryption context and is left
+/// to the caller's fallback.
+#[must_use]
+pub fn equality_prefix(field_path: &str, value: &Value) -> Option<String> {
+    if matches!(value, Value::Array(_) | Value::Object(_)) {
+        return None;
+    }
+    let token = lookup_token(&stringify_stored_value(value));
+    Some(format!("{}/eq/{token}/", encode_field_path(field_path)))
+}
+
 fn index_key(field_path: &str, kind: &str, value: &str, document_id: &str) -> String {
     format!(
         "{}/{kind}/{}/{}",

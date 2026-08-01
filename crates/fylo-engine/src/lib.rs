@@ -780,6 +780,106 @@ impl ReadOnlyEngine {
         self.find_with_access(collection, query, None)
     }
 
+    /// Narrow a query to the documents the prefix index says could match.
+    ///
+    /// Returns `None` when the query cannot be planned, which means "read
+    /// everything" — the honest answer for a predicate the index cannot
+    /// select on. Planning is deliberately limited to equality: it is what the
+    /// index answers exactly, and a wrong candidate set here would silently
+    /// lose rows rather than merely run slowly.
+    ///
+    /// A document matches the query when any operation matches, so candidates
+    /// are unioned across operations; an operation matches when every field
+    /// does, so candidates are intersected within one. If any single operation
+    /// cannot be planned, the union would be incomplete and the whole query
+    /// falls back.
+    fn plan_equality_candidates(
+        &self,
+        collection: &NativeCollection,
+        query: &StructuredQuery,
+    ) -> Result<Option<Vec<String>>, EngineError> {
+        if query.operations().is_empty() {
+            return Ok(None);
+        }
+        // A schema-encrypted field is indexed under a keyed blind token, so it
+        // is left to the scan rather than planned from the plaintext operand.
+        let encrypted_fields = self
+            .encryption
+            .as_ref()
+            .map(|encryption| encryption.encrypted_fields(collection.name()))
+            .transpose()
+            .map_err(EngineError::encryption)?
+            .unwrap_or_default();
+
+        let mut prefixes: Vec<Vec<String>> = Vec::new();
+        for operation in query.operations() {
+            let mut operands = Vec::new();
+            for (field, operand) in operation {
+                let Some(operand) = operand.as_object() else {
+                    return Ok(None);
+                };
+                // Every operator in the operand must be planned, or the
+                // candidates would be a superset the predicate still filters —
+                // correct, but no narrower than a scan for the unplanned part.
+                // Only `$eq` alone is worth planning.
+                let [("$eq", value)] = operand
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value))
+                    .collect::<Vec<_>>()[..]
+                else {
+                    return Ok(None);
+                };
+                let field_path = field.replace('.', "/");
+                if is_encrypted_field(&field_path, &encrypted_fields) {
+                    return Ok(None);
+                }
+                let Some(prefix) = fylo_query::equality_prefix(&field_path, value) else {
+                    return Ok(None);
+                };
+                operands.push(prefix);
+            }
+            if operands.is_empty() {
+                return Ok(None);
+            }
+            prefixes.push(operands);
+        }
+
+        let snapshot = collection.index_snapshot().map_err(EngineError::storage)?;
+        let mut union = BTreeSet::new();
+        for operands in prefixes {
+            let mut candidates: Option<BTreeSet<String>> = None;
+            for prefix in operands {
+                let matched = snapshot
+                    .scan(
+                        &[ScanQuery {
+                            prefix,
+                            range: None,
+                        }],
+                        QueryLimits::default(),
+                    )
+                    .map_err(EngineError::query)?
+                    .into_iter()
+                    .map(|identifier| {
+                        String::from_utf8(identifier).map_err(|error| {
+                            EngineError::new(
+                                EngineErrorCode::CorruptData,
+                                format!("index document identifier is not UTF-8: {error}"),
+                            )
+                        })
+                    })
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                candidates = Some(match candidates {
+                    Some(current) => current.intersection(&matched).cloned().collect(),
+                    None => matched,
+                });
+            }
+            union.extend(candidates.unwrap_or_default());
+        }
+        // Sorted, because the caller's contract is TTID-ascending rows and a
+        // set iterates in key order rather than storage order.
+        Ok(Some(union.into_iter().collect()))
+    }
+
     /// Join two document collections.
     ///
     /// A nested loop over both sides, matching the JavaScript engine: joins are
@@ -891,8 +991,17 @@ impl ReadOnlyEngine {
             .collection(collection)
             .map_err(EngineError::storage)?;
         Self::read_stable(&collection, || {
+            // Documents are the truth and the index is an accelerator, so a
+            // planned query narrows which documents are read and the predicate
+            // is still applied to each one. The index can only over-match — an
+            // array is indexed per element — never under-match.
+            let planned = self.plan_equality_candidates(&collection, query)?;
+            let identifiers = match planned {
+                Some(candidates) => candidates,
+                None => collection.document_ids().map_err(EngineError::storage)?,
+            };
             let mut records = Vec::new();
-            for identifier in collection.document_ids().map_err(EngineError::storage)? {
+            for identifier in identifiers {
                 let stored = collection
                     .read_document(&identifier)
                     .map_err(EngineError::storage)?;

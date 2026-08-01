@@ -45,6 +45,27 @@ The preview:
   `find`, `log`, `verify-history`, and read-only `sql`, plus `get-file`,
   `get-deleted`, and `get-deleted-file`.
 
+`find` narrows through the prefix index before reading documents. Documents
+remain the truth and the index an accelerator, so a planned query decides only
+_which_ documents are read and the predicate is still applied to each one —
+the index can over-match, never under-match.
+
+Planning is limited to equality. That is what the index answers exactly, and a
+wrong candidate set loses rows silently rather than erroring, so anything else
+falls back to reading every document: ranges, `$like`, and schema-encrypted
+fields, whose keys are keyed blind tokens rather than the plaintext operand.
+Candidates union across `$ops` entries and intersect within one, matching how a
+document matches the query; if a single entry cannot be planned the union would
+be incomplete, so the whole query falls back. Candidates are returned sorted,
+because the row contract is TTID-ascending and a candidate set iterates in key
+order rather than storage order.
+
+Before this, `find` read and parsed every document in the collection. On the
+500-document read-only benchmark, whose query matches one document in ten, the
+Rust/JavaScript `find` ratio was 10.5 (p50) and 11.1 (p95) — the selectivity
+itself, since JavaScript consulted the index and Rust did not. It is now 1.4
+and 1.5.
+
 It currently supports live and retained-deleted JSON documents and raw files,
 canonical/custom metadata, Unix xattrs and UID/GID/mode, the existing Windows
 ADS manifest representation, schema-driven encrypted-field reads, portable

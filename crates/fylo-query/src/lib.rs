@@ -14,7 +14,7 @@ mod index;
 mod join;
 mod sql;
 
-pub use index::{IndexLookupValue, index_entries_for_document};
+pub use index::{IndexLookupValue, equality_prefix, index_entries_for_document};
 pub use join::{JoinComparator, JoinMode, JoinSpec, value_by_path};
 pub use sql::{AccessPath, SqlOperation, SqlPlan, prepare_sql};
 
@@ -486,6 +486,16 @@ impl StructuredQuery {
     #[must_use]
     pub const fn limit(&self) -> Option<usize> {
         self.limit
+    }
+
+    /// The query's alternative operations.
+    ///
+    /// A document matches when **any** operation matches, and an operation
+    /// matches when **every** field in it does, so a planner unions across
+    /// this slice and intersects within each entry.
+    #[must_use]
+    pub fn operations(&self) -> &[Map<String, Value>] {
+        &self.operations
     }
 }
 

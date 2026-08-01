@@ -79,6 +79,10 @@ The following passed on macOS arm64:
   snapshot TTID-ascending without repeats or losses; a live native session makes
   the JavaScript `acquireRootLease` fail with `EROOTLOCKED` and releases it
   cleanly on exit, and Rust and JavaScript agree on working-tree cleanliness.
+- `find` narrows through the prefix index for equality predicates and falls
+  back to a full document read for anything else, taking the 500-document
+  benchmark's Rust/JavaScript `find` ratio from 10.5 to 1.4 (p50); ten query
+  shapes, planned and unplanned, return the same rows as the current engine.
 - eight joins — every mode, projection, grouping, and identifiers-only —
   produce the same rows in Rust and in the current JavaScript engine on one
   root, compared key-sorted because row order follows each engine's document
