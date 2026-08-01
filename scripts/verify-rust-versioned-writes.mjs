@@ -134,7 +134,39 @@ try {
         javascriptStatus.clean === dirtyStatus.clean,
         'Rust and JavaScript disagree about working-tree cleanliness'
     )
+    // Both engines must describe the same uncommitted work. A diff that
+    // reported nothing would be indistinguishable from a clean tree, so the
+    // dirty state is compared before it is committed away.
+    const dirtyDiff = await machineDiff(machine)
+    const javascriptDiff = await repository.diff('HEAD', 'WORKTREE')
+    assert(
+        dirtyDiff.counts.total > 0,
+        'Rust diff reported no changes for a tree JavaScript calls dirty'
+    )
+    assert(
+        JSON.stringify(dirtyDiff.counts) === JSON.stringify(javascriptDiff.counts),
+        `Rust and JavaScript disagree on diff counts:\n  rust ${JSON.stringify(dirtyDiff.counts)}\n  js   ${JSON.stringify(javascriptDiff.counts)}`
+    )
+    assert(
+        dirtyDiff.from === javascriptDiff.from && dirtyDiff.to === javascriptDiff.to,
+        'Rust diff labelled the compared trees differently'
+    )
+    const changeKey = (change) =>
+        `${change.collection}/${change.kind}/${change.id}:${change.status}`
+    assert(
+        dirtyDiff.changes.map(changeKey).sort().join(',') ===
+            javascriptDiff.changes.map(changeKey).sort().join(','),
+        `Rust and JavaScript disagree on which documents changed:\n  rust ${dirtyDiff.changes.map(changeKey)}\n  js   ${javascriptDiff.changes.map(changeKey)}`
+    )
+
     await commit(binary, 'commit the uncommitted write')
+
+    // A committed tree has nothing left to differ from, and comparing a commit
+    // with itself must be empty however much history exists.
+    const cleanDiff = await machineDiff(machine)
+    assert(cleanDiff.counts.total === 0, 'Rust diff found changes in a committed tree')
+    const selfDiff = await machineDiff(machine, { from: created, to: created })
+    assert(selfDiff.counts.total === 0, 'Rust diff of a commit against itself is not empty')
 
     const repeated = await commit(binary, 'native document patch')
     assert(repeated === null, 'Rust auto-commit is not idempotent')
@@ -144,7 +176,15 @@ try {
     await rm(workspace, { recursive: true, force: true })
 }
 
+async function machineDiff(binary, request = {}) {
+    return await machineRequest(binary, { op: 'diff', ...request })
+}
+
 async function machineStatus(binary) {
+    return await machineRequest(binary, { op: 'status' })
+}
+
+async function machineRequest(binary, request) {
     const subprocess = Bun.spawn([binary, '--root', root], {
         cwd: process.cwd(),
         env: process.env,
@@ -152,7 +192,7 @@ async function machineStatus(binary) {
         stdout: 'pipe',
         stderr: 'pipe'
     })
-    subprocess.stdin.write(`${JSON.stringify({ op: 'status' })}\n`)
+    subprocess.stdin.write(`${JSON.stringify(request)}\n`)
     await subprocess.stdin.end()
     const [stdout, , exitCode] = await Promise.all([
         new Response(subprocess.stdout).text(),
@@ -161,7 +201,7 @@ async function machineStatus(binary) {
     ])
     if (exitCode !== 0) throw new Error('fylo-machine-preview failed')
     const frame = JSON.parse(stdout.trim().split('\n')[0])
-    if (!frame.ok) throw new Error(`status failed: ${JSON.stringify(frame.error)}`)
+    if (!frame.ok) throw new Error(`${request.op} failed: ${JSON.stringify(frame.error)}`)
     return frame.result
 }
 

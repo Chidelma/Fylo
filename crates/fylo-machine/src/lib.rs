@@ -272,6 +272,7 @@ impl Session {
             "delDocs" => self.delete_documents(request),
             "branch" => self.branches(request),
             "status" => self.status(request),
+            "diff" => self.diff(request),
             "schemaInspect" => self.schema_inspect(request),
             "schemaCurrent" => self.schema_current(request),
             "schemaHistory" => self.schema_history(request),
@@ -912,6 +913,23 @@ impl Session {
         }))
     }
 
+    fn diff(&self, request: &Value) -> Result<Value, MachineError> {
+        // The published defaults: what HEAD holds versus what is on disk now.
+        let from = request
+            .get("from")
+            .and_then(Value::as_str)
+            .unwrap_or("HEAD");
+        let to = request
+            .get("to")
+            .and_then(Value::as_str)
+            .unwrap_or("WORKTREE");
+        let diff = self
+            .writer(request)?
+            .repository_diff(from, to)
+            .map_err(|error| storage_error(&error))?;
+        serde_json::to_value(diff).map_err(|error| serialization_error(&error))
+    }
+
     fn status(&self, request: &Value) -> Result<Value, MachineError> {
         let status = self
             .writer(request)?
@@ -1086,8 +1104,9 @@ fn read_frame<R: BufRead>(
     }
 }
 
-const SUPPORTED_OPERATIONS: [&str; 31] = [
+const SUPPORTED_OPERATIONS: [&str; 32] = [
     "handshake",
+    "diff",
     "joinDocs",
     "backupStatus",
     "executeSQL",

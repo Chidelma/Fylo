@@ -24,7 +24,7 @@ engine. It does not replace the production JavaScript machine server.
 
 Reads: `handshake`, `getDoc`, `getLatest`, `getMeta`, `findDocs`,
 `findDeletedDocs`, `inspectCollection`, `verifyCollection`, `log`, `branch`,
-`status`, `backupStatus`, `schemaInspect`, `schemaCurrent`, `schemaHistory`,
+`status`, `diff`, `backupStatus`, `schemaInspect`, `schemaCurrent`, `schemaHistory`,
 `schemaDoctor`, `schemaValidate`, `joinDocs`, and `executeSQL` for `SELECT`.
 
 Writes: `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`,
@@ -122,6 +122,18 @@ not create. It also asserts that a contradicting kind is refused, that dropping
 twice reports `ENATIVE_NOT_FOUND`, and that `FYLO_SHARD_WIDTH` reaches the
 descriptor — with a width past the published maximum refused.
 
+`diff` compares two trees — `HEAD`, `WORKTREE`, or a commit identifier —
+without writing an object, reusing the hashing `status` already does. Only
+content decides a change, so a rewrite producing identical bytes is not one.
+Like `status` and `commit`, it covers the default branch worktree only; other
+branches are materialized in hidden worktrees the JavaScript engine owns.
+
+`bun run rust:interop:versioned` compares it against the JavaScript repository
+while the tree is dirty — counts, tree labels, and which documents changed —
+and asserts the change set is non-empty first, since a diff that reported
+nothing would be indistinguishable from a clean tree. It then confirms a
+committed tree and a commit compared with itself are both empty.
+
 `findDocs` is qualified differentially too, because it narrows through the
 prefix index and a wrong candidate set loses rows silently instead of erroring.
 Ten query shapes run through both engines on one root: shapes the index answers
@@ -144,8 +156,10 @@ truncation keeps follows from that same order.
 ## Limitations
 
 Cancellation, timeouts, signal handling, and stderr back-pressure are open
-Phase 7 gates, as are the seven operations this preview still answers with
-`EUNSUPPORTEDOP`: bulk import, repository checkout/diff/restore/merge,
-`schemaMaterialize`, and S3 backup reconciliation. Until the client corpus runs against exact compiled binaries,
+Phase 7 gates, as are the six operations this preview still answers with
+`EUNSUPPORTEDOP`: bulk import, repository checkout/restore/merge,
+`schemaMaterialize`, and S3 backup reconciliation. Bulk import stays a
+JavaScript capability by choice: it fetches a URL with integrity pinning, and a
+TLS stack does not belong in the storage engine for one operation. Until the client corpus runs against exact compiled binaries,
 this is not a substitute for the JavaScript server in a client's binary
 selection.

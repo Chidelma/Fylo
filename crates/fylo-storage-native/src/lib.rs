@@ -2035,7 +2035,7 @@ fn path_utf8_name<'a>(path: &'a Path, description: &str) -> Result<&'a str, Nati
         })
 }
 
-fn raw_file_identifier(filename: &str) -> Option<&str> {
+pub(crate) fn raw_file_identifier(filename: &str) -> Option<&str> {
     let identifier = filename.split_once('.').map_or(filename, |(id, _)| id);
     (!identifier.is_empty()
         && identifier

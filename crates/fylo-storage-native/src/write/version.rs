@@ -6,7 +6,7 @@
 //! moved. The incremental hinted path is a performance optimization of the
 //! same result, so the full scan is byte-compatible with it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,7 @@ use super::{
     CollectionWriteLock, NativeStorageError, NativeStorageErrorCode, NativeWriteRoot,
     durable_replace, failpoint, generate_ttid, read_bounded_json,
 };
+use crate::MAX_VERSION_TREE_BYTES;
 
 /// Bytes hashed for one content-addressed blob.
 const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
@@ -232,6 +233,167 @@ impl NativeWriteRoot {
         })
     }
 
+    /// Compare two trees without writing a single object.
+    ///
+    /// `from` and `to` each name `HEAD`, `WORKTREE`, or a commit identifier.
+    /// Only content decides a change: two documents at one key differ when
+    /// their hashes do, so a rewrite that produced identical bytes is not a
+    /// change and does not appear.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a repository that does not exist, a corrupt
+    /// object, an unknown reference, or a non-default branch worktree.
+    pub fn repository_diff(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<RepositoryDiff, NativeStorageError> {
+        let repository = self.path().join(".fylo-vcs");
+        if !repository.join("HEAD").is_file() {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::NotFound,
+                "FYLO root has no version repository",
+            ));
+        }
+        let (from_label, left) = self.resolve_tree(&repository, from)?;
+        let (to_label, right) = self.resolve_tree(&repository, to)?;
+
+        let mut counts = TreeChangeCounts::default();
+        let mut changes = Vec::new();
+        for key in left.keys().chain(right.keys()).collect::<BTreeSet<_>>() {
+            let (document, status) = match (left.get(key), right.get(key)) {
+                (None, Some(entry)) => (entry.clone(), "added"),
+                (Some(entry), None) => (entry.clone(), "deleted"),
+                (Some(before), Some(after)) if before.hash != after.hash => {
+                    (after.clone(), "modified")
+                }
+                _ => continue,
+            };
+            match status {
+                "added" => counts.added += 1,
+                "deleted" => counts.deleted += 1,
+                _ => counts.modified += 1,
+            }
+            changes.push(TreeChange { document, status });
+        }
+        counts.total = changes.len();
+        Ok(RepositoryDiff {
+            from: from_label,
+            to: to_label,
+            counts,
+            changes,
+        })
+    }
+
+    /// Resolve one reference to its labelled document tree.
+    fn resolve_tree(
+        &self,
+        repository: &Path,
+        reference: &str,
+    ) -> Result<(String, BTreeMap<String, TreeDocument>), NativeStorageError> {
+        let reference = reference.trim();
+        let branch = read_head_branch(repository)?;
+        if reference == "WORKTREE" {
+            if branch != DEFAULT_BRANCH {
+                // Another branch's worktree is materialized elsewhere, so this
+                // root's files say nothing about it.
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::Unsupported,
+                    "native diff supports only the default branch worktree",
+                ));
+            }
+            let entries = self.snapshot_working_tree(repository, false)?;
+            let mut tree = BTreeMap::new();
+            for entry in entries {
+                let kind = entry.namespace;
+                let namespace = namespace_directory(kind);
+                tree.insert(
+                    format!("{}/{kind}/{}", entry.collection, entry.filename),
+                    TreeDocument {
+                        path: Path::new(self.collection_data_directory(&entry.collection))
+                            .join(&entry.collection)
+                            .join(namespace)
+                            .join(crate::shard_of(&entry.identifier, entry.shard_width))
+                            .join(&entry.filename)
+                            .to_string_lossy()
+                            .into_owned(),
+                        collection: entry.collection,
+                        kind: kind.to_owned(),
+                        id: entry.identifier,
+                        hash: entry.hash,
+                    },
+                );
+            }
+            return Ok((format!("{branch}:WORKTREE"), tree));
+        }
+        if reference == "HEAD" {
+            let head = read_branch_reference(repository, &branch)?.head;
+            let tree = match head.as_deref() {
+                Some(head) => self.commit_tree(repository, head)?,
+                None => BTreeMap::new(),
+            };
+            return Ok((format!("{branch}:HEAD"), tree));
+        }
+        crate::validate_ttid_shape(reference)?;
+        Ok((
+            reference.to_owned(),
+            self.commit_tree(repository, reference)?,
+        ))
+    }
+
+    /// Flatten one commit's four-level tree back into its documents.
+    fn commit_tree(
+        &self,
+        repository: &Path,
+        commit: &str,
+    ) -> Result<BTreeMap<String, TreeDocument>, NativeStorageError> {
+        let mut tree = BTreeMap::new();
+        let Some(root) = read_commit_root(repository, commit)? else {
+            return Ok(tree);
+        };
+        for collection_node in read_tree_node(repository, &root)? {
+            let collection = collection_node.name;
+            // The committed tree does not record the namespace directory; the
+            // current descriptor is the authority for where it restores to.
+            let data_directory = Path::new(self.collection_data_directory(&collection));
+            for namespace_node in read_tree_node(repository, &collection_node.hash)? {
+                let namespace = namespace_node.name;
+                let kind = versioned_kind_for_directory(&namespace);
+                for shard_node in read_tree_node(repository, &namespace_node.hash)? {
+                    for blob in read_tree_node(repository, &shard_node.hash)? {
+                        if blob.kind != "blob" {
+                            continue;
+                        }
+                        let Some(identifier) = crate::raw_file_identifier(&blob.name) else {
+                            continue;
+                        };
+                        if crate::validate_ttid_shape(identifier).is_err() {
+                            continue;
+                        }
+                        tree.insert(
+                            format!("{collection}/{kind}/{}", blob.name),
+                            TreeDocument {
+                                path: data_directory
+                                    .join(&collection)
+                                    .join(&namespace)
+                                    .join(&shard_node.name)
+                                    .join(&blob.name)
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                collection: collection.clone(),
+                                kind: kind.to_owned(),
+                                id: identifier.to_owned(),
+                                hash: blob.hash,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        Ok(tree)
+    }
+
     fn snapshot_working_tree(
         &self,
         repository: &Path,
@@ -356,6 +518,17 @@ impl NativeWriteRoot {
             }
         }
         Ok(())
+    }
+
+    /// Namespace directory a collection's records live in.
+    ///
+    /// A committed tree does not record it, so the current descriptor is the
+    /// authority for where a commit's documents would restore to.
+    fn collection_data_directory(&self, collection: &str) -> &'static str {
+        match self.root.collection(collection) {
+            Ok(handle) if handle.kind() == crate::CollectionKind::File => ".buckets",
+            _ => ".collections",
+        }
     }
 
     fn is_versioned_collection(&self, collection: &str) -> bool {
@@ -491,6 +664,27 @@ fn write_tree(
     write_tree_node(repository, root_entries, persist).map(Some)
 }
 
+/// Inverse of [`namespace_directory`]: the kind a committed directory holds.
+fn versioned_kind_for_directory(namespace: &str) -> &'static str {
+    match namespace {
+        ".deleted" => "deleted",
+        _ => "active",
+    }
+}
+
+fn read_branch_reference(
+    repository: &Path,
+    branch: &str,
+) -> Result<BranchReference, NativeStorageError> {
+    read_bounded_json(
+        &repository
+            .join("refs")
+            .join("heads")
+            .join(format!("{branch}.json")),
+        MAX_METADATA_BYTES,
+    )
+}
+
 fn namespace_directory(kind: &str) -> &'static str {
     match kind {
         "active" => "docs",
@@ -537,6 +731,79 @@ fn object_path(repository: &Path, hash: &str) -> Result<PathBuf, NativeStorageEr
         ));
     }
     Ok(repository.join("objects").join(&hash[..2]).join(&hash[2..]))
+}
+
+/// One document as a tree records it, on either side of a diff.
+#[derive(Clone, Debug, Serialize)]
+pub struct TreeDocument {
+    /// Owning collection.
+    pub collection: String,
+    /// `active` or `deleted`.
+    pub kind: String,
+    /// Record identifier.
+    pub id: String,
+    /// Path relative to the root.
+    pub path: String,
+    /// Content hash.
+    pub hash: String,
+}
+
+/// One document's difference between two trees.
+#[derive(Clone, Debug, Serialize)]
+pub struct TreeChange {
+    /// The document, taken from the side that has it.
+    #[serde(flatten)]
+    pub document: TreeDocument,
+    /// `added`, `modified`, or `deleted`.
+    pub status: &'static str,
+}
+
+/// Counted differences between two trees.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct TreeChangeCounts {
+    /// Documents only the right side has.
+    pub added: usize,
+    /// Documents both sides have with different content.
+    pub modified: usize,
+    /// Documents only the left side has.
+    pub deleted: usize,
+    /// Every change.
+    pub total: usize,
+}
+
+/// One resolved comparison between two trees.
+#[derive(Clone, Debug, Serialize)]
+pub struct RepositoryDiff {
+    /// Label of the left side.
+    pub from: String,
+    /// Label of the right side.
+    pub to: String,
+    /// Change counts by status.
+    pub counts: TreeChangeCounts,
+    /// Every differing document, ordered by tree key.
+    pub changes: Vec<TreeChange>,
+}
+
+#[derive(Deserialize)]
+struct StoredTreeEntry {
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+    hash: String,
+}
+
+#[derive(Deserialize)]
+struct StoredTreeNode {
+    entries: Vec<StoredTreeEntry>,
+}
+
+fn read_tree_node(
+    repository: &Path,
+    hash: &str,
+) -> Result<Vec<StoredTreeEntry>, NativeStorageError> {
+    let node: StoredTreeNode =
+        read_bounded_json(&object_path(repository, hash)?, MAX_VERSION_TREE_BYTES)?;
+    Ok(node.entries)
 }
 
 fn read_commit_root(
