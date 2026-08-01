@@ -3,8 +3,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fylo_engine::{AccessContext, EngineErrorCode, ReadOnlyEngine};
-use fylo_query::{QueryLimits, ScanQuery, StructuredQuery};
+#[cfg(unix)]
+use fylo_engine::AccessContext;
+use fylo_engine::{EngineErrorCode, ReadOnlyEngine};
+use fylo_query::ScanQuery;
+#[cfg(unix)]
+use fylo_query::{QueryLimits, StructuredQuery};
 
 struct TestRoot(PathBuf);
 
