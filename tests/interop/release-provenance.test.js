@@ -54,4 +54,21 @@ describe('release recovery and supply-chain gates', () => {
             expect(workflow).not.toContain('tests/integration/s3-')
         }
     })
+
+    test('prebuilds compiled interop once and installs required macOS client tools', async () => {
+        const workflow = await readFile(path.join(root, '.github/workflows/publish.yml'), 'utf8')
+        const macos = workflow.slice(
+            workflow.indexOf('    macos-storage:'),
+            workflow.indexOf('    linux-storage:')
+        )
+        const interop = workflow.slice(
+            workflow.indexOf('    binary-interop:'),
+            workflow.indexOf('    version:')
+        )
+
+        expect(macos).toContain('shivammathur/setup-php@')
+        expect(macos).toContain('actions/setup-go@')
+        expect(interop).toContain('name: Build exact Rust release executable')
+        expect(interop).toContain("FYLO_SKIP_BINARY_BUILD: '1'")
+    })
 })

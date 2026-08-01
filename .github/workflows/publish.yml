@@ -130,6 +130,16 @@ jobs:
               with:
                   bun-version-file: .bun-version
 
+            - name: Setup PHP
+              uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+              with:
+                  php-version: '8.3'
+
+            - name: Setup Go
+              uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+              with:
+                  go-version: '1.22'
+
             - name: Install dependencies and vendor binaries
               run: |
                   bun install --frozen-lockfile
@@ -393,8 +403,15 @@ jobs:
                   rustc --version
                   go version
 
+            - name: Build exact Rust release executable
+              env:
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_BUILD_KIND: release
+              run: bun run build:exe
+
             - name: Run compiled binary interop tests
               env:
+                  FYLO_SKIP_BINARY_BUILD: '1'
                   FYLO_EXPECT_BUILD_KIND: release
                   FYLO_EXPECT_COMMIT: ${{ github.sha }}
               run: bun run test:interop
