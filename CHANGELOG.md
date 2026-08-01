@@ -1,20 +1,123 @@
 # Changelog
 
-## 26.30.05-1 - 2026-07-24
+## 26.31.06 - 2026-08-01
+
+### Breaking Changes
+
+- Native persistence, recovery, indexing, querying, schema management, version
+  control, and the NDJSON machine protocol now run in the Rust engine. The
+  retired JavaScript/Bun native engine is no longer a fallback or supported
+  embedding boundary; native applications use the executable and shipped
+  language clients.
+- Native storage is filesystem-only. Built-in S3 backup, restore, replication,
+  queueing, cache, and WORM surfaces were removed; operators use verified
+  filesystem snapshots or deployment-specific external tooling instead.
+
+### Added
+
+- A crash-recoverable Rust write engine for document and raw-file collections,
+  including transactions, tombstones, metadata, resharding, version history,
+  branching, restore/merge, schema workflows, SQL mutations, joins, and
+  zero-payload prefix indexes.
+- A portable Rust/Wasm query kernel for the local-only browser engine, with
+  OPFS and File System Access adapters, worker clients, deterministic
+  JavaScript compatibility fixtures, size budgets, and real-browser gates.
+- Nine native-binary language clients and browser/mobile shims with consistent
+  CRUD, metadata, POSTIX access, pagination, SQL, raw-file, schema, and version
+  control contracts.
+- Versioned `documentBuckets` and POSIX-only `machineAccess` handshake
+  capabilities so supervisors can negotiate raw-file and POSTIX behavior
+  before opening a production root (#88).
+- Release qualification against the previously published native binary,
+  including machine-semantic parity, upgrade/rollback coverage, crash matrices,
+  cross-target Clippy, model-checked soak runs, Miri, Wasm budgets, and exact
+  native artifacts on macOS, Linux, and Windows.
+
+### Changed
+
+- Document shards now use trailing TTID creation characters and support
+  collection-specific shard widths without changing document identity.
+- Query pagination uses bounded, process-scoped snapshots ordered by TTID;
+  restart and expiry behavior is advertised by the handshake.
+- The marketing site and standalone Explorer now document and exercise the
+  Rust-native and local-browser architecture, including a responsive
+  multi-language client guide and self-hosted Explorer artifact.
+
+### Security
+
+- Native path traversal, symlink/reparse-point escapes, root ownership,
+  metadata writes, encrypted reads, and POSTIX owner/group/other access checks
+  fail closed across supported local filesystems.
+- Durable writes retain opened-file identity and recover every qualified crash
+  transition; Windows uses native locking and ADS metadata while macOS/Linux
+  use native extended attributes.
+
+### Fixed
+
+- Disk pressure and extended-attribute failures are reported as stable,
+  retryable `ENATIVE_IO` frames. A failed mutation leaves the machine loop
+  synchronized, and validator children cannot keep client stdout open after
+  the parent exits (#89).
+- The marketing footer's Explorer link now leads to the browser guide, and
+  mobile navigation, documentation controls, and code tabs meet the 44-pixel
+  touch-target baseline without horizontal overflow.
+
+### Documentation
+
+- Replaced retired JavaScript-engine, S3, queue, cache, and WORM guidance with
+  native-engine architecture, filesystem snapshot/restore, capability
+  negotiation, error recovery, platform support, and release-provenance
+  documentation.
+
+## 26.30.06 - 2026-07-25
 
 ### Added
 
 - Every `ok: false` machine-protocol response now carries a stable, documented
   `error.code`: `EBADREQUEST` for request-shape/access/page validation
   failures, `EUNSUPPORTEDOP` for unknown operations, `EINVALIDDOCID` for
-  invalid document IDs, and the deterministic `EUNKNOWN` fallback for
-  unclassified engine failures (#79). The code set is additive and documented
-  in the machine-interface README.
+  invalid document IDs, `EARRAYOFOBJECTS` for documents the data model
+  rejects, `EDECRYPTFAILED` for undecryptable `$encrypted` fields, and the
+  deterministic `EUNKNOWN` fallback for unclassified engine failures (#79).
+  The code set is additive and documented in the machine-interface README.
+
+### Security
+
+- `$encrypted` fields now decrypt on every read path. Decryption registration
+  was loaded only when a process wrote, so a process that only read returned
+  the stored ciphertext with `ok: true`; read-only consumers such as replicas,
+  reporting jobs, and event-sourced startup replay silently received encrypted
+  blobs typed as ordinary strings (#84).
+- Reads of `$encrypted` fields fail closed. A missing key, a wrong key, or a
+  value that fails authentication now raises `EDECRYPTFAILED` naming the
+  collection and field instead of yielding the stored value.
+- Decryption failures no longer quote any part of the stored value, so a field
+  still holding a pre-encryption plaintext secret cannot echo it into an error
+  message or log.
+
+### Changed
+
+- Documents containing an array of objects are rejected before any disk work
+  with `EARRAYOFOBJECTS`, naming the offending field path and the rule. The
+  constraint was previously enforced mid-write during index building, which
+  surfaced as an unclassified failure claiming an incomplete rollback (#82).
+- The Explorer release gate accepts CalVer same-date suffixes (`YY.WW.DD-N`),
+  which previously blocked asset packaging for a second release in one day.
 
 ### Fixed
 
 - The pinned `fylo-web.mjs` browser example in the client shim guide now
   references the current release instead of 26.30.04.
+- A TTID timestamp test allowed only 1 ms of clock slack and failed
+  intermittently under full-suite load.
+
+### Documentation
+
+- The machine-interface README documents the stable error-code table, the
+  no-arrays-of-objects document-model rule, and read-path decryption
+  semantics. The `$encrypted` guide now shows the slash-separated nested field
+  path (`payload/verifier`); a dotted path is accepted as a literal field name
+  and silently leaves the field unencrypted.
 
 ## 26.30.05 - 2026-07-24
 

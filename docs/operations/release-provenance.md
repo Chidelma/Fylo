@@ -11,11 +11,9 @@ The release is blocked by tests of the exact packaged Linux x64, macOS arm64,
 macOS x64, and Windows x64 executables. Each executable must report release
 build identity and pass the canonical-alias, simultaneous-owner, stale-metadata,
 and crash-takeover root-lease contract before the artifact is passed to the
-release job. The compiled-language interoperability suite and live
-S3-compatible backup/verify/restore/corruption gate are also mandatory. The
-live gate retains its executable digest, runtime identity, host/filesystem
-identity, provider version, isolated object prefix, and test output for 90
-days.
+release job. The compiled-language interoperability suite is also mandatory.
+Its executable digest, runtime identity, host/filesystem identity, and test
+output are retained as release evidence.
 
 ## Verify an existing asset
 

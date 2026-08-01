@@ -1,0 +1,196 @@
+<style>
+    #home-content {
+        display: none;
+    }
+</style>
+
+<div class="doc-shell">
+    <docs-nav />
+
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Reference</span>
+        <h1>Machine protocol</h1>
+        <p class="doc-lede">
+            One JSON object in, one JSON object out. This is the canonical surface — every language
+            client is a thin wrapper over it, and anything a client can do, you can do from a shell.
+            No client invents behaviour the protocol does not have.
+        </p>
+
+        <div class="doc-section">
+            <h2>A request</h2>
+            <pre class="code-block"><code>{requestCode}</code></pre>
+            <pre class="code-block"><code>{responseCode}</code></pre>
+            <p>
+                Every response carries <code>protocolVersion</code>, <code>ok</code>, the
+                <code>op</code> it answered, and <code>durationMs</code>. A successful response
+                carries <code>result</code>; a failed one carries <code>error</code> with a
+                non-empty <code>code</code>.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Handshake first</h2>
+            <p>
+                Before sending ordinary operations, a supervisor can identify the exact runtime and
+                discover its framing contract. A handshake is side-effect-free: it does not create
+                the configured root or initialize a collection.
+            </p>
+            <pre class="code-block"><code>{handshakeCode}</code></pre>
+            <p>
+                It reports FYLO runtime and protocol versions, the immutable release commit and
+                build target, required CHEX and TTID versions with their current availability,
+                effective frame limits, and supported capabilities. Branch on capabilities, not on a
+                version string.
+            </p>
+            <p>
+                Capability records are versioned contracts.
+                <code>documentBuckets.version === 1</code>
+                identifies raw-file collection support and lists the operations, input forms, and
+                integrity level implemented by this runtime. On macOS and Linux,
+                <code>machineAccess.version === 1</code> lists the operations and denial semantics
+                covered by trusted POSTIX access. Its absence means the build does not provide that
+                authorization boundary. Reject a missing or unknown capability version before
+                touching a production root.
+            </p>
+        </div>
+
+        <div class="doc-section doc-section--wide">
+            <h2>Operations</h2>
+            <div class="doc-table-wrap">
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Group</th>
+                            <th>Operations</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <loop :for="let row of ops">
+                            <tr>
+                                <td>{row.group}</td>
+                                <td><code>{row.items}</code></td>
+                            </tr>
+                        </loop>
+                    </tbody>
+                </table>
+            </div>
+            <p>
+                An operation this runtime does not know returns <code>EUNSUPPORTEDOP</code> — the
+                set is additive across releases, so check the handshake rather than assuming.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Access context</h2>
+            <p>
+                Document and raw-file CRUD and query operations accept an optional
+                <code>access</code> object. Puts accept a UID, GID, and mode; reads, metadata,
+                queries, updates, deletes, and restores accept a UID. A trusted binary-backed
+                application may additionally include <code>groups</code> for virtual POSIX
+                membership.
+            </p>
+            <pre class="code-block"><code>{accessCode}</code></pre>
+            <p>
+                Denied direct operations return <code>EACCES</code>; collection queries omit
+                unreadable records instead of failing. See
+                <a href="/docs/security">Encryption &amp; access</a> for the trust boundary this
+                assumes.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Bounded NDJSON frames</h2>
+            <p>
+                Persistent loops use one UTF-8 JSON object per LF-delimited line. The secure
+                defaults are 1 MiB per request and 8 MiB per response; the delimiter does not count.
+                A supervisor may lower or raise them, up to 64 MiB, then confirm the effective
+                values in the handshake.
+            </p>
+            <pre class="code-block"><code>{framesCode}</code></pre>
+            <p>
+                FYLO uses a fixed-capacity input buffer. It rejects invalid UTF-8
+                (<code>EFRAME_UTF8</code>), malformed JSON (<code>EFRAME_JSON</code>), duplicate
+                object keys (<code>EFRAME_DUPLICATE_KEY</code>), and oversized requests
+                (<code>EFRAME_REQUEST_TOO_LARGE</code>). When an LF boundary is known it emits one
+                error response and safely resumes with the next frame. An incomplete final frame
+                returns <code>EFRAME_TRUNCATED</code> at EOF and the loop ends — retry it only after
+                starting a new child.
+            </p>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    Responses never silently cross the advertised maximum. If a client observes an
+                    oversized or malformed response despite the negotiated contract, it must kill
+                    and restart the child, because the framing can no longer be trusted.
+                </p>
+            </div>
+        </div>
+
+        <div class="doc-section">
+            <h2>Pagination</h2>
+            <p>
+                <code>findDocs</code> and <code>findDeletedDocs</code> support bounded continuation
+                on a persistent loop.
+            </p>
+            <pre class="code-block"><code>{pageCode}</code></pre>
+            <p>
+                The result is <code>items</code>, <code>nextCursor</code>, and <code>page</code>.
+                The first request materializes an immutable, process-scoped snapshot ordered by TTID
+                binary text, so concurrent mutations cannot duplicate or skip entries. Cursors are
+                scoped to the operation, collection, query, and access identity; they expire after
+                15 minutes and become invalid when the loop exits.
+            </p>
+            <p>
+                Unpaged operations that exceed the frame return
+                <code>EFRAME_RESPONSE_TOO_LARGE</code> while preserving stream synchronization. A
+                single item that cannot fit returns <code>EQUERYITEMTOOLARGE</code>; an oversized
+                snapshot returns <code>EQUERYSNAPSHOTTOOLARGE</code>. Snapshot state is private to
+                the native process, cleaned on completion, expiry, or shutdown, and capped at 1 GiB.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Exclusive root owner</h2>
+            <p>
+                Long-lived supervisors that require exactly one authoritative process can take a
+                root-wide lease.
+            </p>
+            <pre class="code-block"><code>{leaseCode}</code></pre>
+            <p>
+                FYLO canonicalizes the root, acquires a non-blocking kernel file lock before it
+                reads stdin, and holds it for the whole loop lifetime. A competing process receives
+                <code>EROOTLOCKED</code> and exits without executing a read or write. Normal
+                shutdown releases the lock; after a crash or <code>SIGKILL</code> the operating
+                system does. Persistent metadata is diagnostic and fencing state, not a PID-file
+                claim, so PID reuse and stale metadata cannot retain ownership. Every request
+                verifies the unique owner generation, and a replaced former owner fails closed with
+                <code>EROOTLEASELOST</code>.
+            </p>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    The lease is a kernel lock, not a distributed lock service. It is supported on
+                    native local filesystems on macOS, Linux, and Windows. Containers on one host
+                    can share it only when they share the same canonical bind-mounted root and host
+                    kernel lock domain. Network, clustered, object-backed, and independently
+                    synchronized filesystems — including Windows UNC shares — are unsupported; use
+                    an external lease or consensus service there.
+                </p>
+            </div>
+        </div>
+
+        <div class="doc-section">
+            <h2>Interop</h2>
+            <p>
+                The compiled executable's interop contract is tested in CI against Python, Ruby,
+                PHP, Dart, Java, C#, C++, Swift, Kotlin, and Rust. Each language invokes the same
+                <code>fylo exec</code> protocol, so non-JavaScript callers never depend on JS-only
+                conveniences such as the <code>sql</code> template tag or the
+                <code>db.&lt;collection&gt;</code> facade.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/cli">← CLI</a>
+            <a href="/docs/errors">Error codes →</a>
+        </div>
+    </div>
+</div>

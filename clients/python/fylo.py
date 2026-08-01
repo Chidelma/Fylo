@@ -30,7 +30,7 @@ class FyloError(RuntimeError):
 
 
 class Fylo:
-    def __init__(self, root, binary="fylo", worm=False):
+    def __init__(self, root, binary="fylo"):
         args = [
             binary,
             "exec",
@@ -42,8 +42,6 @@ class Fylo:
             "--max-response-bytes",
             str(MAX_RESPONSE_BYTES),
         ]
-        if worm:
-            args.append("--worm")
         self._proc = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,

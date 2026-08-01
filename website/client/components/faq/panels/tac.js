@@ -24,8 +24,8 @@ export default class extends Tac {
         },
         {
             key: 'replication',
-            q: 'How do I replicate to S3 or GCS?',
-            a: 'FYLO owns local storage and querying — the index is always local, never in the query path. For a hands-off backup, point sync.s3 at a dedicated bucket prefix and FYLO mirrors the whole root (documents, buckets, index, catalog, vcs) to S3: touched files are mirrored on write and reconcile() makes that prefix match the root exactly. Prefer your own client? onWrite / onDelete sync hooks still notify it in await-sync or fire-and-forget mode.'
+            q: 'How do I back up or replicate a root?',
+            a: 'FYLO is filesystem-only. Quiesce the writer, take a byte- and metadata-preserving snapshot of the complete root, and verify a restore into a new empty path. You can copy that snapshot with the storage or synchronization tool of your choice, but remote transport is deliberately outside the FYLO engine.'
         },
         {
             key: 'transactions',
@@ -40,7 +40,7 @@ export default class extends Tac {
         {
             key: 'groups',
             q: 'Can multiple users share a document or file?',
-            a: 'Yes. Write it with .as({ gid: editorsGid, mode: 0o660 }), then authenticated group members read, update, or delete with .as({ uid: memberUid }). FYLO resolves membership from the host POSIX group database or your trusted groupsForUid resolver. Binary-backed applications can also supply request-scoped virtual groups from authenticated server state; never accept those claims from an end-user payload. Group write permission is required — 0o600 remains owner-only.'
+            a: 'Yes. Write it with .as({ gid: editorsGid, mode: 0o660 }), then authenticated group members read, update, or delete with .as({ uid: memberUid }). FYLO resolves membership from the host POSIX group database. Binary-backed applications can also supply request-scoped virtual groups from authenticated server state; never accept those claims from an end-user payload. Group write permission is required — 0o600 remains owner-only.'
         }
     ]
 }

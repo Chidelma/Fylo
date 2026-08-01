@@ -107,19 +107,18 @@ The release evidence runner must refuse a stronger profile when:
 - observed metrics lack explicit pass/fail thresholds;
 - required compatibility, security, recovery, or provider evidence is absent.
 
-## Initial Rust rewrite status
+## Rust-native cutover status
 
-| Surface                               | Current rewrite status                      | Reason                                                            |
-| ------------------------------------- | ------------------------------------------- | ----------------------------------------------------------------- |
-| Existing JavaScript/Bun native engine | Unchanged from its current published matrix | The rewrite branch does not alter current support                 |
-| Rust portable crates                  | Experimental; local corpus passes           | Cross-platform retained evidence and broader fixtures are pending |
-| Rust native engine                    | Developer read-only preview; not a writer   | Document/file/tombstone/encrypted reads pass locally; Phase 4 is incomplete |
-| Rust/Wasm production kernel           | Experimental acceleration path              | Compiled integration/fallback passes; browser matrix is pending   |
-| JavaScript browser fallback           | Unchanged from its current published matrix | Remains required during migration                                 |
+| Surface                         | Current status                                      | Boundary                                                           |
+| ------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------ |
+| Rust native engine              | Sole native implementation; release-gated           | Storage, recovery, query, security, CLI, and machine protocol       |
+| Rust/Wasm portable kernel       | Browser acceleration path; browser-matrix gated     | Pure compute only; browser storage remains in the JavaScript adapter |
+| JavaScript browser runtime      | Supported browser integration surface               | OPFS/FSA, workers, and browser APIs                                  |
+| JavaScript/Bun native engine    | Removed                                             | No fallback executable or native CRUD implementation remains         |
 
-No accepted ADR or local test promotes a Rust surface by itself. Current
-implementation and evidence gaps are tracked in
-[`rust-rewrite-progress.md`](rust-rewrite-progress.md).
+No local test promotes a release by itself. The exact release must pass the
+applicable native, browser, interop, recovery, soak, and supply-chain gates.
+See [Native engine and release qualification](native-engine.md).
 
 ## Platform claim format
 

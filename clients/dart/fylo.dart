@@ -90,8 +90,7 @@ class Fylo {
   }
 
   /// Start a warm fylo process rooted at [root]. [binary] defaults to `fylo`.
-  static Future<Fylo> open(String root,
-      {String binary = 'fylo', bool worm = false}) async {
+  static Future<Fylo> open(String root, {String binary = 'fylo'}) async {
     final args = [
       'exec',
       '--loop',
@@ -100,8 +99,7 @@ class Fylo {
       '--max-request-bytes',
       '$maxRequestBytes',
       '--max-response-bytes',
-      '$maxResponseBytes',
-      if (worm) '--worm'
+      '$maxResponseBytes'
     ];
     final proc = await Process.start(binary, args);
     return Fylo._(proc, proc.stdin, proc.stdout);

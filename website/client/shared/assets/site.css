@@ -1,79 +1,594 @@
 /* ── FYLO brand theme over DuVay tokens ─────────────────────────────────── */
 html[w-theme] {
-  --w-primary: #f89b4b;
-  --w-on-primary: #1c1206;
-  --w-primary-container: rgba(248, 155, 75, 0.16);
-  --w-on-primary-container: #f89b4b;
-  /* DuVay 26.27+ ships square corners by default — FYLO uses soft radii. */
-  --w-radius-sm: 6px;
-  --w-radius: 10px;
-  --w-radius-md: 12px;
-  --w-radius-lg: 14px;
-  --w-radius-xl: 20px;
+    --w-primary: #f89b4b;
+    --w-on-primary: #1c1206;
+    --w-primary-container: rgba(248, 155, 75, 0.16);
+    --w-on-primary-container: #f89b4b;
+    /* DuVay 26.27+ ships square corners by default — FYLO uses soft radii. */
+    --w-radius-sm: 6px;
+    --w-radius: 10px;
+    --w-radius-md: 12px;
+    --w-radius-lg: 14px;
+    --w-radius-xl: 20px;
+    --fylo-stat-top: #ffc48a;
+    --fylo-key-kind: #4caf82;
+    --fylo-key-value: #7ab0ff;
 }
 
 html[w-theme='dark'] {
-  --w-surface: #0b0a08;
-  --w-surface-container-low: #14110c;
-  --w-surface-container-high: #1c1811;
-  --w-border: rgba(248, 155, 75, 0.14);
-  --w-divider: rgba(255, 255, 255, 0.08);
+    --w-surface: #0b0a08;
+    --w-surface-container-low: #14110c;
+    --w-surface-container-high: #1c1811;
+    --w-border: rgba(248, 155, 75, 0.14);
+    --w-divider: rgba(255, 255, 255, 0.08);
+}
+
+/* #f89b4b only reaches ~2.4:1 on white, so every orange label, chip, and code
+   token failed AA in light mode. Light mode uses a burnt orange instead —
+   same hue family, enough ink to read. */
+html[w-theme='light'] {
+    --w-primary: #b35a0a;
+    --w-on-primary: #ffffff;
+    --w-primary-container: rgba(248, 155, 75, 0.18);
+    --w-on-primary-container: #8a4304;
+    --fylo-stat-top: #e07b1a;
+    --fylo-key-kind: #1f7a53;
+    --fylo-key-value: #1f5aa8;
+}
+
+/* DuVay's tonal chip paints the accent colour on a 16%-tint of the same
+   accent — fine on dark, ~2:1 on light. Deepen the ink there. */
+html[w-theme='light'] .w-chip-tonal {
+    background: color-mix(in srgb, var(--w-chip-accent) 22%, var(--w-surface));
+    color: color-mix(in srgb, var(--w-chip-accent) 65%, #000);
 }
 
 html {
-  scroll-behavior: smooth;
+    scroll-behavior: smooth;
 }
 
 body {
-  margin: 0;
-  background: var(--w-surface);
-  color: var(--w-text);
-  font-family:
-    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    margin: 0;
+    background: var(--w-surface);
+    color: var(--w-text);
+    font-family:
+        ui-sans-serif,
+        system-ui,
+        -apple-system,
+        'Segoe UI',
+        Roboto,
+        'Helvetica Neue',
+        Arial,
+        sans-serif;
+    /* Light-on-dark text renders too heavy without this. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+    background: rgba(248, 155, 75, 0.3);
+    color: var(--w-text);
+}
+
+/* One consistent focus ring instead of the per-widget browser defaults. */
+:where(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--w-primary);
+    outline-offset: 2px;
+    border-radius: var(--w-radius-sm);
+}
+
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(248, 155, 75, 0.3) transparent;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: rgba(248, 155, 75, 0.28);
+    background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(248, 155, 75, 0.5);
+    background-clip: content-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html {
+        scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+    }
 }
 
 /* ── Layout helpers ─────────────────────────────────────────────────────── */
 .section {
-  padding: 4.5rem 1rem;
+    padding: clamp(4rem, 7vw, 6.5rem) 1rem;
 }
 .section-head {
-  max-width: 44rem;
-  margin: 0 auto 2.75rem;
-  text-align: center;
+    max-width: 44rem;
+    margin: 0 auto 3rem;
+    text-align: center;
 }
 .section-head h2 {
-  margin: 0.4rem 0 0.75rem;
-  font-size: clamp(1.6rem, 3.5vw, 2.25rem);
-  letter-spacing: -0.02em;
+    /* The eyebrow is inline-flex, so its own margin-bottom is ignored — the
+     heading owns the gap under it. */
+    margin: 0.9rem 0 0.85rem;
+    font-size: clamp(1.7rem, 4vw, 2.6rem);
+    line-height: 1.15;
+    letter-spacing: -0.025em;
+    /* Keep short headings from dropping a lone orphan word onto line two. */
+    text-wrap: balance;
 }
 .section-head p {
-  margin: 0;
-  color: var(--w-text-subtle);
-  line-height: 1.7;
+    margin: 0;
+    color: var(--w-text-subtle);
+    line-height: 1.75;
+    text-wrap: pretty;
 }
 .eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--w-primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.3rem 0.75rem;
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-pill, 999px);
+    background: var(--w-primary-container);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--w-on-primary-container, var(--w-primary));
+}
+.eyebrow::before {
+    content: '';
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+/* Was a self-closed `<hr class="w-divider">`, which fell back to the UA border
+   and painted a bright white rule across the dark footer. Lives here rather
+   than in the footer's own tac.css: Tachyon's scoped sheet never matched it. */
+.footer-rule {
+    height: 1px;
+    margin: 2rem 0 1.25rem;
+    background: var(--w-divider);
 }
 
 /* ── Code blocks ────────────────────────────────────────────────────────── */
 .code-block {
-  margin: 0;
-  padding: 1.1rem 1.25rem;
-  overflow-x: auto;
-  border: 1px solid var(--w-border);
-  border-radius: var(--w-radius-lg);
-  background: var(--w-surface-container-low);
-  font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.85rem;
-  line-height: 1.7;
-  color: var(--w-text);
-  white-space: pre;
-  text-align: left;
+    margin: 0;
+    padding: 1.1rem 1.25rem;
+    overflow-x: auto;
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-lg);
+    background:
+        linear-gradient(180deg, rgba(248, 155, 75, 0.05), transparent 40%),
+        var(--w-surface-container-low);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    line-height: 1.7;
+    color: var(--w-text);
+    white-space: pre;
+    text-align: left;
+}
+
+/* ── Marketing CTAs ─────────────────────────────────────────────────────── */
+/* Scoped to the marketing sections so the Explorer's dense toolbars keep flat
+   buttons. */
+:where(.hero-actions, .cta-actions, .header-row) .w-btn {
+    transition:
+        transform 0.18s ease,
+        box-shadow 0.18s ease,
+        border-color 0.18s ease;
+}
+:where(.hero-actions, .cta-actions, .header-row) .w-btn-filled {
+    box-shadow: 0 10px 26px -14px rgba(248, 155, 75, 0.9);
+}
+:where(.hero-actions, .cta-actions, .header-row) .w-btn:hover {
+    transform: translateY(-1px);
+}
+:where(.hero-actions, .cta-actions, .header-row) .w-btn-filled:hover {
+    box-shadow: 0 16px 32px -14px rgba(248, 155, 75, 1);
+}
+:where(.hero-actions, .cta-actions, .header-row) .w-btn:active {
+    transform: translateY(0);
+}
+
+/* ── Documentation ──────────────────────────────────────────────────────── */
+/* Lives in the global sheet rather than per-component: every /docs page and the
+   docs-nav component share this layout, and Tachyon scopes component CSS to the
+   component that declares it. */
+.doc-shell {
+    display: grid;
+    grid-template-columns: 15rem minmax(0, 1fr);
+    gap: clamp(1.5rem, 4vw, 3.5rem);
+    padding: clamp(1.75rem, 4vw, 2.75rem) clamp(1rem, 4vw, 1.5rem) clamp(3rem, 6vw, 4.5rem);
+}
+
+.doc-main {
+    min-width: 0;
+}
+
+.doc-page h1 {
+    margin: 0.9rem 0 0.85rem;
+    font-size: clamp(1.7rem, 5vw, 2.6rem);
+    line-height: 1.12;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+}
+
+.doc-lede {
+    max-width: 46rem;
+    margin: 0 0 3rem;
+    color: var(--w-text-subtle);
+    font-size: 1.02rem;
+    line-height: 1.75;
+    text-wrap: pretty;
+}
+
+.doc-section {
+    max-width: 54rem;
+    margin: 0 0 2.75rem;
+    scroll-margin-top: 5rem;
+}
+
+.doc-section--wide {
+    max-width: none;
+}
+
+.doc-section h2 {
+    margin: 0 0 0.85rem;
+    font-size: 1.3rem;
+    letter-spacing: -0.015em;
+}
+
+.doc-section h3 {
+    margin: 1.75rem 0 0.6rem;
+    font-size: 1.02rem;
+}
+
+.doc-section p,
+.doc-section li {
+    color: var(--w-text-subtle);
+    line-height: 1.78;
+    overflow-wrap: break-word;
+    text-wrap: pretty;
+}
+
+.doc-section p {
+    margin: 0 0 1rem;
+}
+
+.doc-section ul,
+.doc-section ol {
+    margin: 0 0 1rem;
+    padding-left: 1.2rem;
+}
+
+.doc-section li {
+    margin-bottom: 0.4rem;
+}
+
+.doc-section a:not(.w-btn) {
+    color: var(--w-primary);
+}
+
+.doc-section .code-block {
+    margin: 0 0 1rem;
+    white-space: pre-wrap;
+}
+
+/* Inline code needs to read as a token inside prose without competing with it. */
+.doc-section :not(pre) > code,
+.doc-lede code {
+    padding: 0.1rem 0.35rem;
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-sm);
+    background: var(--w-primary-container);
+    color: var(--w-on-primary-container, var(--w-primary));
+    font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.86em;
+}
+
+.doc-eyebrow-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.9rem;
+}
+
+.doc-note {
+    margin: 0 0 1rem;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid var(--w-border);
+    border-left: 3px solid var(--w-primary);
+    border-radius: var(--w-radius);
+    background: var(--w-surface-container-low);
+}
+
+.doc-note p {
+    margin: 0;
+    font-size: 0.92rem;
+}
+
+.doc-note p + p {
+    margin-top: 0.6rem;
+}
+
+.doc-note--warn {
+    border-left-color: #e2574c;
+}
+
+/* ── Docs tables ────────────────────────────────────────────────────────── */
+.doc-table-wrap {
+    margin: 0 0 1.25rem;
+    overflow-x: auto;
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-lg);
+}
+
+.doc-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+}
+
+.doc-table th,
+.doc-table td {
+    padding: 0.7rem 1rem;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--w-divider);
+}
+
+.doc-table thead th {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--w-text-subtle);
+    background: var(--w-surface-container-low);
+    white-space: nowrap;
+}
+
+.doc-table tbody tr:last-child th,
+.doc-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.doc-table td {
+    color: var(--w-text-subtle);
+}
+
+.doc-table code {
+    font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    color: var(--w-on-primary-container, var(--w-primary));
+    white-space: nowrap;
+}
+
+/* ── Docs sidebar ───────────────────────────────────────────────────────── */
+.doc-nav {
+    position: sticky;
+    top: 4.5rem;
+    align-self: start;
+    max-height: calc(100dvh - 6rem);
+    overflow-y: auto;
+    padding-right: 0.5rem;
+}
+
+.doc-nav-group + .doc-nav-group {
+    margin-top: 1.5rem;
+}
+
+.doc-nav-title {
+    margin: 0 0 0.5rem;
+    padding-left: 0.75rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--w-text-very-subtle);
+}
+
+.doc-nav-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.doc-nav-list a {
+    display: block;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--w-radius-sm);
+    color: var(--w-text-subtle);
+    text-decoration: none;
+    font-size: 0.89rem;
+    line-height: 1.4;
+    transition:
+        color 0.15s ease,
+        background 0.15s ease;
+}
+
+.doc-nav-list a:hover {
+    color: var(--w-text);
+    background: var(--w-surface-container-low);
+}
+
+/* `active` is set by delegated JS in imports.js, so it survives Tac rerenders. */
+.doc-nav-list a.active {
+    color: var(--w-on-primary-container, var(--w-primary));
+    background: var(--w-primary-container);
+    font-weight: 600;
+}
+
+/* ── Guide cards ────────────────────────────────────────────────────────── */
+.guide-row {
+    row-gap: var(--w-space-6);
+}
+
+.guide-card {
+    display: block;
+    height: 100%;
+    padding: 1.25rem;
+    box-sizing: border-box;
+    color: inherit;
+    text-decoration: none;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 60%);
+    transition:
+        transform 0.2s ease,
+        border-color 0.2s ease,
+        box-shadow 0.2s ease;
+}
+
+.guide-card:hover {
+    transform: translateY(-3px);
+    border-color: rgba(248, 155, 75, 0.38);
+    box-shadow: 0 22px 44px -28px rgba(0, 0, 0, 0.9);
+}
+
+.guide-card h3 {
+    margin: 0 0 0.45rem;
+    font-size: 1rem;
+    letter-spacing: -0.01em;
+}
+
+.guide-card p {
+    margin: 0;
+    color: var(--w-text-subtle);
+    font-size: 0.89rem;
+    line-height: 1.65;
+}
+
+.guide-arrow {
+    display: inline-block;
+    color: var(--w-primary);
+    transition: transform 0.2s ease;
+}
+
+.guide-card:hover .guide-arrow {
+    transform: translateX(3px);
+}
+
+.guide-tag {
+    display: inline-block;
+    margin-top: 0.65rem;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--w-text-very-subtle);
+}
+
+/* ── Prev/next pager ────────────────────────────────────────────────────── */
+.doc-pager {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: space-between;
+    max-width: 54rem;
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--w-divider);
+}
+
+.doc-pager a {
+    color: var(--w-primary);
+    text-decoration: none;
+    font-size: 0.92rem;
+}
+
+.doc-pager a:hover {
+    text-decoration: underline;
+}
+
+@media (max-width: 899.98px) {
+    .doc-shell {
+        grid-template-columns: minmax(0, 1fr);
+    }
+    /* The sidebar becomes a swipeable strip above the content rather than a
+     column that would eat half a phone screen. */
+    .doc-nav {
+        position: static;
+        max-height: none;
+        padding: 0 0 1rem;
+        margin-inline: calc(-1 * clamp(1rem, 4vw, 1.5rem));
+        border-bottom: 1px solid var(--w-divider);
+    }
+    .doc-nav-inner {
+        display: flex;
+        gap: 1.5rem;
+        overflow-x: auto;
+        padding-inline: clamp(1rem, 4vw, 1.5rem);
+        scrollbar-width: none;
+    }
+    .doc-nav-inner::-webkit-scrollbar {
+        display: none;
+    }
+    .doc-nav-group + .doc-nav-group {
+        margin-top: 0;
+    }
+    .doc-nav-list {
+        flex-direction: row;
+        gap: 0.25rem;
+    }
+    .doc-nav-list a {
+        display: inline-flex;
+        align-items: center;
+        min-width: 44px;
+        min-height: 44px;
+        white-space: nowrap;
+    }
+}
+
+/* ── Multi-language samples ─────────────────────────────────────────────── */
+.doc-sample {
+    margin: 0 0 1rem;
+}
+
+.doc-sample-langs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-bottom: 0.6rem;
+}
+
+.doc-sample-langs .w-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+@media (max-width: 599.98px) {
+    .doc-sample-langs .w-btn {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    /* Full-bleed swipeable strip — 13 languages never fit on a phone. */
+    .doc-sample-langs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        margin-inline: -1rem;
+        padding-inline: 1rem;
+        scroll-padding-inline: 1rem;
+        scrollbar-width: none;
+    }
+    .doc-sample-langs::-webkit-scrollbar {
+        display: none;
+    }
 }

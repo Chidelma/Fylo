@@ -2,15 +2,23 @@
 all-features = true
 
 [advisories]
-ignore = []
+# Owner: FYLO maintainers. Review/expiry: 2026-11-01.
+# Boa 0.21.1 uses `paste` only as a compile-time proc macro. RUSTSEC-2024-0436
+# reports that the crate is archived; it is not a memory-safety vulnerability
+# and no maintained Boa release without it exists. Remove this exception when
+# Boa replaces the macro dependency, or replace Boa before the review date.
+ignore = ["RUSTSEC-2024-0436"]
 
 [licenses]
 confidence-threshold = 0.8
 allow = [
     "Apache-2.0",
     "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
     "MIT",
     "Unicode-3.0",
+    "Zlib",
 ]
 
 [bans]

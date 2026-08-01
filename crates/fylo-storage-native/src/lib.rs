@@ -77,6 +77,8 @@ const RESERVED_COLLECTIONS: &[&str] = &[
 #[derive(Clone, Debug)]
 pub struct NativeRoot {
     canonical: PathBuf,
+    catalog_root: PathBuf,
+    repository_root: PathBuf,
 }
 
 impl NativeRoot {
@@ -87,7 +89,25 @@ impl NativeRoot {
     /// Returns an error when the root is absent, inaccessible, or not a
     /// directory.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NativeStorageError> {
-        let canonical = fs::canonicalize(path.as_ref()).map_err(NativeStorageError::io)?;
+        Self::open_with_roots(path.as_ref(), path.as_ref())
+    }
+
+    /// Open a materialized worktree whose catalog and version repository live
+    /// at a separate canonical FYLO root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either root is absent, inaccessible, or not a
+    /// directory.
+    pub fn open_with_repository(
+        path: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, NativeStorageError> {
+        Self::open_with_roots(path.as_ref(), repository_root.as_ref())
+    }
+
+    fn open_with_roots(path: &Path, repository_root: &Path) -> Result<Self, NativeStorageError> {
+        let canonical = fs::canonicalize(path).map_err(NativeStorageError::io)?;
         let metadata = fs::metadata(&canonical).map_err(NativeStorageError::io)?;
         if !metadata.is_dir() {
             return Err(NativeStorageError::new(
@@ -95,13 +115,39 @@ impl NativeRoot {
                 "FYLO root is not a directory",
             ));
         }
-        Ok(Self { canonical })
+        let repository_root = fs::canonicalize(repository_root).map_err(NativeStorageError::io)?;
+        if !fs::metadata(&repository_root)
+            .map_err(NativeStorageError::io)?
+            .is_dir()
+        {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::WrongType,
+                "FYLO repository root is not a directory",
+            ));
+        }
+        Ok(Self {
+            canonical,
+            catalog_root: repository_root.clone(),
+            repository_root,
+        })
     }
 
     /// Return the canonical root identity.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.canonical
+    }
+
+    /// Root that owns the unversioned collection catalog.
+    #[must_use]
+    pub fn catalog_root(&self) -> &Path {
+        &self.catalog_root
+    }
+
+    /// Root that owns `.fylo-vcs` metadata.
+    #[must_use]
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
     }
 
     /// Open one existing collection without modifying the root.
@@ -113,12 +159,26 @@ impl NativeRoot {
     pub fn collection(&self, name: &str) -> Result<NativeCollection, NativeStorageError> {
         validate_collection_name(name)?;
         let descriptor_path = self
-            .canonical
+            .catalog_root
             .join(".fylo-catalog")
             .join("collections")
             .join(format!("{name}.json"));
         let descriptor = if path_exists_no_follow(&descriptor_path)? {
-            let bytes = self.read_file(&descriptor_path, MAX_DESCRIPTOR_BYTES)?;
+            let metadata =
+                fs::symlink_metadata(&descriptor_path).map_err(NativeStorageError::io)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::UnsafePath,
+                    "collection descriptor is not a regular file",
+                ));
+            }
+            if metadata.len() > MAX_DESCRIPTOR_BYTES {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::FileTooLarge,
+                    "collection descriptor exceeds its size limit",
+                ));
+            }
+            let bytes = fs::read(&descriptor_path).map_err(NativeStorageError::io)?;
             serde_json::from_slice::<CollectionDescriptor>(&bytes).map_err(|error| {
                 NativeStorageError::new(
                     NativeStorageErrorCode::CorruptMetadata,
@@ -168,8 +228,7 @@ impl NativeRoot {
                 "version history limit must be between 1 and 1000",
             ));
         }
-        let head_path = self.canonical.join(".fylo-vcs").join("HEAD");
-        if !path_exists_no_follow(&head_path)? {
+        let Some((branch, reference)) = self.active_repository_reference()? else {
             return Ok(RepositoryHistory {
                 enabled: false,
                 branch: None,
@@ -177,51 +236,7 @@ impl NativeRoot {
                 commits: Vec::new(),
                 truncated: false,
             });
-        }
-        let head = String::from_utf8(self.read_file(&head_path, 4096)?).map_err(|error| {
-            NativeStorageError::new(
-                NativeStorageErrorCode::CorruptMetadata,
-                format!("FYLO repository HEAD is not valid UTF-8: {error}"),
-            )
-        })?;
-        let branch = head
-            .trim()
-            .strip_prefix("ref: refs/heads/")
-            .ok_or_else(|| {
-                NativeStorageError::new(
-                    NativeStorageErrorCode::CorruptMetadata,
-                    "FYLO repository HEAD is corrupt",
-                )
-            })?;
-        validate_branch_name(branch)?;
-        let reference_path = self
-            .canonical
-            .join(".fylo-vcs")
-            .join("refs")
-            .join("heads")
-            .join(format!("{branch}.json"));
-        let reference: BranchReference =
-            serde_json::from_slice(&self.read_file(&reference_path, MAX_VERSION_METADATA_BYTES)?)
-                .map_err(|error| {
-                NativeStorageError::new(
-                    NativeStorageErrorCode::CorruptMetadata,
-                    format!("FYLO branch ref is corrupt: {error}"),
-                )
-            })?;
-        if reference.name != branch {
-            return Err(NativeStorageError::new(
-                NativeStorageErrorCode::CorruptMetadata,
-                "FYLO branch ref name does not match HEAD",
-            ));
-        }
-        if let Some(head) = &reference.head {
-            validate_ttid_shape(head).map_err(|error| {
-                NativeStorageError::new(
-                    NativeStorageErrorCode::CorruptMetadata,
-                    format!("FYLO branch head is invalid: {error}"),
-                )
-            })?;
-        }
+        };
         let mut next = reference.head.clone();
         let mut seen = BTreeSet::new();
         let mut commits = Vec::new();
@@ -236,30 +251,87 @@ impl NativeRoot {
                 ));
             }
             let path = self
-                .canonical
+                .repository_root
                 .join(".fylo-vcs")
                 .join("commits")
                 .join(&identifier)
                 .join("manifest.json");
-            let commit: VersionCommit =
-                serde_json::from_slice(&self.read_file(&path, MAX_VERSION_METADATA_BYTES)?)
-                    .map_err(|error| {
-                        NativeStorageError::new(
-                            NativeStorageErrorCode::CorruptMetadata,
-                            format!("FYLO commit manifest is corrupt: {error}"),
-                        )
-                    })?;
+            let commit: VersionCommit = serde_json::from_slice(
+                &self.read_repository_file(&path, MAX_VERSION_METADATA_BYTES)?,
+            )
+            .map_err(|error| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    format!("FYLO commit manifest is corrupt: {error}"),
+                )
+            })?;
             commit.validate(&identifier)?;
             next = commit.parents.first().cloned();
             commits.push(commit);
         }
         Ok(RepositoryHistory {
             enabled: true,
-            branch: Some(branch.to_owned()),
+            branch: Some(branch),
             head: reference.head,
             commits,
             truncated: next.is_some(),
         })
+    }
+
+    fn active_repository_reference(
+        &self,
+    ) -> Result<Option<(String, BranchReference)>, NativeStorageError> {
+        let head_path = self.repository_root.join(".fylo-vcs").join("HEAD");
+        if !path_exists_no_follow(&head_path)? {
+            return Ok(None);
+        }
+        let head =
+            String::from_utf8(self.read_repository_file(&head_path, 4096)?).map_err(|error| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    format!("FYLO repository HEAD is not valid UTF-8: {error}"),
+                )
+            })?;
+        let branch = head
+            .trim()
+            .strip_prefix("ref: refs/heads/")
+            .ok_or_else(|| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    "FYLO repository HEAD is corrupt",
+                )
+            })?;
+        validate_branch_name(branch)?;
+        let reference_path = self
+            .repository_root
+            .join(".fylo-vcs")
+            .join("refs")
+            .join("heads")
+            .join(format!("{branch}.json"));
+        let reference: BranchReference = serde_json::from_slice(
+            &self.read_repository_file(&reference_path, MAX_VERSION_METADATA_BYTES)?,
+        )
+        .map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO branch ref is corrupt: {error}"),
+            )
+        })?;
+        if reference.name != branch {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                "FYLO branch ref name does not match HEAD",
+            ));
+        }
+        if let Some(head) = &reference.head {
+            validate_ttid_shape(head).map_err(|error| {
+                NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    format!("FYLO branch head is invalid: {error}"),
+                )
+            })?;
+        }
+        Ok(Some((branch.to_owned(), reference)))
     }
 
     /// Verify every commit, tree, and blob reachable from the active branch
@@ -356,20 +428,19 @@ impl NativeRoot {
             )
         })?;
         let path = self
-            .canonical
+            .repository_root
             .join(".fylo-vcs")
             .join("commits")
             .join(identifier)
             .join("manifest.json");
-        let commit: VersionCommit = serde_json::from_slice(
-            &self.read_file(&path, MAX_VERSION_METADATA_BYTES)?,
-        )
-        .map_err(|error| {
-            NativeStorageError::new(
-                NativeStorageErrorCode::CorruptMetadata,
-                format!("FYLO commit manifest is corrupt: {error}"),
-            )
-        })?;
+        let commit: VersionCommit =
+            serde_json::from_slice(&self.read_repository_file(&path, MAX_VERSION_METADATA_BYTES)?)
+                .map_err(|error| {
+                    NativeStorageError::new(
+                        NativeStorageErrorCode::CorruptMetadata,
+                        format!("FYLO commit manifest is corrupt: {error}"),
+                    )
+                })?;
         commit.validate(identifier)?;
         Ok(commit)
     }
@@ -380,19 +451,20 @@ impl NativeRoot {
         state: &mut VersionVerificationState,
     ) -> Result<(), NativeStorageError> {
         let tree_path = self
-            .canonical
+            .repository_root
             .join(".fylo-vcs")
             .join("commits")
             .join(identifier)
             .join("tree.json");
-        let pointer: VersionTreePointer =
-            serde_json::from_slice(&self.read_file(&tree_path, MAX_VERSION_METADATA_BYTES)?)
-                .map_err(|error| {
-                    NativeStorageError::new(
-                        NativeStorageErrorCode::CorruptMetadata,
-                        format!("FYLO commit tree pointer is corrupt: {error}"),
-                    )
-                })?;
+        let pointer: VersionTreePointer = serde_json::from_slice(
+            &self.read_repository_file(&tree_path, MAX_VERSION_METADATA_BYTES)?,
+        )
+        .map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO commit tree pointer is corrupt: {error}"),
+            )
+        })?;
         if let Some(root) = pointer.root {
             self.verify_version_tree_node(
                 root.as_str(),
@@ -506,7 +578,7 @@ impl NativeRoot {
     fn version_object_path(&self, hash: &str) -> Result<PathBuf, NativeStorageError> {
         validate_version_hash(hash)?;
         Ok(self
-            .canonical
+            .repository_root
             .join(".fylo-vcs")
             .join("objects")
             .join(&hash[..2])
@@ -525,14 +597,17 @@ impl NativeRoot {
             )
         })?;
         let mut current = self.canonical.clone();
-        for component in relative.components() {
+        let components = relative.components().collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
             let Component::Normal(segment) = component else {
                 return Err(NativeStorageError::new(
                     NativeStorageErrorCode::UnsafePath,
                     "storage path contains a non-normal component",
                 ));
             };
-            if !directory_contains_exact_name(&current, segment)? {
+            if !directory_contains_exact_name(&current, segment)?
+                && !Self::case_insensitive_shard_alias(&components, index)
+            {
                 return Err(NativeStorageError::new(
                     NativeStorageErrorCode::UnsafePath,
                     format!(
@@ -572,6 +647,79 @@ impl NativeRoot {
             ));
         }
         Ok(metadata)
+    }
+
+    fn case_insensitive_shard_alias(components: &[Component<'_>], index: usize) -> bool {
+        if !cfg!(any(target_os = "macos", windows)) || index != 3 || components.len() < 5 {
+            return false;
+        }
+        let normal = |at: usize| match components.get(at) {
+            Some(Component::Normal(value)) => value.to_str(),
+            _ => None,
+        };
+        let Some(data_directory) = normal(0) else {
+            return false;
+        };
+        let Some(namespace) = normal(2) else {
+            return false;
+        };
+        let Some(shard) = normal(3) else {
+            return false;
+        };
+        matches!(data_directory, ".collections" | ".buckets")
+            && matches!(namespace, "docs" | ".deleted" | ".metadata")
+            && (1..=MAX_SHARD_WIDTH as usize).contains(&shard.len())
+            && shard.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    }
+
+    fn read_repository_file(
+        &self,
+        target: &Path,
+        maximum: u64,
+    ) -> Result<Vec<u8>, NativeStorageError> {
+        let relative = target.strip_prefix(&self.repository_root).map_err(|_| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::UnsafePath,
+                "version path escapes the repository root",
+            )
+        })?;
+        let mut current = self.repository_root.clone();
+        for component in relative.components() {
+            let Component::Normal(segment) = component else {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::UnsafePath,
+                    "version path contains an unsafe component",
+                ));
+            };
+            if !directory_contains_exact_name(&current, segment)? {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::UnsafePath,
+                    "version path component has non-canonical spelling",
+                ));
+            }
+            current.push(segment);
+            let metadata = fs::symlink_metadata(&current).map_err(NativeStorageError::io)?;
+            if is_link_or_reparse(&metadata) {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::UnsafePath,
+                    "version path contains a symbolic link or reparse point",
+                ));
+            }
+        }
+        let metadata = fs::symlink_metadata(target).map_err(NativeStorageError::io)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::UnsafePath,
+                "version path is not a regular file",
+            ));
+        }
+        if metadata.len() > maximum {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::FileTooLarge,
+                "version file exceeds its size limit",
+            ));
+        }
+        fs::read(target).map_err(NativeStorageError::io)
     }
 
     fn read_file(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, NativeStorageError> {
@@ -1143,6 +1291,12 @@ impl NativeCollection {
             self.shard_width,
             &self.previous_shard_widths,
         )?;
+        if !path_exists_no_follow(&path)? {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::NotFound,
+                format!("document not found: {identifier}"),
+            ));
+        }
         let (mut file, metadata) = self.root.open_file(&path, MAX_DOCUMENT_BYTES)?;
         let attributes = read_fylo_attributes(&file, &path)?;
         let bytes = read_bounded(
@@ -1153,6 +1307,7 @@ impl NativeCollection {
         Ok(StoredBytes {
             bytes,
             modified_millis: modified_millis(&metadata)?,
+            modified_millis_exact: modified_millis_f64(&metadata)?,
             access: decode_access_descriptor(&attributes)?,
             path,
         })
@@ -1453,12 +1608,15 @@ impl NativeCollection {
 }
 
 /// Bounded stored bytes plus canonical native metadata.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StoredBytes {
     /// Document bytes.
     pub bytes: Vec<u8>,
     /// Filesystem modification time in Unix milliseconds.
     pub modified_millis: u64,
+    /// Filesystem modification time with the same fractional-millisecond
+    /// precision exposed by JavaScript `fs.stat().mtimeMs`.
+    pub modified_millis_exact: f64,
     /// Optional portable FYLO access descriptor.
     pub access: Option<AccessDescriptor>,
     /// Verified native path.
@@ -1614,7 +1772,7 @@ pub struct VersionCommit {
 }
 
 impl VersionCommit {
-    fn validate(&self, expected_identifier: &str) -> Result<(), NativeStorageError> {
+    pub(crate) fn validate(&self, expected_identifier: &str) -> Result<(), NativeStorageError> {
         if self.id != expected_identifier {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::CorruptMetadata,
@@ -2667,6 +2825,15 @@ mod tests {
     }
 
     #[test]
+    fn shards_by_the_trailing_creation_characters_and_keeps_the_legacy_candidate() {
+        let identifier = "4VRNF52JPCO-4VRNF52JPCP-4VRNF52JPCQ";
+        assert_eq!(shard_of(identifier, 2), "CO");
+        assert_eq!(shard_of(identifier, 3), "PCO");
+        assert_eq!(legacy_shard_of(identifier), "4V");
+        assert_eq!(shard_candidates(identifier, 2, &[]), ["CO", "4V"]);
+    }
+
+    #[test]
     fn reads_existing_documents_and_indexes_without_writes() {
         let fixture = TestRoot::create();
         let root = NativeRoot::open(&fixture.0).unwrap();
@@ -3090,6 +3257,17 @@ mod tests {
             NativeStorageErrorCode::FileTooLarge,
             "{error}"
         );
+    }
+
+    #[test]
+    fn preserves_a_stable_code_for_unknown_platform_io_errors() {
+        // The retired Bun/libc bridge could sample Darwin errno twice and
+        // surface an unrelated value such as 316. Rust owns the syscall now:
+        // even an OS code this platform cannot name remains a classified,
+        // retryable native I/O failure rather than escaping as EUNKNOWN.
+        let error = NativeStorageError::io(std::io::Error::from_raw_os_error(316));
+        assert_eq!(error.code(), NativeStorageErrorCode::Io);
+        assert!(error.to_string().starts_with("ENATIVE_IO:"));
     }
 
     #[test]

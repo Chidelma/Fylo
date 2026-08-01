@@ -72,7 +72,7 @@
                     <p>
                         File collections accept a <code>Blob</code>, <code>File</code>, or
                         <code>URL</code>
-                        with S3-style logical object keys, streamed back as bytes, blob, or stream.
+                        with path-style logical keys, streamed back as bytes, blob, or stream.
                     </p>
                 </article>
             </case>
@@ -157,7 +157,7 @@
                         <code>0o600</code> remains owner-only. The native binary and binary-backed
                         shims enforce it on macOS/Linux POSIX hosts. Windows, Browser, Explorer, and
                         WebView/mobile clients do not provide POSTIX and must use an authenticated
-                        native POSIX gateway. WORM (write-once) mode is enforced separately.
+                        native POSIX gateway.
                     </p>
                     <pre class="code-block"><code>{securityCode()}</code></pre>
                 </article>

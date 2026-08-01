@@ -127,9 +127,9 @@ pub struct CanonicalMetadata {
     /// TTID-derived creation time in Unix milliseconds.
     pub created_at: u64,
     /// Last document or metadata update in Unix milliseconds.
-    pub updated_at: u64,
+    pub updated_at: f64,
     /// Native file modification time in Unix milliseconds.
-    pub mtime: u64,
+    pub mtime: f64,
 }
 
 /// Timestamps encoded in a FYLO TTID.
@@ -220,9 +220,22 @@ impl CanonicalMetadata {
         let mut merged = custom.clone();
         merged.insert("id".into(), Value::String(self.id.clone()));
         merged.insert("createdAt".into(), Value::from(self.created_at));
-        merged.insert("updatedAt".into(), Value::from(self.updated_at));
-        merged.insert("mtime".into(), Value::from(self.mtime));
+        merged.insert("updatedAt".into(), javascript_number(self.updated_at));
+        merged.insert("mtime".into(), javascript_number(self.mtime));
         merged
+    }
+}
+
+fn javascript_number(value: f64) -> Value {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    if value.fract() == 0.0 && value >= 0.0 && value <= u64::MAX as f64 {
+        Value::from(value as u64)
+    } else {
+        Value::from(value)
     }
 }
 
@@ -460,8 +473,8 @@ mod tests {
         let canonical = CanonicalMetadata {
             id: "01document".into(),
             created_at: 10,
-            updated_at: 30,
-            mtime: 30,
+            updated_at: 30.0,
+            mtime: 30.0,
         };
 
         assert_eq!(

@@ -66,8 +66,10 @@ impl WriteAccess {
 }
 
 /// Options for a create-only native document put.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PutDocumentOptions {
+    /// Developer-defined typed metadata written in the create transaction.
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
     /// Optional owner/group/mode projection.
     pub access: WriteAccess,
 }
@@ -145,10 +147,31 @@ impl NativeWriteRoot {
         })
     }
 
+    /// Open a materialized worktree whose catalog and repository metadata live
+    /// at another canonical root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either root cannot be opened safely.
+    pub fn open_with_repository(
+        path: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, NativeStorageError> {
+        Ok(Self {
+            root: NativeRoot::open_with_repository(path, repository_root)?,
+        })
+    }
+
     /// Canonical root identity.
     #[must_use]
     pub fn path(&self) -> &Path {
         self.root.path()
+    }
+
+    /// Canonical root that owns the catalog and version metadata.
+    #[must_use]
+    pub fn repository_root(&self) -> &Path {
+        self.root.repository_root()
     }
 
     /// Recover one interrupted collection transaction.
@@ -203,7 +226,9 @@ impl NativeWriteRoot {
                 "document exceeds the native write limit",
             ));
         }
-        let access = options.access.validate()?;
+        let PutDocumentOptions { metadata, access } = options;
+        validate_custom_metadata(&metadata)?;
+        let access = access.validate()?;
         let collection = self.root.collection(collection_name)?;
         if collection.kind != CollectionKind::Document {
             return Err(NativeStorageError::new(
@@ -235,6 +260,17 @@ impl NativeWriteRoot {
             })?;
             ensure_directory(&self.root, parent)?;
             durable_replace(&target, &canonical)?;
+            for (name, value) in &metadata {
+                if value.is_null() {
+                    continue;
+                }
+                let encoded = serde_json::to_vec(value).map_err(|error| json_error(&error))?;
+                write_fylo_attribute(
+                    &target,
+                    &format!("{}{name}", super::META_XATTR_PREFIX),
+                    &encoded,
+                )?;
+            }
             apply_access(&target, access)?;
             transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
             transaction.capture(&collection.path.join("index").join("keys.wal"))?;
@@ -311,6 +347,9 @@ impl NativeWriteRoot {
             durable_replace(&target, bytes)?;
             write_fylo_attribute(&target, super::KEY_XATTR, options.key.as_bytes())?;
             for (name, value) in &options.metadata {
+                if value.is_null() {
+                    continue;
+                }
                 let encoded = serde_json::to_vec(value).map_err(|error| json_error(&error))?;
                 write_fylo_attribute(
                     &target,
@@ -603,7 +642,8 @@ impl NativeWriteRoot {
         finish_transaction(transaction, outcome, "access")
     }
 
-    /// Soft-delete one existing document into the retained tombstone tree.
+    /// Soft-delete one existing document or raw file into the retained
+    /// tombstone tree.
     ///
     /// # Errors
     ///
@@ -617,22 +657,18 @@ impl NativeWriteRoot {
     ) -> Result<(), NativeStorageError> {
         validate_ttid_shape(identifier)?;
         let collection = self.root.collection(collection_name)?;
-        if collection.kind != CollectionKind::Document {
-            return Err(NativeStorageError::new(
-                NativeStorageErrorCode::WrongType,
-                "delete_document requires a document collection",
-            ));
-        }
         let _lock = CollectionWriteLock::acquire(&collection.path)?;
         self.recover_locked(&collection)?;
-        let stored = collection.read_document(identifier)?;
-        require_write_access(stored.access, actor)?;
-        let source = stored.path;
+        let (source, access) = record_target(&collection, identifier)?;
+        require_write_access(access, actor)?;
+        let filename = source.file_name().ok_or_else(|| {
+            NativeStorageError::new(NativeStorageErrorCode::UnsafePath, "record has no filename")
+        })?;
         let target = collection
             .path
             .join(".deleted")
             .join(crate::shard_of(identifier, collection.shard_width()))
-            .join(format!("{identifier}.json"));
+            .join(filename);
         if path_exists_no_follow(&target)? {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::CorruptMetadata,
@@ -671,7 +707,7 @@ impl NativeWriteRoot {
         Ok(())
     }
 
-    /// Restore one retained tombstone back into the live document tree.
+    /// Restore one retained document or raw-file tombstone into the live tree.
     ///
     /// The record keeps its TTID and its portable access descriptor, matching
     /// the JavaScript `restore(id)` contract.
@@ -688,23 +724,41 @@ impl NativeWriteRoot {
         actor: Option<&WriteActor>,
     ) -> Result<(), NativeStorageError> {
         validate_ttid_shape(identifier)?;
-        let collection = self.document_collection(collection_name, "restore_document")?;
+        let collection = self.root.collection(collection_name)?;
         let _lock = CollectionWriteLock::acquire(&collection.path)?;
         self.recover_locked(&collection)?;
-        if collection.read_document(identifier).is_ok() {
-            return Err(NativeStorageError::new(
-                NativeStorageErrorCode::CorruptMetadata,
-                "cannot restore a document that already exists",
-            ));
+        match record_target(&collection, identifier) {
+            Ok(_) => {
+                return Err(NativeStorageError::new(
+                    NativeStorageErrorCode::CorruptMetadata,
+                    "cannot restore a record that already exists",
+                ));
+            }
+            Err(error) if error.code() == NativeStorageErrorCode::NotFound => {}
+            Err(error) => return Err(error),
         }
-        let deleted = collection.read_deleted_document(identifier)?;
-        require_write_access(deleted.access, actor)?;
-        let source = deleted_document_path(&collection, identifier);
+        let (source, access) = match collection.kind {
+            CollectionKind::Document => {
+                let deleted = collection.read_deleted_document(identifier)?;
+                (deleted.path, deleted.access)
+            }
+            CollectionKind::File => {
+                let deleted = collection.read_deleted_raw_file(identifier)?;
+                (deleted.path, deleted.access_descriptor)
+            }
+        };
+        require_write_access(access, actor)?;
+        let filename = source.file_name().ok_or_else(|| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::UnsafePath,
+                "retained record has no filename",
+            )
+        })?;
         let target = collection
             .path
             .join("docs")
             .join(crate::shard_of(identifier, collection.shard_width()))
-            .join(format!("{identifier}.json"));
+            .join(filename);
         let mut transaction = Transaction::begin(self, &collection, "restore-document")?;
         let outcome = (|| {
             transaction.capture(&source)?;
@@ -808,7 +862,7 @@ impl NativeWriteRoot {
     ) -> Result<(), NativeStorageError> {
         let path = self
             .root
-            .path()
+            .catalog_root()
             .join(".fylo-catalog")
             .join("collections")
             .join(format!("{collection}.json"));
@@ -849,6 +903,78 @@ impl NativeWriteRoot {
             transaction.commit()
         })();
         finish_transaction(transaction, outcome, "index rebuild")
+    }
+
+    /// Re-hash every active and deleted raw file without trusting its checksum
+    /// cache, matching the published `verifyCollection` machine operation.
+    /// Missing stamps are refreshed best-effort; mismatched stamps are retained
+    /// as evidence of the expected bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-file collection, unsafe paths, malformed
+    /// metadata, oversized files, or I/O failures other than a file that
+    /// vanished during the scan.
+    pub fn verify_file_collection(
+        &self,
+        collection_name: &str,
+    ) -> Result<Value, NativeStorageError> {
+        let collection = self.root.collection(collection_name)?;
+        if collection.kind != CollectionKind::File {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::WrongType,
+                "verifyCollection requires a file collection",
+            ));
+        }
+        let namespaces = [
+            (
+                "active",
+                collection.path.join("docs"),
+                collection.raw_file_ids()?,
+            ),
+            (
+                "deleted",
+                collection.path.join(".deleted"),
+                collection.deleted_raw_file_ids()?,
+            ),
+        ];
+        let mut files_scanned = 0_usize;
+        let mut verified = 0_usize;
+        let mut stamped = 0_usize;
+        let mut corrupt = Vec::new();
+        for (namespace, root, identifiers) in namespaces {
+            for identifier in identifiers {
+                let check = match verify_raw_file_checksum(&collection, &root, &identifier) {
+                    Ok(check) => check,
+                    Err(error) if error.code() == NativeStorageErrorCode::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                files_scanned += 1;
+                match check.expected {
+                    Some(expected) if expected != check.actual => corrupt.push(serde_json::json!({
+                        "id": identifier,
+                        "namespace": namespace,
+                        "expected": expected,
+                        "actual": check.actual,
+                    })),
+                    Some(_) => verified += 1,
+                    None => {
+                        // The checksum is a rebuildable cache. A read-only file
+                        // can still be verified even when the cache cannot be
+                        // refreshed, exactly like the JavaScript engine.
+                        let _ = stamp_raw_file_checksum(&check.path, &check.actual);
+                        stamped += 1;
+                    }
+                }
+            }
+        }
+        Ok(serde_json::json!({
+            "collection": collection_name,
+            "filesScanned": files_scanned,
+            "verified": verified,
+            "stamped": stamped,
+            "corrupt": corrupt,
+        }))
     }
 
     /// Open one collection, or report that there is none.
@@ -913,7 +1039,11 @@ impl NativeWriteRoot {
             ));
         }
 
-        let catalog = self.root.path().join(".fylo-catalog").join("collections");
+        let catalog = self
+            .root
+            .catalog_root()
+            .join(".fylo-catalog")
+            .join("collections");
         let descriptor_path = catalog.join(format!("{collection_name}.json"));
         // An existing collection keeps the width it was built with: the layout
         // is a property of the root, and the environment only chooses for a
@@ -923,7 +1053,7 @@ impl NativeWriteRoot {
             None => super::configured_shard_width()?,
         };
         if existing.is_none() {
-            ensure_directory(&self.root, &catalog)?;
+            fs::create_dir_all(&catalog).map_err(NativeStorageError::io)?;
             let mut descriptor = Map::new();
             descriptor.insert("version".into(), Value::from(1));
             descriptor.insert(
@@ -995,7 +1125,7 @@ impl NativeWriteRoot {
         remove_dir_durable(&collection.path)?;
         let descriptor_path = self
             .root
-            .path()
+            .catalog_root()
             .join(".fylo-catalog")
             .join("collections")
             .join(format!("{collection_name}.json"));
@@ -1061,7 +1191,10 @@ impl NativeWriteRoot {
                 &plan.collection,
                 &identifier,
                 &encoded,
-                PutDocumentOptions { access },
+                PutDocumentOptions {
+                    access,
+                    ..PutDocumentOptions::default()
+                },
             ) {
                 Ok(()) => {
                     return Ok(SqlMutationResult {
@@ -1265,6 +1398,56 @@ impl NativeWriteRoot {
         durable_replace(&index.join("keys.wal"), b"")?;
         Ok(())
     }
+}
+
+struct RawChecksumCheck {
+    path: PathBuf,
+    expected: Option<String>,
+    actual: String,
+}
+
+fn verify_raw_file_checksum(
+    collection: &super::NativeCollection,
+    namespace: &Path,
+    identifier: &str,
+) -> Result<RawChecksumCheck, NativeStorageError> {
+    let path = collection.find_raw_file_path(namespace, identifier)?;
+    let (mut file, _) = collection
+        .root
+        .open_file(&path, super::MAX_RAW_FILE_BYTES)?;
+    let attributes = super::read_fylo_attributes(&file, &path)?;
+    let bytes = super::read_bounded(
+        (&mut file).take(super::MAX_RAW_FILE_BYTES.saturating_add(1)),
+        super::MAX_RAW_FILE_BYTES,
+    )?;
+    collection.root.verify_open_file_identity(&path, &file)?;
+    let expected = attributes
+        .get(super::CHECKSUM_XATTR)
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .and_then(|stamp| stamp.split(':').next())
+        .filter(|checksum| {
+            checksum.len() == 64
+                && checksum
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .map(ToOwned::to_owned);
+    Ok(RawChecksumCheck {
+        path,
+        expected,
+        actual: super::sha256_hex(&bytes),
+    })
+}
+
+fn stamp_raw_file_checksum(path: &Path, checksum: &str) -> Result<(), NativeStorageError> {
+    let metadata = fs::metadata(path).map_err(NativeStorageError::io)?;
+    let stamp = format!(
+        "{checksum}:{}:{}",
+        metadata.len(),
+        super::modified_millis(&metadata)?
+    );
+    write_fylo_attribute(path, super::CHECKSUM_XATTR, stamp.as_bytes())?;
+    restore_modified(path, &metadata)
 }
 
 #[derive(Debug)]
@@ -2414,11 +2597,29 @@ fn remove_fylo_attribute(path: &Path, name: &str) -> Result<(), NativeStorageErr
         .map_err(NativeStorageError::io)?;
     match file.remove_xattr(name) {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if missing_xattr(&error) => return Ok(()),
         Err(error) => return Err(NativeStorageError::io(error)),
     }
     file.sync_all().map_err(NativeStorageError::io)?;
     failpoint("after-metadata-write")
+}
+
+#[cfg(unix)]
+fn missing_xattr(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return true;
+    }
+    // `xattr` preserves the platform errno for an absent name. Darwin's
+    // ENOATTR and Linux/Android's ENODATA are both ErrorKind::Other.
+    #[cfg(target_vendor = "apple")]
+    if error.raw_os_error() == Some(93) {
+        return true;
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if error.raw_os_error() == Some(61) {
+        return true;
+    }
+    false
 }
 
 #[cfg(windows)]
@@ -3063,6 +3264,13 @@ fn failpoint(name: &str) -> Result<(), NativeStorageError> {
         Some("enospc") => Err(NativeStorageError::io(std::io::Error::from_raw_os_error(
             DISK_FULL_ERRNO,
         ))),
+        // A filesystem or project quota can be exhausted while the underlying
+        // volume still has free blocks. It follows the same in-process
+        // rollback contract as ENOSPC, but carries a distinct native error so
+        // the matrix proves neither platform path is accidentally special.
+        Some("edquot") => Err(NativeStorageError::io(std::io::Error::from_raw_os_error(
+            DISK_QUOTA_ERRNO,
+        ))),
         _ => Err(NativeStorageError::new(
             NativeStorageErrorCode::Io,
             format!("injected FYLO Rust failpoint: {name}"),
@@ -3075,6 +3283,16 @@ fn failpoint(name: &str) -> Result<(), NativeStorageError> {
 const DISK_FULL_ERRNO: i32 = 112;
 #[cfg(not(windows))]
 const DISK_FULL_ERRNO: i32 = 28;
+
+/// `ERROR_DISK_QUOTA_EXCEEDED` on Windows.
+#[cfg(windows)]
+const DISK_QUOTA_ERRNO: i32 = 1_295;
+/// `EDQUOT` on Linux and Android.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const DISK_QUOTA_ERRNO: i32 = 122;
+/// `EDQUOT` on Darwin and the BSD family supported by Rust.
+#[cfg(all(not(windows), not(any(target_os = "linux", target_os = "android"))))]
+const DISK_QUOTA_ERRNO: i32 = 69;
 
 fn json_error(error: &serde_json::Error) -> NativeStorageError {
     NativeStorageError::new(
@@ -3124,6 +3342,12 @@ mod tests {
         assert_eq!(
             collection.read_document("4VRNF52JPCO").unwrap().bytes,
             br#"{"name":"Ada","score":42}"#
+        );
+        assert!(
+            fixture
+                .0
+                .join(".collections/users/docs/CO/4VRNF52JPCO.json")
+                .is_file()
         );
         assert_eq!(collection.generation().unwrap().generation, 2);
         assert_eq!(
@@ -3275,6 +3499,41 @@ mod tests {
     }
 
     #[test]
+    fn document_put_writes_initial_metadata_and_skips_null_names() {
+        let fixture = TestRoot::create();
+        let writer = NativeWriteRoot::open(&fixture.0).unwrap();
+        writer
+            .put_document(
+                "users",
+                "4VRNF52JPCO",
+                br#"{"name":"Ada"}"#,
+                PutDocumentOptions {
+                    metadata: serde_json::from_value(json!({
+                        "source": "native-put",
+                        "absent": null
+                    }))
+                    .unwrap(),
+                    ..PutDocumentOptions::default()
+                },
+            )
+            .unwrap();
+        let target = writer
+            .root
+            .collection("users")
+            .unwrap()
+            .read_document("4VRNF52JPCO")
+            .unwrap()
+            .path;
+        let file = File::open(&target).unwrap();
+        let attributes = super::super::read_fylo_attributes(&file, &target).unwrap();
+        assert_eq!(
+            attributes.get("user.fylo.meta.source").map(Vec::as_slice),
+            Some(&br#""native-put""#[..])
+        );
+        assert!(!attributes.contains_key("user.fylo.meta.absent"));
+    }
+
+    #[test]
     fn metadata_merges_removes_and_advances_the_update_stamp() {
         let fixture = TestRoot::create();
         let writer = NativeWriteRoot::open(&fixture.0).unwrap();
@@ -3295,6 +3554,16 @@ mod tests {
             )
             .unwrap();
         let first = read_meta_stamp(&writer, "4VRNF52JPCO");
+        writer
+            .set_record_metadata(
+                "users",
+                "4VRNF52JPCO",
+                &serde_json::from_value(json!({"draft": Value::Null})).unwrap(),
+                None,
+            )
+            .unwrap();
+        // Removing an already-absent xattr is idempotent on every supported
+        // Unix platform; Darwin reports ENOATTR as ErrorKind::Other.
         writer
             .set_record_metadata(
                 "users",
@@ -3504,6 +3773,7 @@ mod tests {
                         gid: Some(gid),
                         mode: Some(0o660),
                     },
+                    ..PutDocumentOptions::default()
                 },
             )
             .unwrap();

@@ -23,7 +23,6 @@ AGENTS.md
 # Untrack markdown except README
 *.md
 !README.md
-!ops/s3-backup.md
 !docs/**/*.md
 !examples/
 !examples/**/*.md
@@ -36,3 +35,5 @@ dist-staging-*
 src/browser/wasm/target/
 benchmarks/
 coverage/
+test-results/
+playwright-report/

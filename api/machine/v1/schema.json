@@ -25,8 +25,6 @@
                     "type": "string",
                     "enum": [
                         "handshake",
-                        "backupStatus",
-                        "backupReconcile",
                         "executeSQL",
                         "createCollection",
                         "dropCollection",

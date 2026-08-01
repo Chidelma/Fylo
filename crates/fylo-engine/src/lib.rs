@@ -12,15 +12,18 @@ use std::fmt;
 use std::path::Path;
 
 use encryption::{EncryptionReader, is_encrypted_field, reject_undeclared_ciphertext};
-use fylo_format::{CanonicalMetadata, Document, DocumentLimits, FormatError, decode_ttid};
+use fylo_format::{
+    CanonicalMetadata, Document, DocumentLimits, FormatError, FormatErrorCode, decode_ttid,
+};
 use fylo_query::{
-    IndexLookupValue, JoinSpec, QueryError, QueryLimits, ScanQuery, SqlOperation, SqlPlan,
-    StructuredQuery, index_entries_for_document,
+    IndexLookupValue, JoinSpec, QueryError, QueryErrorCode, QueryLimits, ScanQuery, SqlOperation,
+    SqlPlan, StructuredQuery, index_entries_for_document,
 };
 use fylo_storage_native::{
     AccessDescriptor, CollectionKind, GenerationStatus, IndexVerification, NativeAccess,
-    NativeCollection, NativeRoot, NativeStorageError, NativeWriteRoot, PutDocumentOptions,
-    RepositoryHistory, StoredRawFile, VersionVerification, WriteAccess, WriteActor,
+    NativeCollection, NativeRoot, NativeStorageError, NativeStorageErrorCode, NativeWriteRoot,
+    PutDocumentOptions, RepositoryHistory, StoredRawFile, VersionVerification, WriteAccess,
+    WriteActor,
 };
 use schema::SchemaTools;
 use serde::Serialize;
@@ -64,6 +67,24 @@ impl WriteEngine {
         })
     }
 
+    /// Open a materialized branch worktree with catalog and repository
+    /// metadata owned by the canonical root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either root cannot be opened safely.
+    pub fn open_with_repository(
+        path: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, EngineError> {
+        Ok(Self {
+            writer: NativeWriteRoot::open_with_repository(path, repository_root)
+                .map_err(EngineError::storage)?,
+            encryption: None,
+            schema: None,
+        })
+    }
+
     /// Open a write engine with schema tooling but no decryption key.
     ///
     /// Schema inspection and validation work; a collection that declares
@@ -79,6 +100,27 @@ impl WriteEngine {
         let schema_root = schema_root.as_ref().to_path_buf();
         Ok(Self {
             writer: NativeWriteRoot::open(path).map_err(EngineError::storage)?,
+            encryption: Some(
+                EncryptionReader::open(&schema_root, None).map_err(EngineError::encryption)?,
+            ),
+            schema: Some(std::rc::Rc::new(SchemaTools::new(schema_root))),
+        })
+    }
+
+    /// Open a materialized branch worktree with schema tooling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a root or schema boundary cannot be opened safely.
+    pub fn open_with_repository_and_schema(
+        path: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+        schema_root: impl AsRef<Path>,
+    ) -> Result<Self, EngineError> {
+        let schema_root = schema_root.as_ref().to_path_buf();
+        Ok(Self {
+            writer: NativeWriteRoot::open_with_repository(path, repository_root)
+                .map_err(EngineError::storage)?,
             encryption: Some(
                 EncryptionReader::open(&schema_root, None).map_err(EngineError::encryption)?,
             ),
@@ -109,6 +151,31 @@ impl WriteEngine {
         })
     }
 
+    /// Open a materialized branch worktree with schema-driven encryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe roots, schema failures, or invalid
+    /// encryption credentials.
+    pub fn open_with_repository_and_encryption(
+        path: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+        schema_root: impl AsRef<Path>,
+        secret: &str,
+        salt: &str,
+    ) -> Result<Self, EngineError> {
+        let schema_root = schema_root.as_ref().to_path_buf();
+        Ok(Self {
+            writer: NativeWriteRoot::open_with_repository(path, repository_root)
+                .map_err(EngineError::storage)?,
+            encryption: Some(
+                EncryptionReader::open(&schema_root, Some((secret, salt)))
+                    .map_err(EngineError::encryption)?,
+            ),
+            schema: Some(std::rc::Rc::new(SchemaTools::new(schema_root))),
+        })
+    }
+
     /// Canonical root identity.
     #[must_use]
     pub fn root_path(&self) -> &Path {
@@ -128,13 +195,30 @@ impl WriteEngine {
         fields: Map<String, Value>,
         access: WriteAccess,
     ) -> Result<(), EngineError> {
+        self.put_document_with_metadata(collection, identifier, fields, BTreeMap::new(), access)
+    }
+
+    /// Create one document with developer metadata in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid document or metadata values, missing
+    /// encryption credentials, or any durable write failure.
+    pub fn put_document_with_metadata(
+        &self,
+        collection: &str,
+        identifier: &str,
+        fields: Map<String, Value>,
+        metadata: BTreeMap<String, Value>,
+        access: WriteAccess,
+    ) -> Result<(), EngineError> {
         let bytes = self.encode(collection, fields)?;
         self.writer
             .put_document(
                 collection,
                 identifier,
                 &bytes,
-                PutDocumentOptions { access },
+                PutDocumentOptions { metadata, access },
             )
             .map_err(EngineError::storage)
     }
@@ -217,6 +301,23 @@ impl WriteEngine {
             .validate_against_head(collection, document)
             .map_err(EngineError::schema)?
             .unwrap_or_else(|| document.clone()))
+    }
+
+    /// Materialize one document at the head schema version by executing the
+    /// collection's ordered JavaScript upgrader chain in the embedded runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the manifest or upgrader chain is invalid, an
+    /// upgrader throws, or an upgrader does not return a JSON object.
+    pub fn schema_materialize(
+        &self,
+        collection: &str,
+        document: &Map<String, Value>,
+    ) -> Result<Map<String, Value>, EngineError> {
+        self.schema_tools()?
+            .materialize(collection, document)
+            .map_err(EngineError::schema)
     }
 
     fn schema_tools(&self) -> Result<&SchemaTools, EngineError> {
@@ -305,6 +406,23 @@ impl ReadOnlyEngine {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EngineError> {
         Ok(Self {
             root: NativeRoot::open(path).map_err(EngineError::storage)?,
+            encryption: None,
+        })
+    }
+
+    /// Open a materialized branch worktree whose catalog and repository live
+    /// at the canonical root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either root cannot be opened safely.
+    pub fn open_with_repository(
+        path: impl AsRef<Path>,
+        repository_root: impl AsRef<Path>,
+    ) -> Result<Self, EngineError> {
+        Ok(Self {
+            root: NativeRoot::open_with_repository(path, repository_root)
+                .map_err(EngineError::storage)?,
             encryption: None,
         })
     }
@@ -430,8 +548,8 @@ impl ReadOnlyEngine {
                 metadata: CanonicalMetadata {
                     id: identifier.to_owned(),
                     created_at: timestamps.created_at,
-                    updated_at: stored.modified_millis,
-                    mtime: stored.modified_millis,
+                    updated_at: stored.modified_millis_exact,
+                    mtime: stored.modified_millis_exact,
                 },
                 document,
             })
@@ -448,17 +566,44 @@ impl ReadOnlyEngine {
     /// Returns an error for a missing record, corrupt metadata, an unsafe
     /// path, or denied access.
     pub fn metadata(&self, collection: &str, identifier: &str) -> Result<Value, EngineError> {
+        self.metadata_with_access(collection, identifier, None)
+    }
+
+    /// Canonical plus developer metadata checked as one trusted actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::metadata`], including `EACCES`
+    /// when the actor has no read bit through owner, group, or other.
+    pub fn metadata_as(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: &AccessContext,
+    ) -> Result<Value, EngineError> {
+        self.metadata_with_access(collection, identifier, Some(actor))
+    }
+
+    fn metadata_with_access(
+        &self,
+        collection: &str,
+        identifier: &str,
+        actor: Option<&AccessContext>,
+    ) -> Result<Value, EngineError> {
         let handle = self
             .root
             .collection(collection)
             .map_err(EngineError::storage)?;
-        let custom: Map<String, Value> = handle
-            .read_custom_metadata(identifier)
-            .map_err(EngineError::storage)?
-            .into_iter()
-            .collect();
         if handle.kind() == CollectionKind::File {
-            let file = self.get_file(collection, identifier)?;
+            let file = match actor {
+                Some(actor) => self.get_file_as(collection, identifier, actor)?,
+                None => self.get_file(collection, identifier)?,
+            };
+            let custom: Map<String, Value> = handle
+                .read_custom_metadata(identifier)
+                .map_err(EngineError::storage)?
+                .into_iter()
+                .collect();
             let mut merged = file.metadata.merge_with_custom(&custom);
             let descriptor = serde_json::to_value(&file.file).map_err(|error| {
                 EngineError::new(EngineErrorCode::CorruptData, error.to_string())
@@ -470,7 +615,15 @@ impl ReadOnlyEngine {
             }
             return Ok(Value::Object(merged));
         }
-        let record = self.get(collection, identifier)?;
+        let record = match actor {
+            Some(actor) => self.get_as(collection, identifier, actor)?,
+            None => self.get(collection, identifier)?,
+        };
+        let custom: Map<String, Value> = handle
+            .read_custom_metadata(identifier)
+            .map_err(EngineError::storage)?
+            .into_iter()
+            .collect();
         Ok(Value::Object(record.metadata.merge_with_custom(&custom)))
     }
 
@@ -569,7 +722,7 @@ impl ReadOnlyEngine {
             Ok(ReadDeletedDocument {
                 id: identifier.to_owned(),
                 created_at: timestamps.created_at,
-                deleted_at: stored.modified_millis,
+                deleted_at: stored.modified_millis_exact,
                 document,
             })
         })
@@ -618,7 +771,7 @@ impl ReadOnlyEngine {
                 .read_deleted_raw_file(identifier)
                 .map_err(EngineError::storage)?;
             require_read_access(stored.access_descriptor, actor)?;
-            let deleted_at = stored.modified_millis;
+            let deleted_at = stored.modified_millis_exact;
             Ok(ReadDeletedFile {
                 deleted_at,
                 file: build_read_file(identifier, stored)?,
@@ -980,6 +1133,115 @@ impl ReadOnlyEngine {
         self.find_with_access(collection, query, Some(actor))
     }
 
+    /// Execute a structured query over live raw-file manifests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for a non-file collection, unsafe/corrupt
+    /// storage, invalid queries, or an unstable generation.
+    pub fn find_files(
+        &self,
+        collection: &str,
+        query: &StructuredQuery,
+        actor: Option<&AccessContext>,
+    ) -> Result<Vec<RawFileQueryRow>, EngineError> {
+        let collection = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        if collection.kind() != CollectionKind::File {
+            return Err(EngineError::new(
+                EngineErrorCode::Storage,
+                "raw-file query requires a file collection",
+            ));
+        }
+        Self::read_stable(&collection, || {
+            let identifiers = match self.plan_equality_candidates(&collection, query)? {
+                Some(candidates) => candidates,
+                None => collection.raw_file_ids().map_err(EngineError::storage)?,
+            };
+            let mut records = Vec::new();
+            for identifier in identifiers {
+                let stored = collection
+                    .read_raw_file(&identifier)
+                    .map_err(EngineError::storage)?;
+                if !read_access_allowed(stored.access_descriptor, actor) {
+                    continue;
+                }
+                let updated_at = stored.modified_millis;
+                let fields = raw_file_index_fields(&identifier, stored)?;
+                let created_at = decode_ttid(&identifier)
+                    .map_err(EngineError::format)?
+                    .created_at;
+                if !query.matches(&fields, created_at, updated_at) {
+                    continue;
+                }
+                records.push((identifier, fields));
+                if query
+                    .limit()
+                    .is_some_and(|limit| limit > 0 && records.len() >= limit)
+                {
+                    break;
+                }
+            }
+            Ok(records)
+        })
+    }
+
+    /// Execute a structured query over retained raw-file manifests.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable error for a non-file collection, unsafe/corrupt
+    /// storage, invalid queries, or an unstable generation.
+    pub fn find_deleted_files(
+        &self,
+        collection: &str,
+        query: &StructuredQuery,
+        actor: Option<&AccessContext>,
+    ) -> Result<Vec<RawFileQueryRow>, EngineError> {
+        let collection = self
+            .root
+            .collection(collection)
+            .map_err(EngineError::storage)?;
+        if collection.kind() != CollectionKind::File {
+            return Err(EngineError::new(
+                EngineErrorCode::Storage,
+                "deleted raw-file query requires a file collection",
+            ));
+        }
+        Self::read_stable(&collection, || {
+            let mut records = Vec::new();
+            for identifier in collection
+                .deleted_raw_file_ids()
+                .map_err(EngineError::storage)?
+            {
+                let stored = collection
+                    .read_deleted_raw_file(&identifier)
+                    .map_err(EngineError::storage)?;
+                if !read_access_allowed(stored.access_descriptor, actor) {
+                    continue;
+                }
+                let deleted_at = stored.modified_millis;
+                let fields = raw_file_index_fields(&identifier, stored)?;
+                let created_at = decode_ttid(&identifier)
+                    .map_err(EngineError::format)?
+                    .created_at;
+                if !query.matches(&fields, created_at, deleted_at) {
+                    continue;
+                }
+                records.push((identifier, fields));
+                if query
+                    .limit()
+                    .is_some_and(|limit| limit > 0 && records.len() >= limit)
+                {
+                    break;
+                }
+            }
+            Ok(records)
+        })
+    }
+
     fn find_with_access(
         &self,
         collection: &str,
@@ -1025,8 +1287,8 @@ impl ReadOnlyEngine {
                     metadata: CanonicalMetadata {
                         id: identifier,
                         created_at: timestamps.created_at,
-                        updated_at: stored.modified_millis,
-                        mtime: stored.modified_millis,
+                        updated_at: stored.modified_millis_exact,
+                        mtime: stored.modified_millis_exact,
                     },
                     document,
                 });
@@ -1087,7 +1349,7 @@ impl ReadOnlyEngine {
                 records.push(ReadDeletedDocument {
                     id: identifier,
                     created_at: timestamps.created_at,
-                    deleted_at: stored.modified_millis,
+                    deleted_at: stored.modified_millis_exact,
                     document,
                 });
                 if query
@@ -1281,8 +1543,8 @@ fn build_read_file(identifier: &str, stored: StoredRawFile) -> Result<ReadFile, 
     let metadata = CanonicalMetadata {
         id: identifier.to_owned(),
         created_at: timestamps.created_at,
-        updated_at: stored.modified_millis,
-        mtime: stored.modified_millis,
+        updated_at: stored.modified_millis_exact,
+        mtime: stored.modified_millis_exact,
     };
     Ok(ReadFile {
         file: RawFileManifest {
@@ -1294,7 +1556,7 @@ fn build_read_file(identifier: &str, stored: StoredRawFile) -> Result<ReadFile, 
             etag: stored.checksum_sha256.clone(),
             checksum_sha256: stored.checksum_sha256,
             created_at: timestamps.created_at,
-            last_modified: stored.modified_millis,
+            last_modified: stored.modified_millis_exact,
         },
         metadata,
         custom_metadata: stored.custom_metadata.into_iter().collect(),
@@ -1447,6 +1709,9 @@ pub struct ReadDocument {
 /// One joined pair: the `"<leftId>, <rightId>"` key and the projected row.
 type JoinedRow = (String, Map<String, Value>);
 
+/// One raw-file query result: its TTID and public manifest fields.
+pub type RawFileQueryRow = (String, Map<String, Value>);
+
 /// One join's result, in the four shapes the JavaScript engine returns.
 ///
 /// The shape is chosen by the join, not by the caller: `$groupby` buckets the
@@ -1474,7 +1739,7 @@ pub struct ReadDeletedDocument {
     /// TTID creation timestamp.
     pub created_at: u64,
     /// Tombstone modification/deletion timestamp.
-    pub deleted_at: u64,
+    pub deleted_at: f64,
     /// Stored JSON document.
     pub document: Document,
 }
@@ -1501,14 +1766,14 @@ pub struct ReadFile {
 #[serde(rename_all = "camelCase")]
 pub struct ReadDeletedFile {
     /// Tombstone modification/deletion timestamp.
-    pub deleted_at: u64,
+    pub deleted_at: f64,
     /// Raw-file body and metadata.
     #[serde(flatten)]
     pub file: ReadFile,
 }
 
 /// Existing FYLO raw-file manifest representation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawFileManifest {
     /// TTID filename.
@@ -1529,7 +1794,7 @@ pub struct RawFileManifest {
     /// TTID creation time in Unix milliseconds.
     pub created_at: u64,
     /// Filesystem modification time in Unix milliseconds.
-    pub last_modified: u64,
+    pub last_modified: f64,
 }
 
 /// Read-only collection inspection result.
@@ -1624,6 +1889,45 @@ impl EngineError {
             message: error.to_string(),
             source: Some(Box::new(error)),
         }
+    }
+
+    /// Native storage code when this error originated below the engine.
+    #[must_use]
+    pub fn storage_code(&self) -> Option<NativeStorageErrorCode> {
+        self.source
+            .as_deref()
+            .and_then(|source| source.downcast_ref::<NativeStorageError>())
+            .map(NativeStorageError::code)
+    }
+
+    /// Portable format code when this error originated in the canonical codec.
+    #[must_use]
+    pub fn format_code(&self) -> Option<FormatErrorCode> {
+        self.source
+            .as_deref()
+            .and_then(|source| source.downcast_ref::<FormatError>())
+            .map(FormatError::code)
+    }
+
+    /// Stable external format code when this error originated in the codec.
+    #[must_use]
+    pub fn format_code_str(&self) -> Option<&'static str> {
+        self.format_code().map(FormatErrorCode::as_str)
+    }
+
+    /// Portable query code when this error originated in the query kernel.
+    #[must_use]
+    pub fn query_code(&self) -> Option<QueryErrorCode> {
+        self.source
+            .as_deref()
+            .and_then(|source| source.downcast_ref::<QueryError>())
+            .map(QueryError::code)
+    }
+
+    /// Stable external query code when this error originated in the query kernel.
+    #[must_use]
+    pub fn query_code_str(&self) -> Option<&'static str> {
+        self.query_code().map(QueryErrorCode::as_str)
     }
 
     fn format(error: FormatError) -> Self {

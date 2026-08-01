@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { shardOf } from '../../src/core/doc-id.js'
+import { shardOf } from '../../src/core/shard.js'
 import path from 'node:path'
 import TTID from '../../src/browser/vendor/ttid.mjs'
 import fylo, {

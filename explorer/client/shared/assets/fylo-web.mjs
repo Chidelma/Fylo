@@ -69,6 +69,32 @@ class TTID {
   static isUUID = isUUID;
 }
 
+// src/core/shard.js
+var DEFAULT_SHARD_WIDTH = 2;
+var MAX_SHARD_WIDTH = 4;
+function shardOf(id, width = DEFAULT_SHARD_WIDTH) {
+  const shard = assertShardWidth(width);
+  if (shard === 0)
+    return "";
+  return creationSegment(id).slice(-shard).padStart(shard, "0");
+}
+function legacyShardOf(id) {
+  return creationSegment(id).slice(0, 2);
+}
+function assertShardWidth(width) {
+  if (!Number.isInteger(width) || Number(width) < 0 || Number(width) > MAX_SHARD_WIDTH) {
+    throw new Error(`Shard width must be an integer from 0 to ${MAX_SHARD_WIDTH}: ${String(width)}`);
+  }
+  return Number(width);
+}
+function creationSegment(id) {
+  const created = String(id).split("-")[0];
+  if (created.length === 0 || !/^[0-9A-Za-z]+$/.test(created)) {
+    throw new Error(`Cannot shard a non-identifier: ${String(id)}`);
+  }
+  return created;
+}
+
 // src/query/safe-record.js
 function safeRecord() {
   return Object.create(null);
@@ -170,6 +196,19 @@ var TokenType = {
   RPAREN: ")",
   ASTERISK: "*",
   EOF: "EOF"
+};
+var SINGLE_CHARACTER_TOKENS = {
+  "=": TokenType.EQUALS,
+  ",": TokenType.COMMA,
+  ";": TokenType.SEMICOLON,
+  "(": TokenType.LPAREN,
+  ")": TokenType.RPAREN,
+  "*": TokenType.ASTERISK
+};
+var COMPARISON_TOKENS = {
+  ">": { withEquals: TokenType.GREATER_EQUAL, alone: TokenType.GREATER_THAN },
+  "<": { withEquals: TokenType.LESS_EQUAL, alone: TokenType.LESS_THAN },
+  "!": { withEquals: TokenType.NOT_EQUALS, alone: null }
 };
 
 class SQLLexer {
@@ -280,76 +319,42 @@ class SQLLexer {
         continue;
       }
       if (/[a-zA-Z_]/.test(this.current)) {
-        let value = this.readIdentifier();
-        while (this.current === "." && this.position + 1 < this.input.length && /[a-zA-Z_]/.test(this.input[this.position + 1])) {
-          this.advance();
-          value += "/" + this.readIdentifier();
-        }
-        const type = this.getKeywordType(value);
-        tokens.push({ type, value, position });
+        tokens.push(this.readIdentifierToken(position));
         continue;
       }
-      switch (this.current) {
-        case "=":
-          tokens.push({ type: TokenType.EQUALS, value: "=", position });
-          this.advance();
-          break;
-        case "!":
-          if (this.input[this.position + 1] === "=") {
-            tokens.push({ type: TokenType.NOT_EQUALS, value: "!=", position });
-            this.advance();
-            this.advance();
-          } else {
-            this.advance();
-          }
-          break;
-        case ">":
-          if (this.input[this.position + 1] === "=") {
-            tokens.push({ type: TokenType.GREATER_EQUAL, value: ">=", position });
-            this.advance();
-            this.advance();
-          } else {
-            tokens.push({ type: TokenType.GREATER_THAN, value: ">", position });
-            this.advance();
-          }
-          break;
-        case "<":
-          if (this.input[this.position + 1] === "=") {
-            tokens.push({ type: TokenType.LESS_EQUAL, value: "<=", position });
-            this.advance();
-            this.advance();
-          } else {
-            tokens.push({ type: TokenType.LESS_THAN, value: "<", position });
-            this.advance();
-          }
-          break;
-        case ",":
-          tokens.push({ type: TokenType.COMMA, value: ",", position });
-          this.advance();
-          break;
-        case ";":
-          tokens.push({ type: TokenType.SEMICOLON, value: ";", position });
-          this.advance();
-          break;
-        case "(":
-          tokens.push({ type: TokenType.LPAREN, value: "(", position });
-          this.advance();
-          break;
-        case ")":
-          tokens.push({ type: TokenType.RPAREN, value: ")", position });
-          this.advance();
-          break;
-        case "*":
-          tokens.push({ type: TokenType.ASTERISK, value: "*", position });
-          this.advance();
-          break;
-        default:
-          this.advance();
-          break;
-      }
+      const operator = this.readOperatorToken(position);
+      if (operator)
+        tokens.push(operator);
     }
     tokens.push({ type: TokenType.EOF, value: "", position: this.position });
     return tokens;
+  }
+  readIdentifierToken(position) {
+    let value = this.readIdentifier();
+    while (this.current === "." && this.position + 1 < this.input.length && /[a-zA-Z_]/.test(this.input[this.position + 1])) {
+      this.advance();
+      value += "/" + this.readIdentifier();
+    }
+    return { type: this.getKeywordType(value), value, position };
+  }
+  readOperatorToken(position) {
+    const character = this.current;
+    if (!character)
+      return null;
+    const comparison = COMPARISON_TOKENS[character];
+    if (comparison) {
+      const { withEquals, alone } = comparison;
+      if (this.input[this.position + 1] === "=") {
+        this.advance();
+        this.advance();
+        return { type: withEquals, value: `${character}=`, position };
+      }
+      this.advance();
+      return alone ? { type: alone, value: character, position } : null;
+    }
+    const single = SINGLE_CHARACTER_TOKENS[character];
+    this.advance();
+    return single ? { type: single, value: character, position } : null;
   }
 }
 
@@ -1036,8 +1041,9 @@ class BrowserDocuments {
   }
   async readStoredDoc(collection, docId) {
     this.validateDocId(docId);
-    const target = this.docPath(collection, docId);
-    assertPathInside(this.docsRoot(collection), target);
+    const root = this.docsRoot(collection);
+    const target = await this.existingPath(root, this.docPath(collection, docId), docId);
+    assertPathInside(root, target);
     if (!await this.fs.exists(target))
       return null;
     const text = await this.fs.readText(target);
@@ -1052,8 +1058,9 @@ class BrowserDocuments {
   }
   async readDeletedDoc(collection, docId) {
     this.validateDocId(docId);
-    const target = this.deletedPath(collection, docId);
-    assertPathInside(this.deletedRoot(collection), target);
+    const root = this.deletedRoot(collection);
+    const target = await this.existingPath(root, this.deletedPath(collection, docId), docId);
+    assertPathInside(root, target);
     if (!await this.fs.exists(target))
       return null;
     const text = await this.fs.readText(target);
@@ -1074,20 +1081,23 @@ class BrowserDocuments {
     const text = JSON.stringify(data);
     this.assertJsonDocumentText(text);
     await this.fs.writeText(target, text);
+    await this.removeLegacyCopy(this.docsRoot(collection), target, docId);
     const tombstone = this.deletedPath(collection, docId);
     if (await this.fs.exists(tombstone))
       await this.fs.remove(tombstone);
+    await this.removeLegacyCopy(this.deletedRoot(collection), tombstone, docId);
   }
   async removeStoredDoc(collection, docId) {
     this.validateDocId(docId);
-    const target = this.docPath(collection, docId);
-    assertPathInside(this.docsRoot(collection), target);
+    const root = this.docsRoot(collection);
+    const target = await this.existingPath(root, this.docPath(collection, docId), docId);
+    assertPathInside(root, target);
     if (await this.fs.exists(target))
       await this.fs.remove(target);
   }
   async softDeleteStoredDoc(collection, docId, deletedAt) {
     this.validateDocId(docId);
-    const source = this.docPath(collection, docId);
+    const source = await this.existingPath(this.docsRoot(collection), this.docPath(collection, docId), docId);
     const target = this.deletedPath(collection, docId);
     assertPathInside(this.docsRoot(collection), source);
     assertPathInside(this.deletedRoot(collection), target);
@@ -1105,7 +1115,7 @@ class BrowserDocuments {
   }
   async restoreStoredDoc(collection, docId, _restoredAt) {
     this.validateDocId(docId);
-    const source = this.deletedPath(collection, docId);
+    const source = await this.existingPath(this.deletedRoot(collection), this.deletedPath(collection, docId), docId);
     const target = this.docPath(collection, docId);
     assertPathInside(this.deletedRoot(collection), source);
     assertPathInside(this.docsRoot(collection), target);
@@ -1121,6 +1131,19 @@ class BrowserDocuments {
     return target;
   }
   async makeStoredDocReadOnly(_collection, _docId) {}
+  async existingPath(root, canonical, docId) {
+    if (await this.fs.exists(canonical))
+      return canonical;
+    const legacy = join(root, legacyShardOf(docId), `${docId}.json`);
+    assertPathInside(root, legacy);
+    return legacy !== canonical && await this.fs.exists(legacy) ? legacy : canonical;
+  }
+  async removeLegacyCopy(root, canonical, docId) {
+    const legacy = join(root, legacyShardOf(docId), `${docId}.json`);
+    assertPathInside(root, legacy);
+    if (legacy !== canonical && await this.fs.exists(legacy))
+      await this.fs.remove(legacy);
+  }
   assertJsonDocumentText(text) {
     const raw = JSON.parse(text);
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -1202,12 +1225,12 @@ class BrowserMetadataStore {
     if (!TTID.isTTID(id))
       throw new Error(`Invalid document ID: ${id}`);
     const root = this.root(collection);
-    const target = join(root, id.slice(0, 2), `${id}.json`);
+    const target = join(root, shardOf(id), `${id}.json`);
     assertPathInside(root, target);
     return target;
   }
   async read(collection, id) {
-    const target = this.path(collection, id);
+    const target = await this.existingPath(collection, id);
     if (!await this.fs.exists(target))
       return { values: safeRecord(), updatedAt: 0 };
     const parsed = JSON.parse(await this.fs.readText(target));
@@ -1230,9 +1253,25 @@ class BrowserMetadataStore {
   }
   async write(collection, id, values, updatedAt) {
     const target = this.path(collection, id);
-    await this.fs.mkdir(join(this.root(collection), id.slice(0, 2)), { recursive: true });
+    await this.fs.mkdir(join(this.root(collection), shardOf(id)), { recursive: true });
     await this.fs.writeText(target, JSON.stringify({ values, updatedAt }));
+    const legacy = this.legacyPath(collection, id);
+    if (legacy !== target && await this.fs.exists(legacy))
+      await this.fs.remove(legacy);
     return { values, updatedAt };
+  }
+  legacyPath(collection, id) {
+    const root = this.root(collection);
+    const target = join(root, legacyShardOf(id), `${id}.json`);
+    assertPathInside(root, target);
+    return target;
+  }
+  async existingPath(collection, id) {
+    const canonical = this.path(collection, id);
+    if (await this.fs.exists(canonical))
+      return canonical;
+    const legacy = this.legacyPath(collection, id);
+    return legacy !== canonical && await this.fs.exists(legacy) ? legacy : canonical;
   }
 }
 
@@ -1368,6 +1407,56 @@ async function queryLookupValue(collection, fieldPath, value) {
   const stored = stringifyStoredValue(value);
   return lookupToken(stored);
 }
+async function likeQueryPrefixes(collection, fieldPath, pattern) {
+  if (pattern.includes("_"))
+    return null;
+  const wildcards = (pattern.match(/%/g) ?? []).length;
+  if (wildcards === 0) {
+    return [
+      {
+        kind: "eq",
+        valuePrefix: `${await queryLookupValue(collection, fieldPath, pattern)}/`
+      }
+    ];
+  }
+  if (wildcards === 1 && pattern.endsWith("%")) {
+    return [{ kind: "f", valuePrefix: encodeSegment(pattern.slice(0, -1)) }];
+  }
+  if (wildcards === 1 && pattern.startsWith("%")) {
+    return [{ kind: "r", valuePrefix: encodeSegment(reverseString(pattern.slice(1))) }];
+  }
+  return containsQueryPrefixes(pattern, wildcards);
+}
+function containsQueryPrefixes(pattern, wildcards) {
+  if (wildcards !== 2 || !pattern.startsWith("%") || !pattern.endsWith("%"))
+    return null;
+  if (pattern.length <= 2)
+    return null;
+  const needle = pattern.slice(1, -1);
+  if (Array.from(needle).length < NGRAM_SIZE)
+    return null;
+  const planned = trigrams(needle)[0];
+  return [{ kind: "g3", valuePrefix: `${encodeSegment(planned ?? needle.slice(0, 3))}/` }];
+}
+function rangeQueryPrefixes(operand) {
+  const rangeEntries = [];
+  for (const operator of ["$gt", "$gte", "$lt", "$lte"]) {
+    const raw = operand[operator];
+    if (raw === undefined)
+      continue;
+    const numeric = numericValue(raw);
+    const sortable = numeric === null ? "" : sortableFloat64(numeric);
+    if (!sortable)
+      return null;
+    const ascending = operator === "$gt" || operator === "$gte";
+    rangeEntries.push({
+      kind: ascending ? "n" : "nr",
+      valuePrefix: "",
+      range: { op: operator, value: ascending ? sortable : reverseSortable(sortable) }
+    });
+  }
+  return rangeEntries.length ? rangeEntries : null;
+}
 
 class BrowserPrefixIndexCodec {
   static key(fieldPath, kind, value, docId) {
@@ -1444,72 +1533,9 @@ class BrowserPrefixIndexCodec {
       ];
     }
     if (operand.$like !== undefined) {
-      const pattern = operand.$like;
-      if (pattern.includes("_"))
-        return null;
-      const wildcards = (pattern.match(/%/g) ?? []).length;
-      if (wildcards === 0) {
-        return [
-          {
-            kind: "eq",
-            valuePrefix: `${await queryLookupValue(collection, fieldPath, pattern)}/`
-          }
-        ];
-      }
-      if (wildcards === 1 && pattern.endsWith("%")) {
-        return [
-          {
-            kind: "f",
-            valuePrefix: encodeSegment(pattern.slice(0, -1))
-          }
-        ];
-      }
-      if (wildcards === 1 && pattern.startsWith("%")) {
-        return [
-          {
-            kind: "r",
-            valuePrefix: encodeSegment(reverseString(pattern.slice(1)))
-          }
-        ];
-      }
-      if (wildcards === 2 && pattern.startsWith("%") && pattern.endsWith("%") && pattern.length > 2) {
-        const needle = pattern.slice(1, -1);
-        if (Array.from(needle).length >= NGRAM_SIZE) {
-          const planned = trigrams(needle)[0];
-          return [
-            {
-              kind: "g3",
-              valuePrefix: `${encodeSegment(planned ?? needle.slice(0, 3))}/`
-            }
-          ];
-        }
-      }
-      return null;
+      return await likeQueryPrefixes(collection, fieldPath, operand.$like);
     }
-    const rangeEntries = [];
-    for (const operator of ["$gt", "$gte", "$lt", "$lte"]) {
-      const raw = operand[operator];
-      if (raw === undefined)
-        continue;
-      const numeric = numericValue(raw);
-      const sortable = numeric === null ? "" : sortableFloat64(numeric);
-      if (!sortable)
-        return null;
-      if (operator === "$gt" || operator === "$gte") {
-        rangeEntries.push({
-          kind: "n",
-          valuePrefix: "",
-          range: { op: operator, value: sortable }
-        });
-      } else {
-        rangeEntries.push({
-          kind: "nr",
-          valuePrefix: "",
-          range: { op: operator, value: reverseSortable(sortable) }
-        });
-      }
-    }
-    return rangeEntries.length ? rangeEntries : null;
+    return rangeQueryPrefixes(operand);
   }
   static rangeValueFromKey(key) {
     const segments = key.split("/");
@@ -1563,8 +1589,22 @@ class BrowserPrefixIndex {
     this.indexScannerFactory = options.indexScannerFactory;
     this.scanners = new Map;
     this.scannerSnapshots = new Map;
+    this.walOverlayCache = new Map;
     this.accelerationState = "loading";
     this.accelerationError = null;
+    this.accelerationReasonCode = null;
+    this.accelerationMetrics = {
+      snapshotReads: 0,
+      snapshotReadMs: 0,
+      snapshotBytes: 0,
+      walReads: 0,
+      walReadMs: 0,
+      walBytes: 0,
+      snapshotLoads: 0,
+      snapshotLoadMs: 0,
+      scans: 0,
+      scanMs: 0
+    };
   }
   async ready() {
     if (!this.indexScannerFactory || this.accelerationState === "fallback")
@@ -1573,7 +1613,7 @@ class BrowserPrefixIndex {
       await this.indexScannerFactory.ready();
       this.accelerationState = "active";
     } catch (error) {
-      await this.disableAcceleration(error);
+      await this.disableAcceleration(error, "EWASM_INSTANTIATE");
     }
   }
   async close() {
@@ -1590,12 +1630,22 @@ class BrowserPrefixIndex {
   accelerationStatus() {
     if (!this.indexScannerFactory)
       return { mode: "javascript", state: "off" };
-    const status = { mode: "wasm", state: this.accelerationState };
-    return this.accelerationError ? { ...status, error: this.accelerationError } : status;
+    const status = {
+      mode: "wasm",
+      state: this.accelerationState,
+      metrics: { ...this.accelerationMetrics }
+    };
+    return this.accelerationError ? {
+      ...status,
+      reasonCode: this.accelerationReasonCode ?? "EWASM_INSTANTIATE",
+      error: this.accelerationError
+    } : status;
   }
-  async disableAcceleration(error) {
+  async disableAcceleration(error, defaultCode) {
     this.accelerationState = "fallback";
     this.accelerationError = error instanceof Error ? error.message : String(error);
+    const code = error?.code;
+    this.accelerationReasonCode = typeof code === "string" && code.startsWith("EWASM_") ? code : defaultCode;
     await this.close();
   }
   async scannerFor(collection) {
@@ -1613,13 +1663,14 @@ class BrowserPrefixIndex {
     try {
       return await scanner;
     } catch (error) {
-      await this.disableAcceleration(error);
+      await this.disableAcceleration(error, "EWASM_INSTANTIATE");
       return null;
     }
   }
   async forgetCollection(collection) {
     this.snapshotCache.delete(collection);
     this.scannerSnapshots.delete(collection);
+    this.walOverlayCache.delete(collection);
     const scanner = this.scanners.get(collection);
     this.scanners.delete(collection);
     if (!scanner)
@@ -1658,7 +1709,11 @@ class BrowserPrefixIndex {
     if (cached)
       return cached;
     const path = this.snapshotPath(collection);
+    const startedAt = monotonicNow();
     const bytes = await this.fs.exists(path) ? await this.fs.readBytes(path) : new Uint8Array(0);
+    this.accelerationMetrics.snapshotReads++;
+    this.accelerationMetrics.snapshotReadMs += monotonicNow() - startedAt;
+    this.accelerationMetrics.snapshotBytes += bytes.byteLength;
     this.snapshotCache.set(collection, bytes);
     return bytes;
   }
@@ -1705,6 +1760,18 @@ class BrowserPrefixIndex {
       return;
     await this.ensureCollection(collection);
     await this.fs.appendText(this.walPath(collection), serializeWal(mutations));
+    const overlay = this.walOverlayCache.get(collection);
+    if (overlay) {
+      for (const mutation of mutations) {
+        if (mutation.op === "+") {
+          overlay.added.add(mutation.key);
+          overlay.removed.delete(mutation.key);
+        } else {
+          overlay.added.delete(mutation.key);
+          overlay.removed.add(mutation.key);
+        }
+      }
+    }
     await this.compactIfNeeded(collection);
   }
   async compactIfNeeded(collection) {
@@ -1721,6 +1788,7 @@ class BrowserPrefixIndex {
     await this.fs.writeText(this.walPath(collection), "");
     this.snapshotCache.delete(collection);
     this.scannerSnapshots.delete(collection);
+    this.walOverlayCache.set(collection, { added: new Set, removed: new Set });
   }
   async putDocument(collection, docId, doc) {
     const keys = await BrowserPrefixIndexCodec.entriesForDocument(collection, docId, doc);
@@ -1756,9 +1824,13 @@ class BrowserPrefixIndex {
       if (scanner) {
         try {
           if (this.scannerSnapshots.get(collection) !== bytes) {
+            const loadStartedAt = monotonicNow();
             await scanner.loadSnapshot(bytes);
+            this.accelerationMetrics.snapshotLoads++;
+            this.accelerationMetrics.snapshotLoadMs += monotonicNow() - loadStartedAt;
             this.scannerSnapshots.set(collection, bytes);
           }
+          const scanStartedAt = monotonicNow();
           for (const encodedDocId of await scanner.scanQueries([
             { prefix: fullPrefix, range: entry.range }
           ])) {
@@ -1767,8 +1839,10 @@ class BrowserPrefixIndex {
               throw new Error(`Invalid document ID: ${docId}`);
             next.add(docId);
           }
+          this.accelerationMetrics.scans++;
+          this.accelerationMetrics.scanMs += monotonicNow() - scanStartedAt;
         } catch (error) {
-          await this.disableAcceleration(error);
+          await this.disableAcceleration(error, "EWASM_QUERY");
           next.clear();
           this.scanSnapshotWithJavaScript(bytes, fullPrefix, rootPrefix, entry.range, next);
         }
@@ -1804,9 +1878,17 @@ class BrowserPrefixIndex {
     }
   }
   async loadWalOverlay(collection) {
+    const cached = this.walOverlayCache.get(collection);
+    if (cached)
+      return cached;
     const added = new Set;
     const removed = new Set;
-    for (const line of completeLines(await readTextIfExists(this.fs, this.walPath(collection)))) {
+    const startedAt = monotonicNow();
+    const wal = await readTextIfExists(this.fs, this.walPath(collection));
+    this.accelerationMetrics.walReads++;
+    this.accelerationMetrics.walReadMs += monotonicNow() - startedAt;
+    this.accelerationMetrics.walBytes += ENCODER.encode(wal).byteLength;
+    for (const line of completeLines(wal)) {
       const mutation = parseWalMutation(line);
       if (!mutation)
         continue;
@@ -1818,8 +1900,13 @@ class BrowserPrefixIndex {
         removed.add(mutation.key);
       }
     }
-    return { added, removed };
+    const overlay = { added, removed };
+    this.walOverlayCache.set(collection, overlay);
+    return overlay;
   }
+}
+function monotonicNow() {
+  return globalThis.performance?.now() ?? Date.now();
 }
 function* streamKeysFrom(bytes, offset) {
   let cursor = offset;
@@ -1943,22 +2030,21 @@ class BrowserQueryEngine {
     return true;
   }
   matchesOperand(value, operand) {
-    if (operand.$eq !== undefined && value != operand.$eq)
-      return false;
-    if (operand.$ne !== undefined && value == operand.$ne)
-      return false;
-    if (operand.$gt !== undefined && !this.matchesNumber(value, "$gt", operand.$gt))
-      return false;
-    if (operand.$gte !== undefined && !this.matchesNumber(value, "$gte", operand.$gte))
-      return false;
-    if (operand.$lt !== undefined && !this.matchesNumber(value, "$lt", operand.$lt))
-      return false;
-    if (operand.$lte !== undefined && !this.matchesNumber(value, "$lte", operand.$lte))
-      return false;
-    if (operand.$like !== undefined && (typeof value !== "string" || !this.matchesLike(value, operand.$like)))
-      return false;
-    if (operand.$contains !== undefined) {
-      if (!Array.isArray(value) || !value.some((item) => item == operand.$contains))
+    const predicates = {
+      $eq: (expected) => value == expected,
+      $ne: (expected) => value != expected,
+      $gt: (expected) => this.matchesNumber(value, "$gt", expected),
+      $gte: (expected) => this.matchesNumber(value, "$gte", expected),
+      $lt: (expected) => this.matchesNumber(value, "$lt", expected),
+      $lte: (expected) => this.matchesNumber(value, "$lte", expected),
+      $like: (expected) => typeof value === "string" && this.matchesLike(value, expected),
+      $contains: (expected) => Array.isArray(value) && value.some((item) => item == expected)
+    };
+    const supplied = operand;
+    for (const [operator, predicate] of Object.entries(predicates)) {
+      if (supplied[operator] === undefined)
+        continue;
+      if (!predicate(supplied[operator]))
         return false;
     }
     return true;
@@ -2135,6 +2221,37 @@ function appendGroup(target, source) {
 Object.assign(Object, { appendGroup });
 
 // src/browser/core/engine.js
+var JOIN_COMPARATORS = {
+  $eq: (leftValue, rightValue) => leftValue === rightValue,
+  $ne: (leftValue, rightValue) => leftValue !== rightValue,
+  $gt: (leftValue, rightValue) => Number(leftValue) > Number(rightValue),
+  $lt: (leftValue, rightValue) => Number(leftValue) < Number(rightValue),
+  $gte: (leftValue, rightValue) => Number(leftValue) >= Number(rightValue),
+  $lte: (leftValue, rightValue) => Number(leftValue) <= Number(rightValue)
+};
+var JOIN_MODES = {
+  inner: (leftData, rightData) => Object.assign(safeRecord(), leftData, rightData),
+  outer: (leftData, rightData) => Object.assign(safeRecord(), leftData, rightData),
+  left: (leftData) => leftData,
+  right: (leftData, rightData) => rightData
+};
+function groupJoinedDocs(join2, docs) {
+  const groupedDocs = safeRecord();
+  for (const ids of Object.keys(docs)) {
+    const data = docs[ids];
+    const key = String(data[join2.$groupby]);
+    if (!Object.hasOwn(groupedDocs, key))
+      groupedDocs[key] = safeRecord();
+    groupedDocs[key][ids] = data;
+  }
+  if (!join2.$onlyIds)
+    return groupedDocs;
+  const groupedIds = safeRecord();
+  for (const key of Object.keys(groupedDocs)) {
+    groupedIds[key] = Object.keys(groupedDocs[key]).flat();
+  }
+  return groupedIds;
+}
 var BROWSER_OPERATION = Object.freeze({
   noop: 0,
   putInsert: 10,
@@ -2220,14 +2337,14 @@ class BrowserCore {
   docPath(collection, docId) {
     validateDocId(docId);
     const root = this.docsRoot(collection);
-    const target = join(root, docId.slice(0, 2), `${docId}.json`);
+    const target = join(root, shardOf(docId), `${docId}.json`);
     assertPathInside(root, target);
     return target;
   }
   deletedPath(collection, docId) {
     validateDocId(docId);
     const root = this.deletedRoot(collection);
-    const target = join(root, docId.slice(0, 2), `${docId}.json`);
+    const target = join(root, shardOf(docId), `${docId}.json`);
     assertPathInside(root, target);
     return target;
   }
@@ -2650,78 +2767,49 @@ class BrowserCore {
     const leftDocs = await this.docResults(join2.$leftCollection);
     const rightDocs = await this.docResults(join2.$rightCollection);
     const docs = safeRecord();
-    const compareMap = {
-      $eq: (leftVal, rightVal) => leftVal === rightVal,
-      $ne: (leftVal, rightVal) => leftVal !== rightVal,
-      $gt: (leftVal, rightVal) => Number(leftVal) > Number(rightVal),
-      $lt: (leftVal, rightVal) => Number(leftVal) < Number(rightVal),
-      $gte: (leftVal, rightVal) => Number(leftVal) >= Number(rightVal),
-      $lte: (leftVal, rightVal) => Number(leftVal) <= Number(rightVal)
-    };
     for (const leftEntry of leftDocs) {
       const [leftId, leftData] = Object.entries(leftEntry)[0];
       for (const rightEntry of rightDocs) {
         const [rightId, rightData] = Object.entries(rightEntry)[0];
-        let matched = false;
-        for (const [field, operand] of Object.entries(join2.$on)) {
-          if (!operand)
-            continue;
-          for (const opKey of Object.keys(compareMap)) {
-            const rightField = operand[opKey];
-            if (!rightField)
-              continue;
-            const leftValue = this.queryEngine.getValueByPath(leftData, String(field));
-            const rightValue = this.queryEngine.getValueByPath(rightData, String(rightField));
-            if (compareMap[opKey]?.(leftValue, rightValue))
-              matched = true;
-          }
-        }
-        if (!matched)
+        if (!this.joinRowMatches(join2, leftData, rightData))
           continue;
-        switch (join2.$mode) {
-          case "inner":
-          case "outer":
-            docs[`${leftId}, ${rightId}`] = Object.assign(safeRecord(), leftData, rightData);
-            break;
-          case "left":
-            docs[`${leftId}, ${rightId}`] = leftData;
-            break;
-          case "right":
-            docs[`${leftId}, ${rightId}`] = rightData;
-            break;
-        }
-        let projected = docs[`${leftId}, ${rightId}`];
-        if (join2.$select?.length)
-          projected = this.queryEngine.selectValues(join2.$select, projected);
-        if (join2.$rename)
-          projected = this.queryEngine.renameFields(join2.$rename, projected);
-        docs[`${leftId}, ${rightId}`] = projected;
+        docs[`${leftId}, ${rightId}`] = this.projectJoinRow(join2, leftData, rightData);
         if (join2.$limit && Object.keys(docs).length >= join2.$limit)
           break;
       }
       if (join2.$limit && Object.keys(docs).length >= join2.$limit)
         break;
     }
-    if (join2.$groupby) {
-      const groupedDocs = safeRecord();
-      for (const ids of Object.keys(docs)) {
-        const data = docs[ids];
-        const key = String(data[join2.$groupby]);
-        if (!Object.hasOwn(groupedDocs, key))
-          groupedDocs[key] = safeRecord();
-        groupedDocs[key][ids] = data;
-      }
-      if (join2.$onlyIds) {
-        const groupedIds = safeRecord();
-        for (const key of Object.keys(groupedDocs))
-          groupedIds[key] = Object.keys(groupedDocs[key]).flat();
-        return groupedIds;
-      }
-      return groupedDocs;
-    }
+    if (join2.$groupby)
+      return groupJoinedDocs(join2, docs);
     if (join2.$onlyIds)
       return Array.from(new Set(Object.keys(docs).flat()));
     return docs;
+  }
+  joinRowMatches(join2, leftData, rightData) {
+    for (const [field, operand] of Object.entries(join2.$on)) {
+      if (!operand)
+        continue;
+      for (const opKey of Object.keys(JOIN_COMPARATORS)) {
+        const rightField = operand[opKey];
+        if (!rightField)
+          continue;
+        const leftValue = this.queryEngine.getValueByPath(leftData, String(field));
+        const rightValue = this.queryEngine.getValueByPath(rightData, String(rightField));
+        if (JOIN_COMPARATORS[opKey](leftValue, rightValue))
+          return true;
+      }
+    }
+    return false;
+  }
+  projectJoinRow(join2, leftData, rightData) {
+    const combine = JOIN_MODES[join2.$mode];
+    let projected = combine ? combine(leftData, rightData) : undefined;
+    if (join2.$select?.length)
+      projected = this.queryEngine.selectValues(join2.$select, projected);
+    if (join2.$rename)
+      projected = this.queryEngine.renameFields(join2.$rename, projected);
+    return projected;
   }
   async executeSQL(SQL) {
     const plan = this.planner.prepare(SQL);
@@ -2915,62 +3003,51 @@ async function collectDeletedDocs(fylo, collection, query) {
   }
   return docs;
 }
+var BROWSER_OPERATIONS = {
+  executeSQL: (fylo, request) => fylo.executeSQL(requireString(request, "sql")),
+  createCollection: async (fylo, request) => {
+    const collection = requireString(request, "collection");
+    await fylo.createCollection(collection);
+    return { collection };
+  },
+  dropCollection: async (fylo, request) => {
+    const collection = requireString(request, "collection");
+    await fylo.dropCollection(collection);
+    return { collection };
+  },
+  inspectCollection: (fylo, request) => fylo.inspectCollection(requireString(request, "collection")),
+  rebuildCollection: (fylo, request) => fylo.rebuildCollection(requireString(request, "collection")),
+  getDoc: (fylo, request) => fylo.getDoc(requireString(request, "collection"), requireString(request, "id"), request.onlyId === true).once(),
+  getLatest: (fylo, request) => fylo.getLatest(requireString(request, "collection"), requireString(request, "id"), request.onlyId === true),
+  getMeta: (fylo, request) => fylo.getDocMeta(requireString(request, "collection"), requireString(request, "id")),
+  setMeta: (fylo, request) => fylo.setDocMetaRecord(requireString(request, "collection"), requireString(request, "id"), requireObject(request, "meta")),
+  findDocs: (fylo, request) => collectFindDocs(fylo, requireString(request, "collection"), isRecord(request.query) ? request.query : {}),
+  findDeletedDocs: (fylo, request) => collectDeletedDocs(fylo, requireString(request, "collection"), isRecord(request.query) ? request.query : {}),
+  joinDocs: (fylo, request) => fylo.join(requireObject(request, "join")),
+  putData: (fylo, request) => {
+    const hasMeta = Object.hasOwn(request, "meta");
+    return fylo.putData(requireString(request, "collection"), requireObject(request, "data"), hasMeta ? requireObject(request, "meta") : undefined, hasMeta);
+  },
+  batchPutData: (fylo, request) => fylo.batchPutData(requireString(request, "collection"), requireObjectArray(request, "batch")),
+  patchDoc: (fylo, request) => fylo.patchDoc(requireString(request, "collection"), requireObject(request, "newDoc"), isRecord(request.oldDoc) ? request.oldDoc : {}),
+  patchDocs: (fylo, request) => fylo.patchDocs(requireString(request, "collection"), requireObject(request, "update")),
+  delDoc: async (fylo, request) => {
+    await fylo.delDoc(requireString(request, "collection"), requireString(request, "id"));
+    return { deleted: true };
+  },
+  restoreDoc: async (fylo, request) => {
+    const id = await fylo.restoreDoc(requireString(request, "collection"), requireString(request, "id"));
+    return { restored: true, id };
+  },
+  delDocs: (fylo, request) => fylo.delDocs(requireString(request, "collection"), requireObject(request, "delete"))
+};
 async function executeBrowserOperation(fylo, request) {
   if (!isBrowserRequest(request))
     throw new Error("FYLO browser request body must be an object");
-  switch (request.op) {
-    case "executeSQL":
-      return await fylo.executeSQL(requireString(request, "sql"));
-    case "createCollection": {
-      const collection = requireString(request, "collection");
-      await fylo.createCollection(collection);
-      return { collection };
-    }
-    case "dropCollection": {
-      const collection = requireString(request, "collection");
-      await fylo.dropCollection(collection);
-      return { collection };
-    }
-    case "inspectCollection":
-      return await fylo.inspectCollection(requireString(request, "collection"));
-    case "rebuildCollection":
-      return await fylo.rebuildCollection(requireString(request, "collection"));
-    case "getDoc":
-      return await fylo.getDoc(requireString(request, "collection"), requireString(request, "id"), request.onlyId === true).once();
-    case "getLatest":
-      return await fylo.getLatest(requireString(request, "collection"), requireString(request, "id"), request.onlyId === true);
-    case "getMeta":
-      return await fylo.getDocMeta(requireString(request, "collection"), requireString(request, "id"));
-    case "setMeta":
-      return await fylo.setDocMetaRecord(requireString(request, "collection"), requireString(request, "id"), requireObject(request, "meta"));
-    case "findDocs":
-      return await collectFindDocs(fylo, requireString(request, "collection"), isRecord(request.query) ? request.query : {});
-    case "findDeletedDocs":
-      return await collectDeletedDocs(fylo, requireString(request, "collection"), isRecord(request.query) ? request.query : {});
-    case "joinDocs":
-      return await fylo.join(requireObject(request, "join"));
-    case "putData": {
-      const hasMeta = Object.hasOwn(request, "meta");
-      return await fylo.putData(requireString(request, "collection"), requireObject(request, "data"), hasMeta ? requireObject(request, "meta") : undefined, hasMeta);
-    }
-    case "batchPutData":
-      return await fylo.batchPutData(requireString(request, "collection"), requireObjectArray(request, "batch"));
-    case "patchDoc":
-      return await fylo.patchDoc(requireString(request, "collection"), requireObject(request, "newDoc"), isRecord(request.oldDoc) ? request.oldDoc : {});
-    case "patchDocs":
-      return await fylo.patchDocs(requireString(request, "collection"), requireObject(request, "update"));
-    case "delDoc":
-      await fylo.delDoc(requireString(request, "collection"), requireString(request, "id"));
-      return { deleted: true };
-    case "restoreDoc": {
-      const id = await fylo.restoreDoc(requireString(request, "collection"), requireString(request, "id"));
-      return { restored: true, id };
-    }
-    case "delDocs":
-      return await fylo.delDocs(requireString(request, "collection"), requireObject(request, "delete"));
-    default:
-      throw new Error(`Unsupported FYLO browser operation: ${request.op}`);
-  }
+  const operation = BROWSER_OPERATIONS[request.op];
+  if (!operation)
+    throw new Error(`Unsupported FYLO browser operation: ${request.op}`);
+  return await operation(fylo, request);
 }
 async function runBrowserRequest(fylo, request) {
   const startedAt = Date.now();
@@ -3094,6 +3171,24 @@ class MemoryFilesystem {
     }
     return [...names].sort();
   }
+  removeSubtree(key) {
+    const prefix = key === "/" ? "/" : `${key}/`;
+    const covered = (entry) => entry === key || entry.startsWith(prefix);
+    for (const file of [...this.files.keys()]) {
+      if (!covered(file))
+        continue;
+      this.files.delete(file);
+      this.mtimes.delete(file);
+    }
+    for (const dir of [...this.dirs]) {
+      if (!covered(dir))
+        continue;
+      this.dirs.delete(dir);
+      this.mtimes.delete(dir);
+    }
+    this.dirs.add("/");
+    this.mtimes.set("/", Date.now());
+  }
   async rmdir(path, options = {}) {
     const key = this.key(path);
     if (!this.dirs.has(key)) {
@@ -3101,24 +3196,8 @@ class MemoryFilesystem {
         throw notDirectory(path);
       return;
     }
-    if (options.recursive) {
-      const prefix = key === "/" ? "/" : `${key}/`;
-      for (const file of [...this.files.keys()]) {
-        if (file === key || file.startsWith(prefix))
-          this.files.delete(file);
-        if (file === key || file.startsWith(prefix))
-          this.mtimes.delete(file);
-      }
-      for (const dir of [...this.dirs]) {
-        if (dir === key || dir.startsWith(prefix))
-          this.dirs.delete(dir);
-        if (dir === key || dir.startsWith(prefix))
-          this.mtimes.delete(dir);
-      }
-      this.dirs.add("/");
-      this.mtimes.set("/", Date.now());
-      return;
-    }
+    if (options.recursive)
+      return this.removeSubtree(key);
     const children = await this.list(path);
     if (children.length > 0) {
       throw new MemoryFilesystemError("ENOTEMPTY", `Directory not empty: ${path}`);
@@ -3355,7 +3434,7 @@ class OpfsFilesystem {
   }
   async appendText(path, data) {
     const handle = await this.fileHandle(path, true);
-    if ("createSyncAccessHandle" in handle) {
+    if (typeof globalThis.document === "undefined" && "createSyncAccessHandle" in handle) {
       const access = await handle.createSyncAccessHandle();
       try {
         access.write(ENCODER3.encode(data), { at: access.getSize() });
@@ -3701,7 +3780,19 @@ function siblingAssetUrl(path) {
 var ENCODER4 = new TextEncoder;
 var DECODER4 = new TextDecoder;
 var WASM_ERROR = -1;
+var WASM_ABI_VERSION = 1;
 var INITIAL_OUTPUT_CAPACITY = 64 * 1024;
+var MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
+var MAX_QUERY_BYTES = 1024 * 1024;
+var MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+class FyloWasmError extends Error {
+  constructor(code, message, options = {}) {
+    super(`[${code}] ${message}`, options);
+    this.name = "FyloWasmError";
+    this.code = code;
+  }
+}
 var MODULE_CACHE = new Map;
 
 class WasmIndexScannerFactory {
@@ -3721,12 +3812,22 @@ class WasmIndexScannerFactory {
     const key = this.url.href;
     let pending = MODULE_CACHE.get(key);
     if (!pending) {
-      pending = fetch(this.url).then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Unable to load FYLO Wasm index scanner: ${response.status}`);
+      pending = (async () => {
+        let response;
+        try {
+          response = await fetch(this.url);
+        } catch (cause) {
+          throw new FyloWasmError("EWASM_FETCH", `Unable to fetch FYLO Wasm index scanner from ${this.url.href}`, { cause });
         }
-        return await WebAssembly.compile(await response.arrayBuffer());
-      });
+        if (!response.ok) {
+          throw new FyloWasmError("EWASM_FETCH", `Unable to load FYLO Wasm index scanner: HTTP ${response.status}`);
+        }
+        try {
+          return await WebAssembly.compile(await response.arrayBuffer());
+        } catch (cause) {
+          throw new FyloWasmError("EWASM_COMPILE", "Unable to compile FYLO Wasm index scanner", { cause });
+        }
+      })();
       MODULE_CACHE.set(key, pending);
       pending.catch(() => MODULE_CACHE.delete(key));
     }
@@ -3734,8 +3835,14 @@ class WasmIndexScannerFactory {
     return await pending;
   }
   async create() {
-    const instance = await WebAssembly.instantiate(await this.loadModule(), {});
-    return new WasmIndexScanner(instance);
+    try {
+      const instance = await WebAssembly.instantiate(await this.loadModule(), {});
+      return new WasmIndexScanner(instance);
+    } catch (cause) {
+      if (cause instanceof FyloWasmError)
+        throw cause;
+      throw new FyloWasmError("EWASM_INSTANTIATE", "Unable to instantiate FYLO Wasm index scanner", { cause });
+    }
   }
 }
 
@@ -3743,12 +3850,22 @@ class WasmIndexScanner {
   constructor(instance) {
     const exports = instance.exports;
     if (!(exports.memory instanceof WebAssembly.Memory)) {
-      throw new Error("FYLO Wasm index scanner did not export memory");
+      throw new FyloWasmError("EWASM_ABI", "FYLO Wasm index scanner did not export memory");
     }
-    for (const name of ["allocate", "deallocate", "load_snapshot", "scan_queries"]) {
+    for (const name of [
+      "abi_version",
+      "allocate",
+      "deallocate",
+      "load_snapshot",
+      "scan_queries"
+    ]) {
       if (typeof exports[name] !== "function") {
-        throw new Error(`FYLO Wasm index scanner did not export ${name}`);
+        throw new FyloWasmError("EWASM_ABI", `FYLO Wasm index scanner did not export ${name}`);
       }
+    }
+    const actualVersion = exports.abi_version();
+    if (actualVersion !== WASM_ABI_VERSION) {
+      throw new FyloWasmError("EWASM_ABI", `Unsupported FYLO Wasm index ABI ${actualVersion}; expected ${WASM_ABI_VERSION}`);
     }
     this.memory = exports.memory;
     this.allocate = exports.allocate;
@@ -3760,33 +3877,58 @@ class WasmIndexScanner {
   }
   loadSnapshot(snapshot) {
     const bytes = snapshot instanceof Uint8Array ? snapshot : new Uint8Array(snapshot);
-    const pointer = this.allocate(bytes.byteLength);
+    if (bytes.byteLength > MAX_SNAPSHOT_BYTES) {
+      throw new FyloWasmError("EWASM_SNAPSHOT", `FYLO Wasm snapshot exceeds ${MAX_SNAPSHOT_BYTES} bytes`);
+    }
+    const pointer = this.allocateRegion(bytes.byteLength, "snapshot");
     try {
       if (bytes.byteLength > 0) {
-        new Uint8Array(this.memory.buffer, pointer, bytes.byteLength).set(bytes);
+        try {
+          new Uint8Array(this.memory.buffer, pointer, bytes.byteLength).set(bytes);
+        } catch (cause) {
+          throw new FyloWasmError("EWASM_MEMORY", "Unable to copy the FYLO index snapshot into Wasm memory", { cause });
+        }
       }
       if (this.loadSnapshotExport(pointer, bytes.byteLength) === WASM_ERROR) {
-        throw new Error("FYLO Wasm index scanner rejected the snapshot");
+        throw new FyloWasmError("EWASM_SNAPSHOT", "FYLO Wasm index scanner rejected the snapshot");
       }
     } finally {
       this.deallocate(pointer, bytes.byteLength);
     }
   }
   scanQueries(queries) {
-    const input = ENCODER4.encode(JSON.stringify(queries));
-    const inputPointer = this.allocate(input.byteLength);
-    new Uint8Array(this.memory.buffer, inputPointer, input.byteLength).set(input);
+    let input;
+    try {
+      input = ENCODER4.encode(JSON.stringify(queries));
+    } catch (cause) {
+      throw new FyloWasmError("EWASM_QUERY", "Unable to encode the FYLO Wasm query", {
+        cause
+      });
+    }
+    if (input.byteLength > MAX_QUERY_BYTES) {
+      throw new FyloWasmError("EWASM_QUERY", `FYLO Wasm query exceeds ${MAX_QUERY_BYTES} bytes`);
+    }
+    const inputPointer = this.allocateRegion(input.byteLength, "query");
+    try {
+      new Uint8Array(this.memory.buffer, inputPointer, input.byteLength).set(input);
+    } catch (cause) {
+      this.deallocate(inputPointer, input.byteLength);
+      throw new FyloWasmError("EWASM_MEMORY", "Unable to copy the FYLO query into Wasm memory", { cause });
+    }
     this.ensureOutput(Math.max(this.outputCapacity, INITIAL_OUTPUT_CAPACITY));
     try {
       let required = this.scanQueriesExport(inputPointer, input.byteLength, this.outputPointer, this.outputCapacity);
       if (required === WASM_ERROR)
-        throw new Error("FYLO Wasm index scanner rejected the query");
+        throw new FyloWasmError("EWASM_QUERY", "FYLO Wasm index scanner rejected the query");
       if (required > this.outputCapacity) {
+        if (required > MAX_OUTPUT_BYTES) {
+          throw new FyloWasmError("EWASM_MEMORY", `FYLO Wasm scan output exceeds ${MAX_OUTPUT_BYTES} bytes`);
+        }
         this.ensureOutput(required);
         required = this.scanQueriesExport(inputPointer, input.byteLength, this.outputPointer, this.outputCapacity);
       }
       if (required === WASM_ERROR || required > this.outputCapacity) {
-        throw new Error("FYLO Wasm index scan failed after resizing its output buffer");
+        throw new FyloWasmError("EWASM_MEMORY", "FYLO Wasm index scan failed after resizing its output buffer");
       }
       return DECODER4.decode(new Uint8Array(this.memory.buffer, this.outputPointer, required)).split(`
 `).filter(Boolean);
@@ -3797,10 +3939,27 @@ class WasmIndexScanner {
   ensureOutput(capacity) {
     if (capacity <= this.outputCapacity)
       return;
+    if (capacity > MAX_OUTPUT_BYTES) {
+      throw new FyloWasmError("EWASM_MEMORY", `FYLO Wasm output allocation exceeds ${MAX_OUTPUT_BYTES} bytes`);
+    }
+    const pointer = this.allocateRegion(capacity, "output");
     if (this.outputPointer)
       this.deallocate(this.outputPointer, this.outputCapacity);
     this.outputCapacity = capacity;
-    this.outputPointer = this.allocate(capacity);
+    this.outputPointer = pointer;
+  }
+  allocateRegion(length, purpose) {
+    try {
+      const pointer = this.allocate(length);
+      if (!Number.isSafeInteger(pointer) || pointer < 0 || pointer + length > this.memory.buffer.byteLength) {
+        throw new RangeError("allocator returned an invalid linear-memory region");
+      }
+      return pointer;
+    } catch (cause) {
+      if (cause instanceof FyloWasmError)
+        throw cause;
+      throw new FyloWasmError("EWASM_MEMORY", `Unable to allocate Wasm memory for the FYLO ${purpose}`, { cause });
+    }
   }
   close() {
     if (this.outputPointer)

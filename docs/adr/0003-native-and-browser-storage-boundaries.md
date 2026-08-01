@@ -1,6 +1,6 @@
 # ADR 0003: Native and Browser Storage Boundaries
 
-- Status: **Accepted**
+- Status: **Accepted; S3 scope superseded by ADR 0007**
 - Date: **2026-07-26**
 - Owners: **FYLO maintainers**
 
@@ -9,7 +9,7 @@
 FYLO's native product is a local-filesystem-primary document store. Users may
 place the root on a locally mounted filesystem that supplies the required
 locking, atomic replacement, durability, metadata, and security semantics.
-S3-compatible clients provide additive backup, verification, and restore.
+Filesystem snapshots and replication remain deployment concerns.
 
 The browser cannot open arbitrary native paths through Rust's filesystem API.
 It has:
@@ -33,8 +33,7 @@ files.
 - Exactly one process owns a root for writes.
 - Native adapters implement platform-specific locking, safe open, atomic
   replacement, sync, metadata, permissions, and recovery.
-- S3-compatible storage is a backup/verify/restore destination, not a primary
-  query or transaction path.
+- Built-in object-storage backup is outside the native product boundary.
 - Network shares and synchronized folders are unsupported unless their exact
   filesystem semantics pass a separate native qualification profile.
 
@@ -148,6 +147,8 @@ permissions evidence.
 
 ## Related decisions
 
+- [ADR 0007](0007-filesystem-only-native-storage.md) supersedes the built-in
+  object-storage backup portions of this decision.
 - [ADR 0001](0001-rust-native-engine-and-portable-wasm-kernel.md)
 - [ADR 0002](0002-compatibility-first-strangler-migration.md)
 - [Support tiers](../releases/support-tiers.md)

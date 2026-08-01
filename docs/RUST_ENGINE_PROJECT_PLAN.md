@@ -1,16 +1,16 @@
 # FYLO Rust Engine Project Plan
 
-- Status: **accepted for incremental implementation**
+- Status: **completed; Rust-native cutover implemented**
 - Plan date: **2026-07-26**
 - Accepted: **2026-07-26**
-- Migration style: **incremental replacement, not a big-bang rewrite**
+- Migration style: **completed incremental replacement**
 - Product versioning: **existing CalVer policy remains authoritative**
 
 ## 1. Executive decision
 
-Build FYLO's next engine generation in Rust, while preserving the existing
-JavaScript implementation as the compatibility oracle until the Rust engine
-earns promotion.
+FYLO's native engine generation is implemented in Rust. Compatibility is
+retained through immutable released executables and versioned fixtures; the
+former JavaScript native implementation is no longer kept in the source tree.
 
 The target product has two Rust deliverables:
 
@@ -30,13 +30,13 @@ This plan does **not** authorize:
 - a new on-disk format;
 - two processes writing the same FYLO root;
 - replacing the current production engine before compatibility gates pass;
-- treating S3-compatible storage as the primary data store;
+- adding a built-in remote object-storage backend;
 - rewriting the Explorer or marketing website in Rust;
 - publishing Rust crates as stable public APIs before an explicit RFC;
 - claiming that cross-compilation proves platform support.
 
-FYLO remains local-filesystem primary. S3-compatible storage remains an
-additive backup, verify, and restore boundary. Documents remain authoritative;
+FYLO remains filesystem-only. Snapshot, replication, and remote-copy tooling
+operate outside the engine boundary (ADR 0007). Documents remain authoritative;
 indexes and caches remain rebuildable derived state.
 
 ## 2. What was learned from the local SESAME project
@@ -140,8 +140,8 @@ migration RFC replace one:
    behavior is not described as POSIX ownership.
 10. Encryption never falls back to ciphertext-as-plaintext or plaintext after
     a key/decryption failure.
-11. S3-compatible backup is not authoritative state and cannot weaken local
-    durability.
+11. External snapshot or replication tooling is not authoritative engine state
+    and cannot weaken local durability.
 12. The machine protocol remains bounded NDJSON with stable error codes.
 13. Browser storage is local browser state. FSA is the document/file boundary;
     OPFS is suitable for private index, cache, and WAL state.
@@ -161,7 +161,6 @@ flowchart TD
     CLI["Native CLI"] --> NATIVE["Native Rust engine"]
     MACHINE --> NATIVE
     NATIVE --> FS["POSIX / NTFS storage adapter"]
-    NATIVE --> S3["S3-compatible backup adapter"]
     EXPLORER["Explorer UI"] --> BROWSER["TypeScript browser host"]
     SHIM["Browser shim"] --> BROWSER
     BROWSER --> FSA["File System Access: documents/files"]
@@ -183,7 +182,7 @@ Dependency direction is inward:
 format <- query <- engine <- machine <- cli
                  ^       ^
                  |       |
-          storage-native replication-s3
+          storage-native
 
 format <- query <- wasm
 ```
@@ -197,7 +196,7 @@ Rules:
 - Only composition roots choose concrete adapters.
 - The CLI is not imported by any library crate.
 - Wasm never depends on `fylo-storage-native`.
-- S3 code never becomes a hidden source of truth.
+- Snapshot and replication tools remain outside the storage engine.
 - Client shims do not reimplement query, permissions, retry, or transaction
   semantics.
 - Crate boundaries are introduced only with working behavior and tests.
@@ -216,7 +215,6 @@ Start with the following crates:
 | `fylo-query`          | Parser, planner, predicates, prefix/range/index algorithms                        | Internal           |
 | `fylo-engine`         | Collections, schemas, permissions, transaction state machine, recovery decisions  | Internal           |
 | `fylo-storage-native` | Native files, locking, atomic replace, sync, xattr/ADS, POSIX/Windows security    | Internal           |
-| `fylo-replication-s3` | Backup manifest, upload, verify, restore, provider compatibility                  | Internal           |
 | `fylo-machine`        | NDJSON request/response contract, limits, cancellation, stable errors             | Internal           |
 | `fylo-cli`            | Native executable and dependency composition                                      | Distributed binary |
 | `fylo-wasm`           | Narrow Wasm ABI over portable format/query/index functions                        | Distributed Wasm   |
@@ -247,9 +245,6 @@ The existing JavaScript tree remains in place during migration.
 │   │   ├── README.md
 │   │   ├── manifest.schema.json
 │   │   └── golden/
-│   ├── backup/v2/
-│   │   ├── README.md
-│   │   └── manifest.schema.json
 │   └── errors/
 │       └── v1.json
 ├── crates/
@@ -257,7 +252,6 @@ The existing JavaScript tree remains in place during migration.
 │   ├── fylo-query/
 │   ├── fylo-engine/
 │   ├── fylo-storage-native/
-│   ├── fylo-replication-s3/
 │   ├── fylo-machine/
 │   ├── fylo-cli/
 │   ├── fylo-wasm/
@@ -277,7 +271,6 @@ The existing JavaScript tree remains in place during migration.
 │   ├── native/
 │   ├── interop/
 │   ├── browser/
-│   ├── s3/
 │   ├── performance/
 │   └── fixtures/
 ├── benches/
@@ -354,7 +347,7 @@ artifacts.
   determinism is needed. Production cryptographic randomness cannot be
   caller-substituted.
 - Avoid mutable globals and implicit process-wide configuration.
-- Default features are minimal. Platform and provider features are explicit.
+- Default features are minimal. Platform-specific features are explicit.
 - Public serialization uses explicit field names and rejects or preserves
   unknown fields according to the versioned contract.
 
@@ -396,7 +389,7 @@ Define and freeze:
 - tombstone, recovery, and version-history behavior;
 - index snapshot and WAL formats;
 - transaction journal phases and durable markers;
-- backup manifest versions and platform tags;
+- snapshot inventory, filesystem, and platform identity;
 - corruption and unsupported-version errors.
 
 Every binary format gets:
@@ -622,31 +615,33 @@ Rollback:
 - if a format version changes, rollback uses a tested restore procedure rather
   than an unsafe downgrade.
 
-### Phase 6 — S3-compatible backup, verify, and restore
+### Phase 6 — Filesystem disaster-recovery boundary
+
+ADR 0007 supersedes the original built-in S3 adapter proposal. This phase is
+an operator qualification boundary, not a Rust storage-engine feature.
 
 Deliver:
 
-- existing manifest compatibility;
-- streaming backup without unbounded memory;
-- checksum and metadata verification;
-- paginated listing and resumable/idempotent operations;
-- restore into a new empty root;
-- corruption, truncation, stale object, wrong platform, and hostile endpoint
-  cases;
-- MinIO plus provisioned-provider qualification profiles.
+- a documented quiesce/snapshot/verify/restore procedure;
+- byte- and metadata-preserving filesystem copy profiles for supported hosts;
+- restore into a new empty path, never over the source root;
+- integrity, query-equivalence, permission, encryption, and version-history
+  verification after restore;
+- explicit guidance that cloud drives, network filesystems, and object-storage
+  sync tools are deployment choices outside FYLO.
 
 Exit gate:
 
-- byte, metadata, permissions, encryption envelopes, versions, and manifest
-  identity survive backup/restore where the platform contract supports them;
-- a malicious or inconsistent provider cannot overwrite the source root;
+- byte, metadata, permissions, encryption envelopes, versions, and root
+  identity survive snapshot/restore where the platform contract supports them;
+- a failed or partial restore cannot overwrite the source root;
 - restored roots pass full integrity and query-equivalence checks;
 - RTO/RPO and resource limits are recorded on named environments.
 
 Rollback:
 
-- current JavaScript backup/restore remains supported until Rust evidence is
-  complete; manifests are never silently upgraded in place.
+- the source root remains untouched and the prior qualified binary can reopen
+  it when the compatibility manifest says downgrade is safe.
 
 ### Phase 7 — Machine protocol and CLI replacement
 
@@ -731,9 +726,9 @@ security cost is low.
 | Crash              | Kill/fail every durable transition point                                  |
 | Corruption         | Truncated, malformed, stale, reordered, and checksum-invalid state        |
 | Interoperability   | Every language shim against exact compiled binaries                       |
-| Provider           | MinIO and explicitly qualified S3-compatible providers                    |
+| Disaster recovery  | Filesystem snapshot/restore and post-restore integrity checks             |
 | Performance        | Reproducible workload, named hardware, percentiles and resources          |
-| Soak               | Sustained mixed reads/writes, recovery, backup, and growth limits         |
+| Soak               | Sustained mixed reads/writes, recovery, snapshots, and growth limits      |
 
 ### 8.2 Required correctness corpus
 
@@ -754,8 +749,8 @@ Include:
 - symlink, hard-link, junction, reparse-point, and path-traversal attempts;
 - partial transaction journals and commit markers;
 - index deletion and deterministic rebuild;
-- backup pagination, retries, duplicate objects, corrupt objects, and wrong
-  manifests;
+- partial filesystem snapshots, missing metadata, corrupt files, and restores
+  made with an incompatible copy profile;
 - browser permission loss, worker restart, OPFS corruption, Wasm failure, and
   JavaScript fallback.
 
@@ -766,7 +761,7 @@ Fuzz at minimum:
 - document and schema parsers;
 - query/SQL parser;
 - index snapshot and WAL decoders;
-- transaction journal and backup manifest;
+- transaction journals and snapshot inventories;
 - NDJSON frames;
 - Wasm ABI buffers and lengths;
 - percent/path decoding and metadata envelopes.
@@ -825,7 +820,6 @@ Target workflows:
 ├── native-storage.yml        # Reusable native filesystem/process matrix
 ├── interop.yml               # Reusable compiled binary/client corpus
 ├── wasm.yml                  # Browser/Wasm build and browser matrix
-├── s3-live.yml               # MinIO and provisioned provider profiles
 ├── security.yml              # Dependency, policy, secrets, unsafe inventory
 ├── nightly.yml               # Fuzz, Miri, sanitizers, mutation, corruption
 ├── performance.yml           # Controlled benchmarks and comparison
@@ -891,7 +885,7 @@ Nightly:
 Weekly:
 
 - mutation tests;
-- cold backup/restore drill;
+- cold filesystem snapshot/restore drill;
 - clean install and upgrade from each supported minor line;
 - client corpus against oldest and newest compatible binaries;
 - reproducible unsigned-build comparison;
@@ -900,7 +894,7 @@ Weekly:
 Release:
 
 - native exact-artifact qualification;
-- full S3-compatible recovery gate;
+- full filesystem snapshot/restore recovery gate;
 - performance limits;
 - minimum soak profile for the release tier;
 - package install, upgrade, rollback/restore, and uninstall without data
@@ -1032,7 +1026,7 @@ The manifest records:
 - FYLO version, commit, source tag, and release run;
 - Rust/Bun versions and lockfile digests;
 - target triple, OS, architecture, build profile, and enabled features;
-- machine, storage, backup, and Wasm ABI versions;
+- machine, storage, and Wasm ABI versions;
 - artifact size and SHA-256;
 - signing/notarization identity and result;
 - SBOM digest and provenance identifiers;
@@ -1079,7 +1073,7 @@ Failure before step 10 leaves a draft and does not move `latest`.
 - Repoint mutable browser `latest` through a normal reviewed commit.
 - Native rollback uses the previous binary only if the compatibility manifest
   says the current root is downgrade-safe.
-- Otherwise restore the pre-upgrade verified backup into a new root.
+- Otherwise restore the pre-upgrade verified snapshot into a new root.
 - Release and storage rollback drills are run before production support.
 
 ## 11. Security architecture
@@ -1090,7 +1084,7 @@ Threat-model:
 
 - untrusted documents, raw files, schemas, metadata, and queries;
 - hostile paths, symlinks, hard links, junctions, reparse points, and races;
-- malicious or compromised S3-compatible endpoints;
+- malicious, partial, or incorrectly permissioned restored trees;
 - corrupt disks, partial writes, disk full, permission loss, and clock jumps;
 - concurrent processes and stale ownership metadata;
 - malformed clients and oversized machine frames;
@@ -1112,8 +1106,8 @@ Threat-model:
   from errors, logs, traces, metrics, and crash reports.
 - Make every privileged operation auditable without logging sensitive payloads.
 - Use standard cryptographic libraries and constructions.
-- Keep encryption keys outside backup payloads unless an explicit,
-  independently protected key-backup design is accepted.
+- Keep encryption keys outside snapshot payloads unless an explicit,
+  independently protected key-escrow design is accepted.
 - Run an independent security review before “supported” promotion.
 
 ### 11.3 Security documentation
@@ -1177,7 +1171,7 @@ docs/
 │   └── client-matrix.md
 ├── operations/
 │   ├── install.md
-│   ├── backup-verify-restore.md
+│   ├── snapshot-verify-restore.md
 │   ├── upgrade-and-rollback.md
 │   ├── recovery-and-rebuild.md
 │   ├── corruption-response.md
@@ -1228,7 +1222,7 @@ bounded operational signals:
 - query plan class and duration without document contents;
 - transaction phase timings;
 - index freshness and rebuild progress;
-- backup/verify/restore progress and last verified identity;
+- snapshot/verify/restore progress and last verified identity;
 - corruption counters and stable error codes;
 - cache/WAL size and compaction;
 - process memory, file descriptors/handles, queue depth, and disk growth.
@@ -1244,8 +1238,7 @@ Operator commands must provide:
 - `version --output json`;
 - read-only `inspect`;
 - `verify`;
-- `backup`;
-- `restore` into a new root;
+- snapshot verification and restore checks for a new root;
 - `rebuild-index`;
 - recovery dry-run where a reliable dry-run is possible;
 - machine-readable output and stable exit/error codes.
@@ -1256,7 +1249,7 @@ Operator commands must provide:
 
 An ADR is required for:
 
-- storage or backup format changes;
+- storage or snapshot-inventory format changes;
 - durability semantics;
 - unsafe code;
 - a new cryptographic construction or key boundary;
@@ -1312,14 +1305,14 @@ Profiles:
 - `smoke`: short local development proof, never release evidence;
 - `candidate`: native package, crash, recovery, interop, and performance gates;
 - `release`: immutable artifacts, explicit limits, restore/upgrade/rollback,
-  provider evidence, and minimum 72-hour soak for production support.
+  native snapshot evidence, and minimum 72-hour soak for production support.
 
 The report records:
 
 - exact input/output artifact digests;
 - source, toolchain, lockfile, target, filesystem, and reference environment;
 - test suites and fixture corpus versions;
-- storage/machine/backup/Wasm ABI versions;
+- storage/machine/Wasm ABI versions;
 - crash/failpoint coverage;
 - restore, upgrade, rollback, and compatibility outcomes;
 - operation count, error ratio, throughput, p50/p95/p99;
@@ -1336,30 +1329,30 @@ The runner refuses release status when:
 - a target is translated/emulated but claimed native;
 - soak duration is below policy;
 - metrics lack explicit pass/fail limits;
-- required backup/restore, compatibility, or security evidence is absent.
+- required snapshot/restore, compatibility, or security evidence is absent.
 
 ## 16. Promotion scorecard
 
 Rust becomes the native default only when all rows are green:
 
-| Area                 | Promotion requirement                                                            |
-| -------------------- | -------------------------------------------------------------------------------- |
-| Format               | All supported historical fixtures read; canonical writes match or migrate safely |
-| Query                | Zero unexplained differential mismatches                                         |
-| Transactions         | Crash matrix proves acknowledged durability and idempotent recovery              |
-| Metadata/security    | Canonical/custom metadata and platform permissions preserve documented behavior  |
-| Root ownership       | Alias, symlink, junction, crash, and stale-owner cases pass natively             |
-| Encryption           | Success and every fail-closed case pass                                          |
-| S3-compatible backup | Backup/verify/restore/corruption pass on qualified providers                     |
-| Browser              | Wasm and JS fallback pass the same corpus                                        |
-| Clients              | Every supported language passes against exact release binaries                   |
-| Platforms            | Every distributed supported target passes native evidence                        |
-| Performance          | Accepted latency, throughput, memory, startup, and growth limits pass            |
-| Operations           | Install, doctor, backup, restore, upgrade, rollback, and uninstall pass          |
-| Security             | Threat model reviewed; no unowned critical finding                               |
-| Supply chain         | SBOM, checksums, signatures, provenance, and verification pass                   |
-| Documentation        | Reference, compatibility, runbooks, and limitations are current                  |
-| Soak                 | Release profile completes on every production-supported target                   |
+| Area              | Promotion requirement                                                            |
+| ----------------- | -------------------------------------------------------------------------------- |
+| Format            | All supported historical fixtures read; canonical writes match or migrate safely |
+| Query             | Zero unexplained differential mismatches                                         |
+| Transactions      | Crash matrix proves acknowledged durability and idempotent recovery              |
+| Metadata/security | Canonical/custom metadata and platform permissions preserve documented behavior  |
+| Root ownership    | Alias, symlink, junction, crash, and stale-owner cases pass natively             |
+| Encryption        | Success and every fail-closed case pass                                          |
+| Disaster recovery | Snapshot/verify/restore/corruption pass on qualified filesystems                 |
+| Browser           | Wasm and JS fallback pass the same corpus                                        |
+| Clients           | Every supported language passes against exact release binaries                   |
+| Platforms         | Every distributed supported target passes native evidence                        |
+| Performance       | Accepted latency, throughput, memory, startup, and growth limits pass            |
+| Operations        | Install, doctor, snapshot, restore, upgrade, rollback, and uninstall pass        |
+| Security          | Threat model reviewed; no unowned critical finding                               |
+| Supply chain      | SBOM, checksums, signatures, provenance, and verification pass                   |
+| Documentation     | Reference, compatibility, runbooks, and limitations are current                  |
+| Soak              | Release profile completes on every production-supported target                   |
 
 ## 17. First implementation backlog
 

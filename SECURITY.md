@@ -2,14 +2,14 @@
 
 ## Supported versions
 
-The Rust engine is a preview and makes no production-support claim. The current
-JavaScript engine follows the release support window published with each FYLO
-release; security fixes are prioritized on the default branch.
+The native Rust engine is the public executable implementation. The current
+FYLO release follows the support window published with that release; security
+fixes are prioritized on the default branch.
 
 | Surface | Security support |
 | --- | --- |
-| Current JavaScript release | Published release window |
-| Rust read-only preview | Best effort; no production claim |
+| Current FYLO release | Published release window |
+| Unreleased Rust candidate | Best effort; no production claim |
 | Historical previews | No guaranteed backports |
 
 ## Reporting a vulnerability
@@ -33,8 +33,8 @@ remediation, disclosure, and credit with the reporter.
 
 Path traversal and link races, root ownership, transaction durability,
 recovery, permission bypass, UID/GID/mode handling, xattrs/ADS, encryption,
-query isolation, machine framing, subprocess lifecycle, S3-compatible
-backup/restore, browser storage, Wasm memory boundaries, release provenance,
+query isolation, machine framing, subprocess lifecycle, browser storage, Wasm
+memory boundaries, release provenance, filesystem snapshot/restore guidance,
 and dependency compromise are in scope.
 
 General support, feature requests, performance suggestions without a security

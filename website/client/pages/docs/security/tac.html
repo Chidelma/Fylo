@@ -1,0 +1,133 @@
+<style>
+  #home-content {
+    display: none;
+  }
+</style>
+
+<div class="doc-shell">
+  <docs-nav />
+
+  <div class="doc-main doc-page">
+    <span class="eyebrow">Guide</span>
+    <h1>Encryption &amp; access</h1>
+    <p class="doc-lede">
+      Two separate mechanisms, deliberately not merged: field-level encryption for
+      confidentiality and POSTIX for per-record authorization. Each is opt-in, and each
+      is honest about what it does not protect against.
+    </p>
+
+    <div class="doc-section">
+      <h2>Field encryption</h2>
+      <p>
+        Fields listed in a schema's <code>$encrypted</code> array are stored with
+        AES-GCM. Equality queries still work through HMAC blind indexes, so a lookup
+        never has to decrypt.
+      </p>
+      <pre class="code-block"><code>{schemaCode}</code></pre>
+      <p>
+        Nested fields use a <strong>slash-separated</strong> path
+        (<code>payload/verifier</code>), matching the index field-path format. A dotted
+        path such as <code>payload.verifier</code> is accepted as a literal field name,
+        matches nothing, and silently leaves the field unencrypted — if a field is not
+        being encrypted, check the stored document first.
+      </p>
+      <ul>
+        <li><code>FYLO_ENCRYPTION_KEY</code> must be at least 32 characters.</li>
+        <li><code>FYLO_CIPHER_SALT</code> is recommended, and derives the blind index.</li>
+        <li>The cipher is process-global: one key for all collections.</li>
+      </ul>
+      <p>
+        Decryption is schema-driven and does not depend on write history. A read-only
+        process loads a collection's <code>$encrypted</code> registration on its first
+        read, so replicas, reporting jobs, and event-sourced replay decrypt correctly
+        without writing first.
+      </p>
+      <div class="doc-note doc-note--warn">
+        <p>
+          <strong>Reads fail closed.</strong> If a field the schema declares
+          <code>$encrypted</code> cannot be decrypted — missing key, wrong key, a value
+          that fails authentication, or a value stored before the field was encrypted —
+          the operation fails with <code>EDECRYPTFAILED</code> naming the collection and
+          field. FYLO never hands back a stored value as if it were plaintext when it
+          cannot verify it.
+        </p>
+        <p>
+          The consequence: adding a field to <code>$encrypted</code> requires rewriting
+          the documents that already hold a plaintext value for it.
+        </p>
+      </div>
+      <p>
+        Blind indexes leak frequency. An attacker with index access can count how often a
+        value repeats without decrypting anything — that is the price of indexed equality
+        on encrypted data, and it is a real one for low-cardinality fields.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>POSTIX access control</h2>
+      <p>
+        POSTIX binds a POSIX UID, GID, and mode to individual records. FYLO applies
+        <code>chown</code> and <code>chmod</code> and stores a portable descriptor in
+        <code>user.fylo.access</code> — the permission lives on the file, not in a
+        parallel table that could disagree with it.
+      </p>
+      <div class="doc-note">
+        <p>
+          The Node shim exposes the fluent <code>.as()</code> form. Every binary-backed
+          shim carries the same identity as an <code>access</code> object on the machine
+          request, documented under <a href="/docs/protocol">Machine protocol</a>.
+        </p>
+      </div>
+      <pre class="code-block"><code>{postixCode}</code></pre>
+      <p>
+        Any omitted identity retains the new file's native owner or group; omitting
+        <code>mode</code> uses <code>0o600</code>. Mode classes evaluate with normal
+        POSIX precedence — owner bits for the owner UID, otherwise group bits for a
+        member of the record GID, otherwise other bits. Membership does not fall through
+        to <code>other</code> when the selected class denies the operation, so use
+        <code>0o660</code> rather than <code>0o600</code> for a group-writable record.
+      </p>
+      <p>SQL uses the same execution context without putting credentials in the statement:</p>
+      <pre class="code-block"><code>{sqlAccessCode}</code></pre>
+      <p>
+        Membership resolves from the host POSIX group database when only a UID is
+        supplied. Applications with virtual users may additionally attach a trusted,
+        request-scoped <code>groups</code> array over the local NDJSON boundary:
+      </p>
+      <pre class="code-block"><code>{actorCode}</code></pre>
+      <div class="doc-note doc-note--warn">
+        <p>
+          Treat stdin as a privileged application boundary. Derive both <code>uid</code>
+          and <code>groups</code> from authenticated server state and never copy either
+          from an end-user payload. The cached binary clears <code>groups</code> after
+          each request and falls back to the host resolver when it is omitted.
+        </p>
+        <p>
+          FYLO does not authenticate the UID — it is an authorization claim your
+          application supplies. Validate the caller before passing one. The FYLO process
+          must also have permission to call <code>chown</code>, or the put fails
+          atomically.
+        </p>
+      </div>
+      <p>
+        Denied direct operations throw <code>FyloPermissionError</code> with
+        <code>code === 'EACCES'</code>; queries and SQL omit unreadable records rather
+        than failing. A record written without <code>.as()</code> has no descriptor and
+        remains open.
+      </p>
+      <p>
+        POSTIX is available only when the native binary and its binary-backed shims run
+        on a POSIX host such as macOS or Linux. It is not a Windows authorization
+        boundary, even though Windows supports FYLO's crash recovery. Browser, Explorer,
+        and WebView-based mobile clients cannot call <code>chown</code>/<code>chmod</code>
+        and therefore do not expose an equivalent boundary — keep them behind an
+        authenticated native gateway when POSTIX enforcement is required.
+      </p>
+    </div>
+
+    <div class="doc-pager">
+      <a href="/docs/schemas">← Schemas &amp; migrations</a>
+      <a href="/docs/versioning">Version control →</a>
+    </div>
+  </div>
+</div>

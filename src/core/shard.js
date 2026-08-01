@@ -68,6 +68,7 @@ export function legacyShardOf(id) {
  * @returns {string[]}
  */
 export function shardCandidates(id, width, previousWidths = []) {
+    /** @type {string[]} */
     const candidates = []
     for (const candidate of [width, ...previousWidths]) {
         const shard = shardOf(id, candidate)

@@ -1,5 +1,5 @@
 .stats {
-  padding: 1rem;
+  padding: 1.75rem 1rem;
   border-top: 1px solid var(--w-divider);
   border-bottom: 1px solid var(--w-divider);
   background: var(--w-surface-container-low);
@@ -11,16 +11,37 @@
 }
 
 .stat-value {
-  font-size: 1.9rem;
+  font-size: clamp(1.9rem, 3.5vw, 2.4rem);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.03em;
   color: var(--w-primary);
   font-family: ui-monospace, Menlo, Consolas, monospace;
+  /* Falls back to the flat primary colour where background-clip:text is absent. */
+  background: linear-gradient(180deg, var(--fylo-stat-top), var(--w-primary));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* `O(log n)` wraps mid-token in a narrow column and knocks the row's baselines
+   out of line. */
+.stat-value {
+  white-space: nowrap;
+}
+
+@media (max-width: 599.98px) {
+  .stat {
+    padding: 1rem 0.25rem;
+  }
+  .stat-value {
+    font-size: 1.6rem;
+  }
 }
 
 .stat-label {
-  margin-top: 0.35rem;
+  margin-top: 0.5rem;
   color: var(--w-text-subtle);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   line-height: 1.5;
+  letter-spacing: 0.01em;
 }

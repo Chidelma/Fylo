@@ -3,7 +3,7 @@ import TTID from '../vendor/ttid.mjs'
 import { join } from './path.js'
 
 /**
- * Browser-compatible port of `src/storage/prefix-index.js`. Stores the same
+ * Browser host for the canonical prefix-index format. Stores the same
  * `manifest.json` + `keys.snapshot` + `keys.wal` shape so a future migration
  * tool can move index files between the server and a browser-OPFS deployment
  * unchanged. The crypto hash uses Web Crypto so it works on Bun, Node 18+ and
@@ -654,7 +654,7 @@ export class BrowserPrefixIndex {
 
     /**
      * Binary search returning the byte offset of the first key ≥ `prefix`.
-     * Matches `src/storage/prefix-index.js` exactly.
+     * Matches the native Rust prefix-index encoding exactly.
      *
      * @param {Uint8Array} bytes
      * @param {string} prefix

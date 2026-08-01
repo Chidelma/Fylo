@@ -5,67 +5,35 @@
 // declared point must be reached by some scenario. A new failpoint therefore
 // cannot be added without either being exercised here or failing this gate,
 // which is the property a hand-maintained list cannot give.
-import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import Fylo from '../src/index.js'
-import { shardOf } from '../src/core/shard.js'
-import { getXattr } from '../src/storage/xattr.js'
+import { Fylo } from '../clients/node/fylo.mjs'
 
-const workspace = await mkdtemp(join(tmpdir(), 'fylo-rust-crash-'))
+const workspace = await realpath(await mkdtemp(join(tmpdir(), 'fylo-rust-crash-')))
 const template = join(workspace, 'template')
 const collection = 'records'
 const fileCollection = 'assets'
 const identifier = '4VRNF52JPCO'
 const secondIdentifier = '4VRNF52JPCP'
 const fileIdentifier = '4VRNF52JPCQ'
+const crashFileIdentifier = '4VRNF52JPCS'
 const deletedIdentifier = '4VRNF52JPCR'
+const binary = join(
+    process.cwd(),
+    'target',
+    'debug',
+    platform() === 'win32' ? 'fylo-write-preview.exe' : 'fylo-write-preview'
+)
+const machineBinary = join(
+    process.cwd(),
+    'target',
+    'debug',
+    platform() === 'win32' ? 'fylo-rust.exe' : 'fylo-rust'
+)
 
 try {
-    await mkdir(template, { recursive: true })
-    const seed = new Fylo(template, { versioning: { autoCommit: false } })
-    await seed[collection].create()
-    await seed[fileCollection].create({ kind: 'file' })
-    await seed[collection].put(identifier, { name: 'Ada', score: 42 })
-    await seed[collection].put(secondIdentifier, { name: 'Grace', score: 50 })
-    await seed[collection].put(deletedIdentifier, { name: 'Linus', score: 1 })
-    await seed[collection].delete(deletedIdentifier)
-    const seededFile = String(
-        await seed[fileCollection]
-            .put(new File([new Uint8Array([1, 2, 3, 4])], 'seed.bin'), { key: '/seed.bin' })
-            .metadata({ source: 'seed' })
-    )
-    await seed.close()
-
-    // Raw files keep their durable key in an extended attribute. Some
-    // filesystems — a CI runner's tmpfs among them — silently carry none, and a
-    // collection seeded there is unreadable through no fault of the writer. Ask
-    // the attribute directly: a recovery of a stable collection would answer
-    // without ever reading a raw file.
-    const extendedAttributes =
-        getXattr(
-            join(
-                template,
-                '.buckets',
-                fileCollection,
-                'docs',
-                shardOf(seededFile),
-                `${seededFile}.bin`
-            ),
-            'user.fylo.key'
-        ) !== null
-
-    // A versioned root is a separate template: the repository failpoints are
-    // only reachable where `.fylo-vcs` exists.
-    const versionedTemplate = join(workspace, 'versioned-template')
-    await mkdir(versionedTemplate, { recursive: true })
-    const versionedSeed = new Fylo(versionedTemplate)
-    await versionedSeed[collection].create()
-    await versionedSeed[collection].put(identifier, { name: 'Ada', score: 42 })
-    await versionedSeed[collection].put(secondIdentifier, { name: 'Grace', score: 50 })
-    await versionedSeed.close()
-
     await command([
         process.execPath,
         './scripts/run-rust.mjs',
@@ -75,14 +43,87 @@ try {
         '-p',
         'fylo-cli',
         '--bin',
-        'fylo-write-preview'
+        'fylo-write-preview',
+        '--bin',
+        'fylo-rust'
     ])
-    const binary = join(
-        process.cwd(),
-        'target',
-        'debug',
-        platform() === 'win32' ? 'fylo-write-preview.exe' : 'fylo-write-preview'
-    )
+
+    await mkdir(template, { recursive: true })
+    const seedFile = join(workspace, 'seed.bin')
+    await writeFile(seedFile, new Uint8Array([1, 2, 3, 4]))
+    const seed = new Fylo(template, { binary: machineBinary, exclusiveRoot: true })
+    await seed.ready
+    await requestRequired(seed, { op: 'createCollection', collection, kind: 'document' })
+    await requestRequired(seed, {
+        op: 'createCollection',
+        collection: fileCollection,
+        kind: 'file'
+    })
+    await requestRequired(seed, {
+        op: 'putData',
+        collection,
+        id: identifier,
+        data: { name: 'Ada', score: 42 }
+    })
+    await requestRequired(seed, {
+        op: 'putData',
+        collection,
+        id: secondIdentifier,
+        data: { name: 'Grace', score: 50 }
+    })
+    await requestRequired(seed, {
+        op: 'putData',
+        collection,
+        id: deletedIdentifier,
+        data: { name: 'Linus', score: 1 }
+    })
+    await requestRequired(seed, { op: 'delDoc', collection, id: deletedIdentifier })
+    const seededFile = await requestRequired(seed, {
+        op: 'putData',
+        collection: fileCollection,
+        id: fileIdentifier,
+        file: { path: seedFile, key: '/seed.bin' },
+        meta: { source: 'seed' }
+    })
+    const seededMetadata = await requestRequired(seed, {
+        op: 'getMeta',
+        collection: fileCollection,
+        id: seededFile
+    })
+    await seed.close()
+
+    // A successful raw-file metadata read proves that this filesystem carries
+    // the platform metadata used to recover the durable key.
+    const extendedAttributes = seededMetadata.key === '/seed.bin'
+
+    // A versioned root is a separate template: the repository failpoints are
+    // only reachable where `.fylo-vcs` exists.
+    const versionedTemplate = join(workspace, 'versioned-template')
+    await mkdir(versionedTemplate, { recursive: true })
+    const versionedSeed = new Fylo(versionedTemplate, {
+        binary: machineBinary,
+        exclusiveRoot: true
+    })
+    await versionedSeed.ready
+    await requestRequired(versionedSeed, {
+        op: 'createCollection',
+        collection,
+        kind: 'document'
+    })
+    await requestRequired(versionedSeed, {
+        op: 'putData',
+        collection,
+        id: identifier,
+        data: { name: 'Ada', score: 42 }
+    })
+    await requestRequired(versionedSeed, {
+        op: 'putData',
+        collection,
+        id: secondIdentifier,
+        data: { name: 'Grace', score: 50 }
+    })
+    await requestRequired(versionedSeed, { op: 'commit', message: 'crash matrix seed' })
+    await versionedSeed.close()
 
     const { failpoints } = JSON.parse((await run(binary, ['failpoints'])).stdout)
     assert(Array.isArray(failpoints) && failpoints.length > 0, 'Rust declared no failpoints')
@@ -111,7 +152,7 @@ try {
                 '--collection',
                 fileCollection,
                 '--id',
-                fileIdentifier,
+                crashFileIdentifier,
                 '--bytes-hex',
                 '0a0b0c',
                 '--key',
@@ -246,11 +287,12 @@ try {
         }
     ].filter((scenario) => extendedAttributes || !scenario.name.includes('file'))
 
-    // Each durable transition is interrupted two ways. `abort` loses the
-    // process, so the next opener must recover the journal. `enospc` is an
-    // ordinary I/O error, so the writer must roll back in place and leave
-    // nothing for recovery to do — a distinction the crash case cannot make.
-    const ACTIONS = ['abort', 'enospc']
+    // Each durable transition is interrupted three ways. `abort` loses the
+    // process, so the next opener must recover the journal. `enospc` and
+    // `edquot` are ordinary I/O errors, so the writer must roll back in place
+    // and leave nothing for recovery to do — a distinction the crash case
+    // cannot make.
+    const ACTIONS = ['abort', 'enospc', 'edquot']
     const reached = new Set()
     const unsupported = new Set()
     let interrupted = 0
@@ -281,7 +323,13 @@ try {
                         `${failpoint}/${scenario.name}: a full volume was not reported as one: ${failed.stderr.trim()}`
                     )
                 }
-                await assertRecoverable(binary, root, failpoint, scenario.name, action)
+                if (action === 'edquot') {
+                    assert(
+                        /quota/i.test(failed.stderr),
+                        `${failpoint}/${scenario.name}: quota exhaustion was not reported as one: ${failed.stderr.trim()}`
+                    )
+                }
+                await assertRecoverable(binary, root, failpoint, scenario, action)
                 await rm(root, { recursive: true, force: true })
             }
         }
@@ -333,11 +381,12 @@ try {
  * generation with an index that matches its documents.
  */
 async function assertRecoverable(binary, root, failpoint, scenario, action) {
-    const label = `${failpoint}/${scenario}/${action}`
+    const label = `${failpoint}/${scenario.name}/${action}`
+    const recoveryCollection = scenario.name === 'put-file' ? fileCollection : collection
 
-    const first = await run(binary, ['recover', '--root', root, '--collection', collection])
+    const first = await run(binary, ['recover', '--root', root, '--collection', recoveryCollection])
     assert(first.exitCode === 0, `${label}: Rust recovery failed: ${first.stderr}`)
-    if (action === 'enospc') {
+    if (action !== 'abort') {
         // The writer stayed alive, so it owed itself a rollback before
         // returning the error. Anything left for recovery means it did not.
         assert(
@@ -345,18 +394,25 @@ async function assertRecoverable(binary, root, failpoint, scenario, action) {
             `${label}: a failed write left its journal behind instead of rolling back`
         )
     }
-    const second = await run(binary, ['recover', '--root', root, '--collection', collection])
+    const second = await run(binary, [
+        'recover',
+        '--root',
+        root,
+        '--collection',
+        recoveryCollection
+    ])
     assert(second.exitCode === 0, `${label}: repeated recovery failed: ${second.stderr}`)
     assert(
         JSON.parse(second.stdout).recovered === false,
         `${label}: recovery is not idempotent — the second pass still had work`
     )
 
-    const database = new Fylo(root, { versioning: { autoCommit: false } })
-    await database.ready()
+    const database = new Fylo(root, { binary: machineBinary, exclusiveRoot: true })
+    await database.ready
     try {
-        for (const name of [collection, fileCollection]) {
-            const inspection = await database[name].inspect()
+        const expectedCollections = scenario.template ? [collection] : [collection, fileCollection]
+        for (const name of expectedCollections) {
+            const inspection = await database.inspectCollection(name)
             assert(
                 Number.isFinite(Number(inspection.docsStored)),
                 `${label}: ${name} is unreadable after recovery`
@@ -366,9 +422,9 @@ async function assertRecoverable(binary, root, failpoint, scenario, action) {
                 `${label}: ${name} index disagrees with its documents after recovery: ${JSON.stringify(inspection)}`
             )
         }
-        const survivor = (await database[collection].get(secondIdentifier).once())[secondIdentifier]
+        const survivor = (await database.getDoc(collection, secondIdentifier))[secondIdentifier]
         assert(
-            survivor !== undefined || scenario === 'sql-delete',
+            survivor !== undefined || scenario.name === 'sql-delete',
             `${label}: an untouched document disappeared`
         )
     } finally {
@@ -407,6 +463,16 @@ async function cloneRoot(source, target) {
     // robocopy reports copied/extra files with codes below 8; only 8 and above
     // are failures.
     if (exitCode >= okExit) throw new Error(`cloning ${source} failed (${exitCode}): ${stderr}`)
+}
+
+async function requestRequired(database, request) {
+    const response = await database.request(request)
+    if (!response.ok) {
+        throw new Error(
+            `${request.op} failed (${response.error?.code}): ${response.error?.message}`
+        )
+    }
+    return response.result
 }
 
 async function run(binary, arguments_, overrides = {}) {

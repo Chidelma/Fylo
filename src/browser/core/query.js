@@ -105,24 +105,29 @@ export class BrowserQueryEngine {
      * @returns {boolean}
      */
     matchesOperand(value, operand) {
-        if (operand.$eq !== undefined && value != operand.$eq) return false
-        if (operand.$ne !== undefined && value == operand.$ne) return false
-        if (operand.$gt !== undefined && !this.matchesNumber(value, '$gt', operand.$gt))
-            return false
-        if (operand.$gte !== undefined && !this.matchesNumber(value, '$gte', operand.$gte))
-            return false
-        if (operand.$lt !== undefined && !this.matchesNumber(value, '$lt', operand.$lt))
-            return false
-        if (operand.$lte !== undefined && !this.matchesNumber(value, '$lte', operand.$lte))
-            return false
-        if (
-            operand.$like !== undefined &&
-            (typeof value !== 'string' || !this.matchesLike(value, operand.$like))
-        )
-            return false
-        if (operand.$contains !== undefined) {
-            if (!Array.isArray(value) || !value.some((item) => item == operand.$contains))
-                return false
+        /**
+         * Each operator's predicate, evaluated only when the operand supplies
+         * it. Every supplied operator must hold.
+         * @type {Record<string, (expected: any) => boolean>}
+         */
+        const predicates = {
+            // eslint-disable-next-line eqeqeq -- loose compare is the documented FYLO semantic
+            $eq: (expected) => value == expected,
+            // eslint-disable-next-line eqeqeq
+            $ne: (expected) => value != expected,
+            $gt: (expected) => this.matchesNumber(value, '$gt', expected),
+            $gte: (expected) => this.matchesNumber(value, '$gte', expected),
+            $lt: (expected) => this.matchesNumber(value, '$lt', expected),
+            $lte: (expected) => this.matchesNumber(value, '$lte', expected),
+            $like: (expected) => typeof value === 'string' && this.matchesLike(value, expected),
+            $contains: (expected) =>
+                // eslint-disable-next-line eqeqeq
+                Array.isArray(value) && value.some((item) => item == expected)
+        }
+        const supplied = /** @type {Record<string, any>} */ (operand)
+        for (const [operator, predicate] of Object.entries(predicates)) {
+            if (supplied[operator] === undefined) continue
+            if (!predicate(supplied[operator])) return false
         }
         return true
     }

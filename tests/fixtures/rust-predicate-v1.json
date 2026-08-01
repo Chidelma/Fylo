@@ -80,10 +80,7 @@
         {
             "name": "stable input order with limit",
             "query": {
-                "$ops": [
-                    { "role": { "$eq": "admin" } },
-                    { "role": { "$eq": "editor" } }
-                ],
+                "$ops": [{ "role": { "$eq": "admin" } }, { "role": { "$eq": "editor" } }],
                 "$limit": 2
             },
             "rows": [

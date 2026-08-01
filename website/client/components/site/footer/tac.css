@@ -1,87 +1,104 @@
 .site-footer {
-  display: block;
-  margin-top: 4rem;
-  padding: 3rem 0 2rem;
+    display: block;
+    /* Sections already end on their own padding; 4rem on top of that left a
+     visible hole on short pages like /docs. */
+    margin-top: 1rem;
+    padding: 3.5rem 0 2rem;
 }
 
 .footer-row {
-  row-gap: var(--w-space-6);
+    row-gap: var(--w-space-6);
 }
 
 .footer-brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  color: var(--w-text);
-  text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--w-text);
+    text-decoration: none;
 }
 
 .footer-mark {
-  width: 22px;
-  height: 22px;
+    width: 22px;
+    height: 22px;
 }
 
 .footer-desc {
-  max-width: 26rem;
-  margin: 0.75rem 0 0.5rem;
-  color: var(--w-text-subtle);
-  font-size: 0.9rem;
-  line-height: 1.7;
+    max-width: 26rem;
+    margin: 0.75rem 0 0.5rem;
+    color: var(--w-text-subtle);
+    font-size: 0.9rem;
+    line-height: 1.7;
 }
 
 .footer-release {
-  margin: 0;
-  color: var(--w-text-very-subtle);
-  font-size: 0.8rem;
+    margin: 0;
+    color: var(--w-text-very-subtle);
+    font-size: 0.8rem;
 }
 
 .footer-release a {
-  color: var(--w-text-subtle);
+    color: var(--w-text-subtle);
 }
 
 .footer-col-title {
-  margin-bottom: 0.6rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--w-text-subtle);
+    margin-bottom: 0.6rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--w-text-subtle);
 }
 
 .footer-links {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
 }
 
 .footer-links a {
-  color: var(--w-text-subtle);
-  text-decoration: none;
-  font-size: 0.9rem;
+    color: var(--w-text-subtle);
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: color 0.15s ease;
 }
 
 .footer-links a:hover {
-  color: var(--w-primary);
+    color: var(--w-primary);
 }
 
-.footer-divider {
-  margin: 2rem 0 1.25rem;
-}
+/* .footer-rule lives in site.css — Tachyon's scoped sheet does not reach it. */
 
 .footer-bottom {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 0.75rem;
-  color: var(--w-text-very-subtle);
-  font-size: 0.8rem;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.75rem;
+    color: var(--w-text-very-subtle);
+    font-size: 0.8rem;
 }
 
 .footer-bottom a {
-  color: var(--w-text-subtle);
+    color: var(--w-text-subtle);
+}
+
+@media (max-width: 760px) {
+    .footer-links {
+        gap: 0;
+    }
+
+    .footer-brand,
+    .footer-release a,
+    .footer-links a,
+    .footer-bottom a {
+        display: inline-flex;
+        align-items: center;
+        min-width: 44px;
+        min-height: 44px;
+    }
 }

@@ -70,8 +70,8 @@ The layout yields 1296 uniformly used buckets. Write locality is lost:
 consecutive writes scatter instead of landing together. FYLO tolerates this
 because queries are answered from the prefix index rather than by walking
 directories, and full scans are index rebuilds that are linear regardless. The
-cost lands on the S3 mirror, whose new objects now spread across shards rather
-than concentrating in the newest directory.
+cost lands on snapshot and replication tooling, whose copied objects now spread
+across shards rather than concentrating in the newest directory.
 
 This is a storage-format change. For the published compatibility window a
 point lookup tries the canonical shard and then the superseded one, so a root

@@ -278,7 +278,7 @@ describe('web release operations', () => {
     })
 
     test('keeps operational runbooks available to a clean checkout', async () => {
-        const runbooks = ['ops/s3-backup.md', 'docs/operations/web-release.md']
+        const runbooks = ['docs/operations/web-release.md']
         for (const runbook of runbooks) {
             await expect(Bun.file(runbook).exists()).resolves.toBe(true)
             await expect(

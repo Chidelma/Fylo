@@ -1,0 +1,62 @@
+<style>
+  #home-content {
+    display: none;
+  }
+</style>
+
+<div class="doc-shell">
+  <docs-nav />
+
+  <div class="doc-main doc-page">
+    <span class="eyebrow">Reference</span>
+    <h1>Error codes</h1>
+    <p class="doc-lede">
+      Every failed machine response carries a non-empty <code>error.code</code>. The set
+      is additive — new codes may appear in later releases, and an existing code keeps
+      its meaning forever. Branch on the code, never on the message text.
+    </p>
+
+    <div class="doc-section doc-section--wide">
+      <div class="doc-table-wrap">
+        <table class="doc-table">
+          <thead>
+            <tr><th>Code</th><th>Meaning</th><th>Retry guidance</th></tr>
+          </thead>
+          <tbody>
+            <loop :for="let row of codes">
+              <tr>
+                <td><code>{row.code}</code></td>
+                <td>{row.meaning}</td>
+                <td>{row.retry}</td>
+              </tr>
+            </loop>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="doc-section">
+      <h2>Storage-level codes</h2>
+      <p>
+        Failures raised below the protocol layer may carry additional stable codes — for
+        example <code>FYLO_COLLECTION_NOT_FOUND</code>. Those retain their meaning across
+        releases under the same additive policy, so they are equally safe to branch on.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>In-process errors</h2>
+      <p>
+        The Node and browser APIs throw typed errors rather than returning a response
+        envelope. A denied operation throws <code>FyloPermissionError</code> with
+        <code>code === 'EACCES'</code>; the code values are the same set documented above,
+        so error handling ports between the two surfaces without a translation table.
+      </p>
+    </div>
+
+    <div class="doc-pager">
+      <a href="/docs/protocol">← Machine protocol</a>
+      <a href="/docs/limitations">Limitations →</a>
+    </div>
+  </div>
+</div>

@@ -1,11 +1,24 @@
+/* Match the 24px column gutter DuVay gives the grid — a tighter row gap reads
+   as a layout mistake. */
 .features-row {
-  row-gap: var(--w-space-4);
+  row-gap: var(--w-space-6);
 }
 
 .feature-card {
   height: 100%;
-  padding: 1.5rem;
+  padding: 1.65rem;
   box-sizing: border-box;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 60%);
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.feature-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(248, 155, 75, 0.38);
+  box-shadow: 0 22px 44px -28px rgba(0, 0, 0, 0.9);
 }
 
 .feature-card h3 {

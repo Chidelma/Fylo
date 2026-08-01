@@ -1,6 +1,6 @@
 # ADR 0001: Rust Native Engine and Portable Wasm Kernel
 
-- Status: **Accepted**
+- Status: **Accepted; S3 scope superseded by ADR 0007**
 - Date: **2026-07-26**
 - Owners: **FYLO maintainers**
 
@@ -13,7 +13,6 @@ critical paths include:
 - query parsing, planning, and index scans;
 - transactions, crash recovery, and root ownership;
 - native POSIX and Windows filesystem behavior;
-- S3-compatible backup, verification, and restore;
 - a bounded machine protocol used by thin language clients;
 - a browser engine hosted by workers, File System Access, and OPFS.
 
@@ -42,8 +41,7 @@ to own browser API calls, worker lifecycle, FSA handles, OPFS persistence,
 buffer transfer, fallback selection, and UI behavior.
 
 The shared Rust surface is algorithms and versioned formats—not native I/O.
-Native storage and S3-compatible backup remain adapter boundaries unavailable
-to the Wasm crate.
+Native storage remains an adapter boundary unavailable to the Wasm crate.
 
 Use one Cargo workspace and one lockfile. Begin with these intended crate
 responsibilities, adding a crate only when its first working vertical slice is
@@ -53,7 +51,6 @@ implemented:
 - `fylo-query`;
 - `fylo-engine`;
 - `fylo-storage-native`;
-- `fylo-replication-s3`;
 - `fylo-machine`;
 - `fylo-cli`;
 - `fylo-wasm`;
@@ -68,7 +65,6 @@ stable Rust library API or crates.io publication.
 - Native and browser adapters depend inward on portable contracts.
 - The CLI is a composition root and is not imported by library crates.
 - `fylo-wasm` never depends on `fylo-storage-native`.
-- S3-compatible code never becomes authoritative storage.
 - Language clients communicate through the versioned machine protocol and do
   not reimplement engine semantics.
 - Cyclic crate dependencies are prohibited.

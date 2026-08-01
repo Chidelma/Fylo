@@ -14,9 +14,9 @@ concurrency:
 
 jobs:
     windows-storage:
-        name: Windows x64 storage safety (${{ matrix.os }})
+        name: Windows x64 Rust release safety (${{ matrix.os }})
         runs-on: ${{ matrix.os }}
-        timeout-minutes: 30
+        timeout-minutes: 45
         strategy:
             fail-fast: false
             matrix:
@@ -49,32 +49,28 @@ jobs:
             - name: Install dependencies
               run: bun install --frozen-lockfile
 
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
             - name: Install verified Windows vendor binaries
               shell: pwsh
               env:
                   GITHUB_TOKEN: ${{ github.token }}
               run: ./scripts/install-vendor-bins.ps1
 
-            - name: Verify native lock crash and reclaim
-              run: |
-                  bun test tests/integration/fs-lock.test.js --timeout 120000 --parallel=1
-                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                  bun test tests/integration/machine-hardening.test.js --test-name-pattern 'exclusive root ownership' --timeout 120000 --parallel=1
+            - name: Test the native Rust storage contract
+              run: >-
+                  bun ./scripts/run-rust.mjs cargo test --locked
+                  -p fylo-storage-native -p fylo-engine -p fylo-machine -p fylo-cli
 
-            - name: Verify interrupted transaction recovery
-              run: |
-                  bun test tests/integration/transactions.test.js --test-name-pattern 'startup read rolls back a transaction interrupted by SIGKILL|rollback restores document xattrs exactly|recovery rejects symlinked capture paths without changing an outside sentinel|recovery rolls forward after the durable commit marker' --timeout 120000 --parallel=1
-                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                  bun test tests/integration/crash-recovery.test.js --timeout 120000 --parallel=1
+            - name: Recover every interrupted native durable transition
+              run: bun run rust:crash:matrix
 
-            - name: Verify NTFS junction and reparse-point defenses
-              run: bun test tests/integration/document-path-security.test.js tests/integration/secure-open.test.js --timeout 120000 --parallel=1
-
-            - name: Run Windows storage regression suite
-              run: bun test tests/integration/xattr.test.js tests/integration/durable.test.js tests/integration/filesystem.test.js tests/integration/raw-files.test.js tests/integration/collection-lock.test.js tests/integration/vcs-recovery.test.js tests/integration/s3-backup.test.js tests/integration/s3-restore.test.js --timeout 300000 --parallel=1
-
-            - name: Build native Windows executable
+            - name: Build exact native Rust release executable
               shell: pwsh
+              env:
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_BUILD_KIND: release
               run: |
                   New-Item -ItemType Directory -Force dist-bin | Out-Null
                   bun ./scripts/build-executable.mjs --outfile ./dist-bin/fylo-windows-x64.exe
@@ -91,6 +87,15 @@ jobs:
                   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                   bun test tests/interop/native-release-root-lease.test.js --timeout 120000 --parallel=1
 
+            - name: Verify exact Rust CLI and model-checked soak behavior
+              env:
+                  FYLO_RUST_BINARY: dist-bin/fylo-windows-x64.exe
+                  FYLO_SKIP_RUST_BUILD: '1'
+              run: |
+                  bun run rust:interop:cli
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  bun ./scripts/run-rust-soak.mjs --iterations 100 --output target/soak/windows-x64.json
+
             - name: Upload native-tested Windows release executable
               if: matrix.os == 'windows-2022'
               uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -102,9 +107,9 @@ jobs:
                   retention-days: 1
 
     macos-storage:
-        name: Native packaged macOS lease (${{ matrix.target }})
+        name: Native Rust macOS release (${{ matrix.target }})
         runs-on: ${{ matrix.os }}
-        timeout-minutes: 20
+        timeout-minutes: 40
         strategy:
             fail-fast: false
             matrix:
@@ -131,6 +136,9 @@ jobs:
                   sh ./scripts/install-vendor-bins.sh
                   echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
             - name: Assert native runner architecture
               env:
                   EXPECTED_TARGET: ${{ matrix.target }}
@@ -138,9 +146,11 @@ jobs:
                   actual="macos-$(bun -p 'process.arch')"
                   test "$actual" = "$EXPECTED_TARGET"
 
-            - name: Build exact native release executable
+            - name: Build exact native Rust release executable
               env:
                   ASSET: ${{ matrix.asset }}
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_BUILD_KIND: release
               run: |
                   mkdir -p dist-bin
                   bun ./scripts/build-executable.mjs --outfile "dist-bin/$ASSET"
@@ -152,6 +162,36 @@ jobs:
                   FYLO_EXPECT_TARGET: ${{ matrix.target }}
               run: bun test tests/interop/native-release-root-lease.test.js --timeout 120000 --parallel=1
 
+            - name: Verify exact Rust CLI and published clients
+              env:
+                  FYLO_RUST_BINARY: dist-bin/${{ matrix.asset }}
+                  FYLO_SKIP_RUST_BUILD: '1'
+              run: |
+                  bun run rust:interop:cli
+                  bun ./scripts/verify-rust-language-clients.mjs
+
+            - name: Download pinned released machine oracle
+              if: matrix.target == 'macos-arm64'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p target/release-oracle
+                  gh release download v26.30.06 \
+                    --repo d31ma/Fylo \
+                    --pattern fylo-macos-arm64 \
+                    --dir target/release-oracle
+                  echo 'ae39a2b66ea9771766f3f3d6b3d0d1b01e1b3842a45aa0389535109b91bdee50  target/release-oracle/fylo-macos-arm64' \
+                    | shasum -a 256 --check
+                  chmod +x target/release-oracle/fylo-macos-arm64
+
+            - name: Verify release candidate matches all released machine semantics
+              if: matrix.target == 'macos-arm64'
+              run: >-
+                  bun ./scripts/verify-rust-release-machine-parity.mjs
+                  --released-binary target/release-oracle/fylo-macos-arm64
+                  --rust-binary dist-bin/${{ matrix.asset }}
+
             - name: Upload native-tested macOS executable
               uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
               with:
@@ -161,10 +201,85 @@ jobs:
                   compression-level: 0
                   retention-days: 1
 
+    linux-storage:
+        name: Native Rust Linux release (${{ matrix.target }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 40
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-24.04
+                      target: linux-x64
+                      architecture: x64
+                      asset: fylo-linux-x64
+                    - os: ubuntu-24.04-arm
+                      target: linux-arm64
+                      architecture: arm64
+                      asset: fylo-linux-arm64
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install dependencies and vendor binaries
+              run: |
+                  bun install --frozen-lockfile
+                  sh ./scripts/install-vendor-bins.sh
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
+            - name: Assert native runner architecture
+              env:
+                  EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+              run: test "$(bun -p 'process.arch')" = "$EXPECTED_ARCHITECTURE"
+
+            - name: Test native Rust storage crates
+              run: >-
+                  bun ./scripts/run-rust.mjs cargo test --locked
+                  -p fylo-storage-native -p fylo-engine -p fylo-machine -p fylo-cli
+
+            - name: Build exact native Rust release executable
+              env:
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_BUILD_KIND: release
+              run: bun ./scripts/build-executable.mjs --outfile dist-bin/${{ matrix.asset }}
+
+            - name: Verify exact native root lease and identity
+              env:
+                  FYLO_REQUIRE_NATIVE_RELEASE: '1'
+                  FYLO_BINARY: dist-bin/${{ matrix.asset }}
+                  FYLO_EXPECT_TARGET: ${{ matrix.target }}
+              run: bun test tests/interop/native-release-root-lease.test.js --timeout 120000 --parallel=1
+
+            - name: Verify exact Rust CLI and published clients
+              env:
+                  FYLO_RUST_BINARY: dist-bin/${{ matrix.asset }}
+                  FYLO_SKIP_RUST_BUILD: '1'
+              run: |
+                  bun run rust:interop:cli
+                  bun ./scripts/verify-rust-language-clients.mjs
+
+            - name: Upload native-tested Linux executable
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: linux-release-${{ matrix.target }}-${{ github.sha }}
+                  path: dist-bin/${{ matrix.asset }}
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 1
+
     test:
         name: Test before release
         runs-on: ubuntu-latest
-        timeout-minutes: 20
+        timeout-minutes: 40
 
         steps:
             - name: Checkout
@@ -188,14 +303,26 @@ jobs:
                   sh ./scripts/install-vendor-bins.sh
                   echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
             - name: Type check
               run: bun run typecheck
 
             - name: Lint
               run: bun run lint
 
-            - name: Run tests
-              run: bun run test
+            - name: Verify filesystem-only contracts and Rust quality
+              run: |
+                  bun run contracts:verify
+                  bun run rust:verify
+                  bun run rust:fmt
+                  bun run rust:clippy
+                  bun run rust:test
+                  bun ./scripts/run-rust.mjs cargo build --locked -p fylo-cli --bin fylo-rust
+
+            - name: Test the browser host against the native engine
+              run: bun test tests/browser/*.test.js --timeout 120000 --parallel=1
 
     binary-interop:
         name: Compiled binary interop
@@ -215,6 +342,9 @@ jobs:
               uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
               with:
                   bun-version-file: .bun-version
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
 
             - name: Setup Dart
               uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1
@@ -264,6 +394,9 @@ jobs:
                   go version
 
             - name: Run compiled binary interop tests
+              env:
+                  FYLO_EXPECT_BUILD_KIND: release
+                  FYLO_EXPECT_COMMIT: ${{ github.sha }}
               run: bun run test:interop
 
     version:
@@ -298,10 +431,6 @@ jobs:
                     echo "exists=false" >> "$GITHUB_OUTPUT"
                   fi
 
-    live-s3:
-        name: Live S3-compatible release gate
-        uses: ./.github/workflows/s3-live.yml
-
     release-assets:
         name: Build release assets
         runs-on: ubuntu-latest
@@ -310,14 +439,14 @@ jobs:
             id-token: write
             attestations: write
             artifact-metadata: write
-        needs: [test, binary-interop, windows-storage, macos-storage, live-s3, version]
+        needs: [test, binary-interop, windows-storage, macos-storage, linux-storage, version]
         if: >-
             ${{
               needs.test.result == 'success' &&
               needs.binary-interop.result == 'success' &&
               needs.windows-storage.result == 'success' &&
               needs.macos-storage.result == 'success' &&
-              needs.live-s3.result == 'success' &&
+              needs.linux-storage.result == 'success' &&
               needs.version.result == 'success' &&
               needs.version.outputs.tag_exists == 'false'
             }}
@@ -354,40 +483,17 @@ jobs:
                   name: macos-release-macos-x64-${{ github.sha }}
                   path: release-assets
 
-            - name: Build Linux binaries
-              run: |
-                  set -euo pipefail
-                  mkdir -p release-assets
-                  build() {
-                    echo "::group::$2"
-                    bun ./scripts/build-executable.mjs --target "$1" --outfile "release-assets/$2"
-                    echo "::endgroup::"
-                  }
-                  build bun-linux-x64     fylo-linux-x64
-                  build bun-linux-arm64   fylo-linux-arm64
+            - name: Download native-tested Linux x64 release executable
+              uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+              with:
+                  name: linux-release-linux-x64-${{ github.sha }}
+                  path: release-assets
 
-            - name: Verify exact native Linux release identity
-              run: |
-                  set -euo pipefail
-                  chmod +x release-assets/fylo-linux-x64
-                  release-assets/fylo-linux-x64 version --output json | tee linux-release-identity.json
-                  jq -e \
-                    --arg commit "$GITHUB_SHA" \
-                    '.buildKind == "release" and
-                     .commit == $commit and
-                     .buildTarget == "linux-x64" and
-                     .capabilities.handshake == true and
-                     .capabilities.exclusiveRoot == true' \
-                    linux-release-identity.json
-                  printf '%s\n' '{"op":"handshake"}' |
-                    release-assets/fylo-linux-x64 exec --loop |
-                    jq -e --arg commit "$GITHUB_SHA" \
-                      '.ok == true and .result.buildKind == "release" and .result.commit == $commit'
-                  FYLO_REQUIRE_NATIVE_RELEASE=1 \
-                    FYLO_BINARY=release-assets/fylo-linux-x64 \
-                    FYLO_EXPECT_TARGET=linux-x64 \
-                    bun test tests/interop/native-release-root-lease.test.js \
-                      --timeout 120000 --parallel=1
+            - name: Download native-tested Linux arm64 release executable
+              uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+              with:
+                  name: linux-release-linux-arm64-${{ github.sha }}
+                  path: release-assets
 
             - name: Build local-first web bundle
               run: bun run build:web:wasm

@@ -8,10 +8,12 @@
 /crates/fylo-query/ @d31ma
 /crates/fylo-storage-native/ @d31ma
 /crates/fylo-engine/ @d31ma
-/src/storage/ @d31ma
-/src/security/ @d31ma
-/src/replication/ @d31ma
+/crates/fylo-machine/ @d31ma
+/crates/fylo-cli/ @d31ma
+/crates/fylo-wasm/ @d31ma
+/src/browser/ @d31ma
 /src/browser/wasm/ @d31ma
+/clients/ @d31ma
 /docs/adr/ @d31ma
 /docs/security/ @d31ma
 /.github/workflows/ @d31ma

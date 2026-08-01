@@ -138,6 +138,28 @@ export class MemoryFilesystem {
     }
 
     /**
+     * Removes a directory and everything beneath it. The root always survives,
+     * since the filesystem must keep a mount point.
+     * @param {string} key
+     */
+    removeSubtree(key) {
+        const prefix = key === '/' ? '/' : `${key}/`
+        const covered = (/** @type {string} */ entry) => entry === key || entry.startsWith(prefix)
+        for (const file of [...this.files.keys()]) {
+            if (!covered(file)) continue
+            this.files.delete(file)
+            this.mtimes.delete(file)
+        }
+        for (const dir of [...this.dirs]) {
+            if (!covered(dir)) continue
+            this.dirs.delete(dir)
+            this.mtimes.delete(dir)
+        }
+        this.dirs.add('/')
+        this.mtimes.set('/', Date.now())
+    }
+
+    /**
      * @param {string} path
      * @param {{ recursive?: boolean }} [options]
      * @returns {Promise<void>}
@@ -148,20 +170,7 @@ export class MemoryFilesystem {
             if (this.files.has(key)) throw notDirectory(path)
             return
         }
-        if (options.recursive) {
-            const prefix = key === '/' ? '/' : `${key}/`
-            for (const file of [...this.files.keys()]) {
-                if (file === key || file.startsWith(prefix)) this.files.delete(file)
-                if (file === key || file.startsWith(prefix)) this.mtimes.delete(file)
-            }
-            for (const dir of [...this.dirs]) {
-                if (dir === key || dir.startsWith(prefix)) this.dirs.delete(dir)
-                if (dir === key || dir.startsWith(prefix)) this.mtimes.delete(dir)
-            }
-            this.dirs.add('/')
-            this.mtimes.set('/', Date.now())
-            return
-        }
+        if (options.recursive) return this.removeSubtree(key)
         const children = await this.list(path)
         if (children.length > 0) {
             throw new MemoryFilesystemError('ENOTEMPTY', `Directory not empty: ${path}`)

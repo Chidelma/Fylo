@@ -1,0 +1,98 @@
+<style>
+  #home-content {
+    display: none;
+  }
+</style>
+
+<div class="doc-shell">
+  <docs-nav />
+
+  <div class="doc-main doc-page">
+    <span class="eyebrow">Guide</span>
+    <h1>Version control</h1>
+    <p class="doc-lede">
+      FYLO keeps a Git-shaped history of your documents, and it is on by default. Every
+      write records a content-addressed snapshot, so you can branch a dataset, diff two
+      points in time, and restore a collection to how it looked last Tuesday.
+    </p>
+
+    <div class="doc-section">
+      <h2>The commands</h2>
+      <pre class="code-block"><code>{cliCode}</code></pre>
+      <p>
+        <code>status</code> and <code>diff</code> compare document payloads only
+        (<code>docs/</code> and <code>.deleted/</code>), so rebuilt indexes, event
+        journals, lock files, and mtime-only changes never create noisy diffs.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>Auto-commit</h2>
+      <p>
+        <code>put</code>, <code>patch</code>, <code>delete</code>, and
+        <code>restore</code> create commit snapshots after the local filesystem write
+        succeeds. Failed writes and no-op mutations do not create empty commits.
+      </p>
+      <p>
+        Bulk operations coalesce: <code>put.batch</code>, <code>patch.many</code>,
+        <code>delete.many</code>, and <code>import</code> each record one commit covering
+        every document they touched. Prefer them for ingests.
+      </p>
+      <p>Turn it off for a manual, Git-style working tree:</p>
+      <pre class="code-block"><code>{offCode}</code></pre>
+      <p>Machine callers use the same option in JSON:</p>
+      <pre class="code-block"><code>{machineCode}</code></pre>
+    </div>
+
+    <div class="doc-section">
+      <h2>Storage</h2>
+      <p>
+        Commit storage is content-addressed. Each document version is stored once as a
+        deduplicated blob, so commits share unchanged bytes across history and branches
+        instead of copying whole collections. Object hashes are verified before any
+        restore or merge.
+      </p>
+      <pre class="code-block"><code>{layoutCode}</code></pre>
+      <p>
+        <code>main</code> uses the root <code>.collections</code> tree. Other branches
+        use hidden working trees under <code>.fylo-vcs/branches/</code>, so
+        <code>checkout -b</code> isolates subsequent reads and writes without changing
+        the base document layout.
+      </p>
+      <div class="doc-note doc-note--warn">
+        <p>
+          Snapshots keep a full content-addressed copy of every raw file, which doubles
+          disk and write bandwidth for large media collections. Exclude a collection from
+          history at creation time when that trade is wrong:
+        </p>
+      </div>
+      <pre class="code-block"><code>{unversionedCode}</code></pre>
+      <p>
+        Unversioned collections never appear in commits, diffs, or restores — their
+        working files are the only copy, and <code>restoreCommit</code> leaves them
+        untouched.
+      </p>
+    </div>
+
+    <div class="doc-section">
+      <h2>Restore and merge</h2>
+      <p>
+        <code>restore-commit</code> refuses to overwrite uncommitted working-tree changes
+        unless <code>--force</code> is passed; commit snapshots themselves are immutable.
+        <code>merge</code> supports fast-forward and three-way document-payload merges.
+        If both sides changed the same TTID's payload differently, FYLO reports the
+        conflicts and leaves the current branch untouched.
+      </p>
+      <p>
+        Restore and merge materialization runs inside a durable staging transaction.
+        Startup deterministically rolls an interrupted swap backward or forward before
+        any collection is opened — see <a href="/docs/recovery">Recovery &amp; rebuild</a>.
+      </p>
+    </div>
+
+    <div class="doc-pager">
+      <a href="/docs/security">← Encryption &amp; access</a>
+      <a href="/docs/recovery">Recovery &amp; rebuild →</a>
+    </div>
+  </div>
+</div>

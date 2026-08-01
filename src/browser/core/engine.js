@@ -1,5 +1,5 @@
 import TTID from '../vendor/ttid.mjs'
-import { legacyShardOf, shardOf } from '../../core/shard.js'
+import { shardOf } from '../../core/shard.js'
 import { copySafeJson, safeRecord } from '../../query/safe-record.js'
 import { CollectionNotFoundError, validateCollectionName } from '../../core/collection.js'
 import { FyloQueryPlanner } from '../../query/planner.js'

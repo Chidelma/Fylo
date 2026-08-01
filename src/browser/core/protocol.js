@@ -110,6 +110,100 @@ async function collectDeletedDocs(fylo, collection, query) {
 }
 
 /**
+ * One handler per browser operation, so dispatch is a lookup rather than a
+ * nineteen-arm switch. Each receives the local engine and the validated
+ * request.
+ * @type {Record<string, (fylo: any, request: BrowserRequest) => unknown>}
+ */
+const BROWSER_OPERATIONS = {
+    executeSQL: (fylo, request) => fylo.executeSQL(requireString(request, 'sql')),
+    createCollection: async (fylo, request) => {
+        const collection = requireString(request, 'collection')
+        await fylo.createCollection(collection)
+        return { collection }
+    },
+    dropCollection: async (fylo, request) => {
+        const collection = requireString(request, 'collection')
+        await fylo.dropCollection(collection)
+        return { collection }
+    },
+    inspectCollection: (fylo, request) =>
+        fylo.inspectCollection(requireString(request, 'collection')),
+    rebuildCollection: (fylo, request) =>
+        fylo.rebuildCollection(requireString(request, 'collection')),
+    getDoc: (fylo, request) =>
+        fylo
+            .getDoc(
+                requireString(request, 'collection'),
+                requireString(request, 'id'),
+                request.onlyId === true
+            )
+            .once(),
+    getLatest: (fylo, request) =>
+        fylo.getLatest(
+            requireString(request, 'collection'),
+            requireString(request, 'id'),
+            request.onlyId === true
+        ),
+    getMeta: (fylo, request) =>
+        fylo.getDocMeta(requireString(request, 'collection'), requireString(request, 'id')),
+    setMeta: (fylo, request) =>
+        fylo.setDocMetaRecord(
+            requireString(request, 'collection'),
+            requireString(request, 'id'),
+            requireObject(request, 'meta')
+        ),
+    findDocs: (fylo, request) =>
+        collectFindDocs(
+            fylo,
+            requireString(request, 'collection'),
+            isRecord(request.query) ? request.query : {}
+        ),
+    findDeletedDocs: (fylo, request) =>
+        collectDeletedDocs(
+            fylo,
+            requireString(request, 'collection'),
+            isRecord(request.query) ? request.query : {}
+        ),
+    joinDocs: (fylo, request) => fylo.join(requireObject(request, 'join')),
+    putData: (fylo, request) => {
+        const hasMeta = Object.hasOwn(request, 'meta')
+        return fylo.putData(
+            requireString(request, 'collection'),
+            requireObject(request, 'data'),
+            hasMeta ? requireObject(request, 'meta') : undefined,
+            hasMeta
+        )
+    },
+    batchPutData: (fylo, request) =>
+        fylo.batchPutData(
+            requireString(request, 'collection'),
+            requireObjectArray(request, 'batch')
+        ),
+    patchDoc: (fylo, request) =>
+        fylo.patchDoc(
+            requireString(request, 'collection'),
+            requireObject(request, 'newDoc'),
+            isRecord(request.oldDoc) ? request.oldDoc : {}
+        ),
+    patchDocs: (fylo, request) =>
+        fylo.patchDocs(requireString(request, 'collection'), requireObject(request, 'update')),
+    delDoc: async (fylo, request) => {
+        await fylo.delDoc(requireString(request, 'collection'), requireString(request, 'id'))
+        return { deleted: true }
+    },
+    restoreDoc: async (fylo, request) => {
+        const id = await fylo.restoreDoc(
+            requireString(request, 'collection'),
+            requireString(request, 'id')
+        )
+        return { restored: true, id }
+    },
+    delDocs: (fylo, request) =>
+        fylo.delDocs(requireString(request, 'collection'), requireObject(request, 'delete'))
+}
+
+/**
  * Executes one protocol operation against any object implementing FYLO's
  * browser-safe method surface.
  *
@@ -119,105 +213,9 @@ async function collectDeletedDocs(fylo, collection, query) {
  */
 export async function executeBrowserOperation(fylo, request) {
     if (!isBrowserRequest(request)) throw new Error('FYLO browser request body must be an object')
-    switch (request.op) {
-        case 'executeSQL':
-            return await fylo.executeSQL(requireString(request, 'sql'))
-        case 'createCollection': {
-            const collection = requireString(request, 'collection')
-            await fylo.createCollection(collection)
-            return { collection }
-        }
-        case 'dropCollection': {
-            const collection = requireString(request, 'collection')
-            await fylo.dropCollection(collection)
-            return { collection }
-        }
-        case 'inspectCollection':
-            return await fylo.inspectCollection(requireString(request, 'collection'))
-        case 'rebuildCollection':
-            return await fylo.rebuildCollection(requireString(request, 'collection'))
-        case 'getDoc':
-            return await fylo
-                .getDoc(
-                    requireString(request, 'collection'),
-                    requireString(request, 'id'),
-                    request.onlyId === true
-                )
-                .once()
-        case 'getLatest':
-            return await fylo.getLatest(
-                requireString(request, 'collection'),
-                requireString(request, 'id'),
-                request.onlyId === true
-            )
-        case 'getMeta':
-            return await fylo.getDocMeta(
-                requireString(request, 'collection'),
-                requireString(request, 'id')
-            )
-        case 'setMeta':
-            return await fylo.setDocMetaRecord(
-                requireString(request, 'collection'),
-                requireString(request, 'id'),
-                requireObject(request, 'meta')
-            )
-        case 'findDocs':
-            return await collectFindDocs(
-                fylo,
-                requireString(request, 'collection'),
-                isRecord(request.query) ? request.query : {}
-            )
-        case 'findDeletedDocs':
-            return await collectDeletedDocs(
-                fylo,
-                requireString(request, 'collection'),
-                isRecord(request.query) ? request.query : {}
-            )
-        case 'joinDocs':
-            return await fylo.join(requireObject(request, 'join'))
-        case 'putData': {
-            const hasMeta = Object.hasOwn(request, 'meta')
-            return await fylo.putData(
-                requireString(request, 'collection'),
-                requireObject(request, 'data'),
-                hasMeta ? requireObject(request, 'meta') : undefined,
-                hasMeta
-            )
-        }
-        case 'batchPutData':
-            return await fylo.batchPutData(
-                requireString(request, 'collection'),
-                requireObjectArray(request, 'batch')
-            )
-        case 'patchDoc':
-            return await fylo.patchDoc(
-                requireString(request, 'collection'),
-                requireObject(request, 'newDoc'),
-                isRecord(request.oldDoc) ? request.oldDoc : {}
-            )
-        case 'patchDocs':
-            return await fylo.patchDocs(
-                requireString(request, 'collection'),
-                requireObject(request, 'update')
-            )
-        case 'delDoc':
-            await fylo.delDoc(requireString(request, 'collection'), requireString(request, 'id'))
-            return { deleted: true }
-        case 'restoreDoc': {
-            const id = await fylo.restoreDoc(
-                requireString(request, 'collection'),
-                requireString(request, 'id')
-            )
-            return { restored: true, id }
-        }
-        case 'delDocs':
-            return await fylo.delDocs(
-                requireString(request, 'collection'),
-                requireObject(request, 'delete')
-            )
-        default:
-            throw new Error(`Unsupported FYLO browser operation: ${request.op}`)
-    }
+    const operation = BROWSER_OPERATIONS[request.op]
+    if (!operation) throw new Error(`Unsupported FYLO browser operation: ${request.op}`)
+    return await operation(fylo, request)
 }
 
 /**

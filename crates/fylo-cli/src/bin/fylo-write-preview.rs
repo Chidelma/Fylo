@@ -245,7 +245,10 @@ fn run_put(command: &str, arguments: &[String], writer: &NativeWriteRoot) -> Res
                 collection,
                 identifier,
                 document.as_bytes(),
-                PutDocumentOptions { access },
+                PutDocumentOptions {
+                    access,
+                    ..PutDocumentOptions::default()
+                },
             )
             .map_err(|error| error.to_string());
     }

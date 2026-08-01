@@ -1,6 +1,7 @@
-//! Experimental native NDJSON machine server used by protocol conformance
-//! gates. It serves the read operations the native engine implements and
-//! reports `EUNSUPPORTEDOP` for the rest of the registry.
+//! Compatibility entry point for the native NDJSON machine server.
+//!
+//! The primary `fylo-rust exec --loop` command and this preview binary share
+//! the same dispatcher and implement the complete canonical operation registry.
 
 use std::env;
 use std::io::{self, BufReader};

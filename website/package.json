@@ -6,7 +6,7 @@
     "scripts": {
         "start": "bun run serve",
         "serve": "bun node_modules/@d31ma/tachyon/src/cli/index.js serve",
-        "bundle": "bun node_modules/@d31ma/tachyon/src/cli/index.js bundle && bun ../scripts/fingerprint-assets.mjs",
+        "bundle": "bun --no-env-file node_modules/@d31ma/tachyon/src/cli/index.js bundle && bun --no-env-file ../scripts/fingerprint-assets.mjs",
         "preview": "bun node_modules/@d31ma/tachyon/src/cli/index.js preview --watch"
     },
     "devDependencies": {

@@ -27,8 +27,8 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 class FyloError < StandardError; end
 
 class Fylo
-  def self.open(root, binary: "fylo", worm: false)
-    db = new(root, binary: binary, worm: worm)
+  def self.open(root, binary: "fylo")
+    db = new(root, binary: binary)
     return db unless block_given?
     begin
       yield db
@@ -37,13 +37,12 @@ class Fylo
     end
   end
 
-  def initialize(root, binary: "fylo", worm: false)
+  def initialize(root, binary: "fylo")
     args = [
       binary, "exec", "--loop", "--root", root,
       "--max-request-bytes", MAX_REQUEST_BYTES.to_s,
       "--max-response-bytes", MAX_RESPONSE_BYTES.to_s
     ]
-    args << "--worm" if worm
     @stdin, @stdout, @wait = Open3.popen2(*args)
     @mutex = Mutex.new
   end

@@ -8,7 +8,7 @@
 
 Rust prevents broad classes of memory errors, but FYLO still operates across
 untrusted data, filesystem races, platform APIs, memory mapping, process
-boundaries, Wasm buffers, cryptography, and S3-compatible endpoints.
+boundaries, Wasm buffers, cryptography, and guarded network imports.
 
 Native filesystem correctness may eventually require small platform-specific
 FFI or unsafe abstractions. Dependencies and CI actions also become executable
@@ -21,7 +21,7 @@ features.
 ### Unsafe code
 
 - Workspace policy is `unsafe_code = "forbid"`.
-- Portable format, query, engine, machine, S3, CLI, Wasm, and test utility code
+- Portable format, query, engine, machine, CLI, Wasm, and test utility code
   remain safe Rust unless a new ADR changes a specific boundary.
 - Only a narrowly scoped platform module may lower the lint after a reviewed
   exception.
@@ -98,6 +98,17 @@ Reviewers consider:
 A popular crate is not automatically acceptable, and a small crate is not
 automatically safer.
 
+## Current time-bounded exception
+
+Boa 0.21.1 is the maintained crates.io release required to execute existing
+JavaScript schema upgrader modules without requiring Bun at runtime. It uses
+the archived `paste` crate as a compile-time proc macro. RUSTSEC-2024-0436 is a
+maintenance advisory, not a reported runtime vulnerability, and the macro is
+not shipped as executable runtime code in FYLO. `deny.toml` records the FYLO
+maintainers as owner and 2026-11-01 as the review/expiry date. The exception
+must be removed when Boa replaces the dependency; if no maintained path exists
+by that date, FYLO must replace the embedded runtime before promotion.
+
 ## Release behavior
 
 Every native release records:
@@ -162,6 +173,7 @@ may be added when offline enterprise builds require them.
 
 ## Related decisions
 
+- [ADR 0007](0007-filesystem-only-native-storage.md)
 - [ADR 0001](0001-rust-native-engine-and-portable-wasm-kernel.md)
 - [ADR 0002](0002-compatibility-first-strangler-migration.md)
 - [Support tiers](../releases/support-tiers.md)

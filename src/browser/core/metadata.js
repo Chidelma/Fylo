@@ -59,7 +59,7 @@ export class BrowserMetadataStore {
 
     /** @param {string} collection @param {string} id */
     async read(collection, id) {
-        const target = this.path(collection, id)
+        const target = await this.existingPath(collection, id)
         if (!(await this.fs.exists(target))) return { values: safeRecord(), updatedAt: 0 }
         const parsed = JSON.parse(await this.fs.readText(target))
         return {
@@ -88,6 +88,24 @@ export class BrowserMetadataStore {
         const target = this.path(collection, id)
         await this.fs.mkdir(join(this.root(collection), shardOf(id)), { recursive: true })
         await this.fs.writeText(target, JSON.stringify({ values, updatedAt }))
+        const legacy = this.legacyPath(collection, id)
+        if (legacy !== target && (await this.fs.exists(legacy))) await this.fs.remove(legacy)
         return { values, updatedAt }
+    }
+
+    /** @param {string} collection @param {string} id */
+    legacyPath(collection, id) {
+        const root = this.root(collection)
+        const target = join(root, legacyShardOf(id), `${id}.json`)
+        assertPathInside(root, target)
+        return target
+    }
+
+    /** @param {string} collection @param {string} id */
+    async existingPath(collection, id) {
+        const canonical = this.path(collection, id)
+        if (await this.fs.exists(canonical)) return canonical
+        const legacy = this.legacyPath(collection, id)
+        return legacy !== canonical && (await this.fs.exists(legacy)) ? legacy : canonical
     }
 }

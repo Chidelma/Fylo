@@ -1,10 +1,13 @@
-import { cp, mkdir, readFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rm } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const withWasm = process.argv.includes('--wasm')
-const bunVersion = (await readFile(new URL('../.bun-version', import.meta.url), 'utf8')).trim()
+const bunVersion = (
+    process.env.FYLO_BUN_VERSION ??
+    (await readFile(new URL('../.bun-version', import.meta.url), 'utf8'))
+).trim()
 
 if (Bun.version !== bunVersion) {
     throw new Error(`Browser builds require Bun ${bunVersion}; running ${Bun.version}`)
@@ -35,6 +38,7 @@ await run('bun', [
 
 if (withWasm) {
     await buildWasm()
+    await rm(new URL('../dist-web/fylo-index.wasm', import.meta.url), { force: true })
     await cp(
         new URL(
             '../target/wasm32-unknown-unknown/release/fylo_browser_index.wasm',

@@ -11,7 +11,11 @@ use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::rc::Rc;
 
+use boa_engine::module::{Module, SimpleModuleLoader};
+use boa_engine::object::builtins::JsPromise;
+use boa_engine::{Context, JsValue, Source, js_string};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -22,6 +26,9 @@ const MAX_SCHEMA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 /// Field the JavaScript engine stamps with the head schema version.
 const VERSION_FIELD: &str = "_v";
+/// A schema upgrader is trusted application code, but still receives a finite
+/// loop budget so an accidental infinite loop cannot wedge the machine server.
+const UPGRADER_LOOP_LIMIT: u64 = 10_000_000;
 
 #[derive(Clone, Deserialize)]
 struct SchemaManifest {
@@ -106,22 +113,34 @@ impl SchemaTools {
                 let upgrader = next
                     .as_ref()
                     .map(|next| self.upgrader_path(collection, &entry.v, next));
-                versions.push(json!({
-                    "version": entry.v,
-                    "current": entry.v == manifest.current,
-                    "addedAt": entry.added_at,
-                    "sha256": entry.sha256,
-                    "path": path,
-                    "exists": exists,
-                    "actualSha256": actual,
-                    "sha256Ok": entry
-                        .sha256
-                        .as_ref()
-                        .map(|expected| Some(expected) == actual.as_ref()),
-                    "nextVersion": next,
-                    "upgraderPath": upgrader,
-                    "upgraderExists": upgrader.as_ref().map(|path| path.is_file()),
-                }));
+                let mut status = Map::new();
+                status.insert("version".into(), Value::String(entry.v.clone()));
+                status.insert("current".into(), Value::Bool(entry.v == manifest.current));
+                if let Some(added_at) = entry.added_at.as_ref() {
+                    status.insert("addedAt".into(), added_at.clone());
+                }
+                if let Some(sha256) = entry.sha256.as_ref() {
+                    status.insert("sha256".into(), Value::String(sha256.clone()));
+                }
+                status.insert("path".into(), json!(path));
+                status.insert("exists".into(), Value::Bool(exists));
+                if let Some(actual) = actual.as_ref() {
+                    status.insert("actualSha256".into(), Value::String(actual.clone()));
+                }
+                if let Some(expected) = entry.sha256.as_ref() {
+                    status.insert(
+                        "sha256Ok".into(),
+                        Value::Bool(Some(expected) == actual.as_ref()),
+                    );
+                }
+                if let Some(next) = next.as_ref() {
+                    status.insert("nextVersion".into(), Value::String(next.clone()));
+                }
+                if let Some(upgrader) = upgrader.as_ref() {
+                    status.insert("upgraderPath".into(), json!(upgrader));
+                    status.insert("upgraderExists".into(), Value::Bool(upgrader.is_file()));
+                }
+                versions.push(Value::Object(status));
             }
         }
         Ok(json!({
@@ -130,14 +149,7 @@ impl SchemaTools {
             "versioned": manifest.is_some(),
             "current": manifest.as_ref().map(|manifest| manifest.current.clone()),
             "manifestPath": self.manifest_path(collection),
-            "manifest": manifest.as_ref().map(|manifest| json!({
-                "current": manifest.current,
-                "versions": manifest.versions.iter().map(|entry| json!({
-                    "v": entry.v,
-                    "addedAt": entry.added_at,
-                    "sha256": entry.sha256,
-                })).collect::<Vec<_>>(),
-            })),
+            "manifest": manifest.as_ref().map(manifest_value),
             "versions": versions,
         }))
     }
@@ -198,6 +210,137 @@ impl SchemaTools {
 
     pub(crate) fn current_version(&self, collection: &str) -> Result<Option<String>, String> {
         Ok(self.manifest(collection)?.map(|manifest| manifest.current))
+    }
+
+    /// Upgrade one document through the manifest's ordered JavaScript modules.
+    ///
+    /// Boa is embedded solely for this compatibility boundary. Modules execute
+    /// without Node/Bun host APIs; relative ECMAScript imports remain confined
+    /// to the configured schema root by `SimpleModuleLoader`.
+    pub(crate) fn materialize(
+        &self,
+        collection: &str,
+        document: &Map<String, Value>,
+    ) -> Result<Map<String, Value>, String> {
+        let Some(manifest) = self.manifest(collection)? else {
+            return Ok(document.clone());
+        };
+        if manifest.versions.is_empty() {
+            return Err(format!(
+                "Invalid manifest for '{collection}': 'versions' must be a non-empty array"
+            ));
+        }
+        let from = document
+            .get(VERSION_FIELD)
+            .and_then(Value::as_str)
+            .unwrap_or(&manifest.versions[0].v);
+        let from_index = manifest
+            .versions
+            .iter()
+            .position(|entry| entry.v == from)
+            .ok_or_else(|| {
+                format!(
+                    "Doc in '{collection}' is at unknown version '{from}' (not in manifest.versions)"
+                )
+            })?;
+        let head_index = manifest
+            .versions
+            .iter()
+            .position(|entry| entry.v == manifest.current)
+            .ok_or_else(|| {
+                format!(
+                    "Manifest for '{collection}': 'current' ({}) is not present in 'versions'",
+                    manifest.current
+                )
+            })?;
+        if from_index > head_index {
+            return Err(format!(
+                "Doc in '{collection}' is at {from}, ahead of target {}: schema rolled back?",
+                manifest.current
+            ));
+        }
+        if from_index == head_index {
+            return Ok(document.clone());
+        }
+
+        let mut next = document.clone();
+        next.remove(VERSION_FIELD);
+        for index in from_index..head_index {
+            let from = &manifest.versions[index].v;
+            let to = &manifest.versions[index + 1].v;
+            next = self.run_upgrader(collection, from, to, &next)?;
+        }
+        next.insert(VERSION_FIELD.into(), Value::String(manifest.current));
+        Ok(next)
+    }
+
+    fn run_upgrader(
+        &self,
+        collection: &str,
+        from: &str,
+        to: &str,
+        document: &Map<String, Value>,
+    ) -> Result<Map<String, Value>, String> {
+        let path = self.upgrader_path(collection, from, to);
+        let bytes = read_bounded(&path, MAX_SCHEMA_BYTES).map_err(|_| {
+            format!(
+                "Missing upgrader {from}->{to} for collection '{collection}' at {}",
+                path.display()
+            )
+        })?;
+        let source_text = String::from_utf8(bytes)
+            .map_err(|_| format!("upgrader {} is not valid UTF-8", path.display()))?;
+        let source_text = normalize_default_export(&source_text);
+        let loader = Rc::new(
+            SimpleModuleLoader::new(&self.schema_dir)
+                .map_err(|error| format!("cannot initialize schema module loader: {error}"))?,
+        );
+        let mut context = Context::builder()
+            .module_loader(loader.clone())
+            .build()
+            .map_err(|error| format!("cannot initialize schema upgrader runtime: {error}"))?;
+        context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(UPGRADER_LOOP_LIMIT);
+        let source = Source::from_reader(source_text.as_bytes(), Some(&path));
+        let module = Module::parse(source, None, &mut context)
+            .map_err(|error| format!("cannot parse upgrader {}: {error}", path.display()))?;
+        loader.insert(path.clone(), module.clone());
+        module
+            .load_link_evaluate(&mut context)
+            .await_blocking(&mut context)
+            .map_err(|error| format!("cannot evaluate upgrader {}: {error}", path.display()))?;
+        let callable = module
+            .get_value(js_string!("default"), &mut context)
+            .map_err(|error| format!("cannot load upgrader default export: {error}"))?;
+        let function = callable.as_function().ok_or_else(|| {
+            format!(
+                "Upgrader at {} must default-export an async (doc) => doc function",
+                path.display()
+            )
+        })?;
+        let argument = JsValue::from_json(&Value::Object(document.clone()), &mut context)
+            .map_err(|error| format!("cannot encode upgrader document: {error}"))?;
+        let returned = function
+            .call(&JsValue::undefined(), &[argument], &mut context)
+            .map_err(|error| format!("upgrader {from}->{to} failed: {error}"))?;
+        let returned = if let Some(object) = returned.as_object() {
+            match JsPromise::from_object(object.clone()) {
+                Ok(promise) => promise
+                    .await_blocking(&mut context)
+                    .map_err(|error| format!("upgrader {from}->{to} failed: {error}"))?,
+                Err(_) => returned,
+            }
+        } else {
+            returned
+        };
+        returned
+            .to_json(&mut context)
+            .map_err(|error| format!("upgrader {from}->{to} returned invalid JSON: {error}"))?
+            .and_then(|value| value.as_object().cloned())
+            .ok_or_else(|| {
+                format!("Upgrader {from}->{to} for '{collection}' must return an object")
+            })
     }
 
     /// Validate against the head schema and stamp `_v`, matching
@@ -282,6 +425,49 @@ impl SchemaTools {
         }
         outcome
     }
+}
+
+fn manifest_value(manifest: &SchemaManifest) -> Value {
+    let versions = manifest
+        .versions
+        .iter()
+        .map(|entry| {
+            let mut value = Map::new();
+            value.insert("v".into(), Value::String(entry.v.clone()));
+            if let Some(added_at) = entry.added_at.as_ref() {
+                value.insert("addedAt".into(), added_at.clone());
+            }
+            if let Some(sha256) = entry.sha256.as_ref() {
+                value.insert("sha256".into(), Value::String(sha256.clone()));
+            }
+            Value::Object(value)
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "current": manifest.current,
+        "versions": versions,
+    })
+}
+
+/// Boa 0.21 parses default function/class declarations correctly but currently
+/// rejects a default-exported arrow expression. FYLO has documented arrow
+/// upgraders since the JavaScript release, so normalize only that module syntax
+/// while leaving the executable expression unchanged.
+fn normalize_default_export(source: &str) -> String {
+    const EXPORT: &str = "export default ";
+    let Some(offset) = source.find(EXPORT) else {
+        return source.to_owned();
+    };
+    let expression = &source[offset + EXPORT.len()..];
+    if expression.starts_with("function") || expression.starts_with("class") {
+        return source.to_owned();
+    }
+    let mut normalized = String::with_capacity(source.len() + 64);
+    normalized.push_str(&source[..offset]);
+    normalized.push_str("const __fylo_default_upgrader__ = ");
+    normalized.push_str(expression);
+    normalized.push_str("\nexport { __fylo_default_upgrader__ as default };\n");
+    normalized
 }
 
 /// One warm `chex exec --loop` subprocess.

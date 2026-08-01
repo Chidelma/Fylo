@@ -1,16 +1,16 @@
 {
     "name": "fylo-explorer",
-    "version": "26.30.05-1",
+    "version": "26.31.06",
     "private": true,
     "packageManager": "bun@1.3.11",
     "scripts": {
         "start": "bun run serve",
-        "browser:sync": "bun ../scripts/build-browser.mjs --wasm && bun ../scripts/sync-explorer-browser-assets.mjs",
+        "browser:sync": "bun --no-env-file ../scripts/build-browser.mjs --wasm && bun --no-env-file ../scripts/sync-explorer-browser-assets.mjs",
         "serve": "bun run browser:sync && bun node_modules/@d31ma/tachyon/src/cli/index.js serve",
-        "bundle": "bun run browser:sync && bun node_modules/@d31ma/tachyon/src/cli/index.js bundle && bun ../scripts/fingerprint-assets.mjs",
-        "bundle:release": "bun ../scripts/sync-explorer-browser-assets.mjs && bun node_modules/@d31ma/tachyon/src/cli/index.js bundle && bun ../scripts/fingerprint-assets.mjs",
+        "bundle": "bun --no-env-file run browser:sync && bun --no-env-file node_modules/@d31ma/tachyon/src/cli/index.js bundle && bun --no-env-file ../scripts/fingerprint-assets.mjs",
+        "bundle:release": "bun --no-env-file ../scripts/sync-explorer-browser-assets.mjs && bun --no-env-file node_modules/@d31ma/tachyon/src/cli/index.js bundle && bun --no-env-file ../scripts/fingerprint-assets.mjs",
         "preview": "bun node_modules/@d31ma/tachyon/src/cli/index.js preview --watch",
-        "seed": "bun seed.mjs"
+        "seed": "(cd .. && bun ./scripts/run-rust.mjs cargo build --locked -p fylo-cli --bin fylo-rust) && bun seed.mjs"
     },
     "devDependencies": {
         "@d31ma/tachyon": "github:d31ma/Tachyon#ef61b352b567b7b164fa74b6bc70e55858bb7421"

@@ -13,8 +13,12 @@ const {
     clampPopupPosition,
     engineAssetUrl,
     findFileNameMatches,
+    historicalShardCandidates,
+    legacyShardOf,
     menuIndexForKey,
-    resizeValueForKey
+    resizeValueForKey,
+    shardCandidates,
+    shardOf
 } = await import('../../explorer/client/components/explorer/app/tac.js')
 delete globalThis.onMount
 
@@ -52,6 +56,8 @@ describe('hosted Explorer', () => {
         expect(component).toContain("type: 'fsa'")
         expect(component).toContain('worker: true')
         expect(component).toContain('wasm: true')
+        expect(component).not.toContain('id.slice(0, 2)')
+        expect(component).not.toContain('newId.slice(0, 2)')
 
         for (const id of [
             'explorer-sql-input',
@@ -80,6 +86,27 @@ describe('hosted Explorer', () => {
         expect(resizeValueForKey(120, 'ArrowLeft')).toBe(120)
         expect(resizeValueForKey(1200, 'ArrowRight')).toBe(1200)
         expect(resizeValueForKey(200, 'Enter')).toBeNull()
+    })
+
+    test('uses trailing creation-TTID shards and keeps leading shards read-only compatible', () => {
+        const id = '4VRNF52JPCO-4VRNF52JPCP-4VRNF52JPCQ'
+        expect(shardOf(id)).toBe('CO')
+        expect(shardOf(id, 3)).toBe('PCO')
+        expect(legacyShardOf(id)).toBe('4V')
+        expect(shardCandidates(id, { width: 3, previousWidths: [1, 2] })).toEqual([
+            'PCO',
+            'O',
+            'CO',
+            '4V'
+        ])
+        expect(historicalShardCandidates(id, { width: 2, previousWidths: [] })).toEqual([
+            'CO',
+            '4V',
+            '',
+            'O',
+            'PCO',
+            'JPCO'
+        ])
     })
 
     test('opens row actions from keyboard and provides bounded menu navigation', () => {
@@ -359,8 +386,11 @@ describe('hosted Explorer', () => {
         )
 
         expect(lookups).toEqual([
+            '/.buckets/assets/docs/ne',
             '/.buckets/assets/docs/on',
+            '/.buckets/assets/docs/wo',
             '/.buckets/assets/docs/tw',
+            '/.buckets/assets/docs/ne',
             '/.buckets/assets/docs/go'
         ])
         expect(moved).toEqual(['/.buckets/assets/docs/on/one.txt'])
@@ -394,6 +424,9 @@ describe('hosted Explorer', () => {
         explorer._rebuilt = new Set(['users'])
         let read = false
         explorer._fs = {
+            async exists() {
+                return true
+            },
             async size() {
                 return EXPLORER_LIMITS.exportBytes + 1
             }

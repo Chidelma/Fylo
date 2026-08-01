@@ -66,6 +66,30 @@ const TokenType = {
 /**
  * Tokenizes the supported FYLO SQL subset into parser tokens.
  */
+/**
+ * Punctuation and single-character operators, keyed by their character.
+ * @type {Record<string, string>}
+ */
+const SINGLE_CHARACTER_TOKENS = {
+    '=': TokenType.EQUALS,
+    ',': TokenType.COMMA,
+    ';': TokenType.SEMICOLON,
+    '(': TokenType.LPAREN,
+    ')': TokenType.RPAREN,
+    '*': TokenType.ASTERISK
+}
+
+/**
+ * Operators whose meaning depends on a following `=`. `alone: null` means the
+ * bare character is not a token and is skipped.
+ * @type {Record<string, { withEquals: string, alone: string | null }>}
+ */
+const COMPARISON_TOKENS = {
+    '>': { withEquals: TokenType.GREATER_EQUAL, alone: TokenType.GREATER_THAN },
+    '<': { withEquals: TokenType.LESS_EQUAL, alone: TokenType.LESS_THAN },
+    '!': { withEquals: TokenType.NOT_EQUALS, alone: null }
+}
+
 class SQLLexer {
     /** @type {string} */
     input
@@ -197,82 +221,60 @@ class SQLLexer {
             }
             // Identifiers and keywords
             if (/[a-zA-Z_]/.test(this.current)) {
-                let value = this.readIdentifier()
-                // Support dot notation for nested fields (e.g. address.city → address/city)
-                while (
-                    this.current === '.' &&
-                    this.position + 1 < this.input.length &&
-                    /[a-zA-Z_]/.test(this.input[this.position + 1])
-                ) {
-                    this.advance() // skip '.'
-                    value += '/' + this.readIdentifier()
-                }
-                const type = this.getKeywordType(value)
-                tokens.push({ type, value, position })
+                tokens.push(this.readIdentifierToken(position))
                 continue
             }
-            // Operators and punctuation
-            switch (this.current) {
-                case '=':
-                    tokens.push({ type: TokenType.EQUALS, value: '=', position })
-                    this.advance()
-                    break
-                case '!':
-                    if (this.input[this.position + 1] === '=') {
-                        tokens.push({ type: TokenType.NOT_EQUALS, value: '!=', position })
-                        this.advance()
-                        this.advance()
-                    } else {
-                        this.advance()
-                    }
-                    break
-                case '>':
-                    if (this.input[this.position + 1] === '=') {
-                        tokens.push({ type: TokenType.GREATER_EQUAL, value: '>=', position })
-                        this.advance()
-                        this.advance()
-                    } else {
-                        tokens.push({ type: TokenType.GREATER_THAN, value: '>', position })
-                        this.advance()
-                    }
-                    break
-                case '<':
-                    if (this.input[this.position + 1] === '=') {
-                        tokens.push({ type: TokenType.LESS_EQUAL, value: '<=', position })
-                        this.advance()
-                        this.advance()
-                    } else {
-                        tokens.push({ type: TokenType.LESS_THAN, value: '<', position })
-                        this.advance()
-                    }
-                    break
-                case ',':
-                    tokens.push({ type: TokenType.COMMA, value: ',', position })
-                    this.advance()
-                    break
-                case ';':
-                    tokens.push({ type: TokenType.SEMICOLON, value: ';', position })
-                    this.advance()
-                    break
-                case '(':
-                    tokens.push({ type: TokenType.LPAREN, value: '(', position })
-                    this.advance()
-                    break
-                case ')':
-                    tokens.push({ type: TokenType.RPAREN, value: ')', position })
-                    this.advance()
-                    break
-                case '*':
-                    tokens.push({ type: TokenType.ASTERISK, value: '*', position })
-                    this.advance()
-                    break
-                default:
-                    this.advance()
-                    break
-            }
+            // Operators and punctuation. An unrecognized character is consumed
+            // and produces no token, as before.
+            const operator = this.readOperatorToken(position)
+            if (operator) tokens.push(operator)
         }
         tokens.push({ type: TokenType.EOF, value: '', position: this.position })
         return tokens
+    }
+
+    /**
+     * Reads an identifier, folding dot notation for nested fields into FYLO's
+     * slash paths (`address.city` → `address/city`).
+     * @param {number} position
+     * @returns {Token}
+     */
+    readIdentifierToken(position) {
+        let value = this.readIdentifier()
+        while (
+            this.current === '.' &&
+            this.position + 1 < this.input.length &&
+            /[a-zA-Z_]/.test(this.input[this.position + 1])
+        ) {
+            this.advance() // skip '.'
+            value += '/' + this.readIdentifier()
+        }
+        return { type: this.getKeywordType(value), value, position }
+    }
+
+    /**
+     * Reads one operator or punctuation token, consuming its characters.
+     * Returns null for an unrecognized character, which is skipped.
+     * @param {number} position
+     * @returns {Token | null}
+     */
+    readOperatorToken(position) {
+        const character = this.current
+        if (!character) return null
+        const comparison = COMPARISON_TOKENS[character]
+        if (comparison) {
+            const { withEquals, alone } = comparison
+            if (this.input[this.position + 1] === '=') {
+                this.advance()
+                this.advance()
+                return { type: withEquals, value: `${character}=`, position }
+            }
+            this.advance()
+            return alone ? { type: alone, value: character, position } : null
+        }
+        const single = SINGLE_CHARACTER_TOKENS[character]
+        this.advance()
+        return single ? { type: single, value: character, position } : null
     }
 }
 // SQL Parser

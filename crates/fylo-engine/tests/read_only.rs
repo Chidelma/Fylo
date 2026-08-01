@@ -153,6 +153,15 @@ fn enforces_portable_access_descriptors_for_get_and_find() {
             .code(),
         EngineErrorCode::Access
     );
+    assert_eq!(
+        engine.metadata("users", "4VRNF52JPCO").unwrap_err().code(),
+        EngineErrorCode::Access
+    );
+    assert!(
+        engine
+            .metadata_as("users", "4VRNF52JPCO", &AccessContext::new(2000, [100]))
+            .is_ok()
+    );
     let query = StructuredQuery::parse(
         br#"{"$ops":[{"score":{"$gte":40}}]}"#,
         QueryLimits::default(),

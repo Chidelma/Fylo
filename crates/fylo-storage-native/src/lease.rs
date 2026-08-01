@@ -51,6 +51,10 @@ impl RootLease {
     /// Returns `ENATIVE_ROOT_LOCKED` when another process owns the root, and
     /// an I/O error when the sentinel cannot be created or written.
     pub fn acquire(root: impl AsRef<Path>) -> Result<Self, NativeStorageError> {
+        // Opening the JavaScript engine has always initialized a missing root.
+        // Keep the public machine/CLI contract identical while still deriving
+        // the lock identity from the canonical path after creation.
+        std::fs::create_dir_all(root.as_ref()).map_err(NativeStorageError::io)?;
         let canonical = std::fs::canonicalize(root.as_ref()).map_err(NativeStorageError::io)?;
         let (sentinel_path, metadata_path) = lease_paths(&canonical)?;
         let sentinel = OpenOptions::new()
@@ -208,5 +212,16 @@ mod tests {
         successor.assert_owned().unwrap();
         drop(successor);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn acquiring_a_lease_initializes_a_missing_root() {
+        let parent = std::env::temp_dir().join(super::super::write::unique_name("fylo-lease-new"));
+        let root = parent.join("nested").join("db");
+        let held = RootLease::acquire(&root).unwrap();
+        assert!(root.is_dir());
+        assert_eq!(held.root(), std::fs::canonicalize(&root).unwrap());
+        drop(held);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

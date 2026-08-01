@@ -30,9 +30,12 @@ repository = "https://github.com/d31ma/Fylo"
 [workspace.dependencies]
 aes-gcm = "0.11.0"
 base64 = "0.22.1"
+boa_engine = { version = "0.21.1", default-features = false }
 getrandom = "0.4.3"
 hmac = "0.13.0"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 ryu-js = "1.0.3"
 same-file = "1.0.6"
 serde = { version = "1.0.229", features = ["derive"] }

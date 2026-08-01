@@ -15,7 +15,7 @@
                 },
                 {
                     "path": "/docs",
-                    "contains": "FYLO documentation",
+                    "contains": "FYLO, end to end.",
                     "contentTypes": ["text/html"]
                 },
                 {

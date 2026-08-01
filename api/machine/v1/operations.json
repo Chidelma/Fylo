@@ -2,8 +2,6 @@
     "protocolVersion": 1,
     "operations": [
         { "name": "handshake", "class": "read", "retry": "safe" },
-        { "name": "backupStatus", "class": "read", "retry": "safe" },
-        { "name": "backupReconcile", "class": "write", "retry": "conditional" },
         { "name": "executeSQL", "class": "mixed", "retry": "operation-dependent" },
         { "name": "createCollection", "class": "write", "retry": "conditional" },
         { "name": "dropCollection", "class": "write", "retry": "unsafe" },
