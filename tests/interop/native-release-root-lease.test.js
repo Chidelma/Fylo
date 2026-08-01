@@ -13,7 +13,7 @@ const binary = path.resolve(process.env.FYLO_BINARY ?? 'dist-bin/fylo')
 const expectedBuildKind = process.env.FYLO_EXPECT_BUILD_KIND ?? 'release'
 const expectedTarget =
     process.env.FYLO_EXPECT_TARGET ??
-    `${process.platform === 'darwin' ? 'macos' : process.platform}-${process.arch}`
+    `${process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : process.platform}-${process.arch}`
 const roots = []
 
 class ReleaseLoop {
