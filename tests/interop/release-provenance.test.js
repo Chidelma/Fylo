@@ -71,4 +71,22 @@ describe('release recovery and supply-chain gates', () => {
         expect(interop).toContain('name: Build exact Rust release executable')
         expect(interop).toContain("FYLO_SKIP_BINARY_BUILD: '1'")
     })
+
+    test('limits cross-version handshake normalization to release identity and known capabilities', async () => {
+        const parity = await readFile(
+            path.join(root, 'scripts/verify-rust-release-machine-parity.mjs'),
+            'utf8'
+        )
+        const normalizeHandshake = parity.slice(
+            parity.indexOf('function normalizeHandshake'),
+            parity.indexOf('function normalizeKnownReleaseDeltas')
+        )
+
+        expect(normalizeHandshake).toContain('delete normalized.runtimeVersion')
+        expect(normalizeHandshake).toContain('delete normalized.capabilities?.documentBuckets')
+        expect(normalizeHandshake).toContain('delete normalized.capabilities?.machineAccess')
+        expect(normalizeHandshake.match(/delete normalized\.capabilities\?\./g)).toHaveLength(3)
+        expect(normalizeHandshake).not.toContain('delete normalized.protocolVersion')
+        expect(normalizeHandshake).not.toContain('delete normalized.capabilities\n')
+    })
 })

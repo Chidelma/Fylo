@@ -497,6 +497,9 @@ function normalizeHandshake(value) {
     delete normalized.buildKind
     delete normalized.buildTarget
     delete normalized.commit
+    delete normalized.runtimeVersion
+    delete normalized.capabilities?.documentBuckets
+    delete normalized.capabilities?.machineAccess
     delete normalized.capabilities?.wholeRootBackup
     return normalized
 }
