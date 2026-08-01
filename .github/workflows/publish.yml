@@ -694,6 +694,7 @@ jobs:
 
                   marker="<!-- fylo-release-workflow:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT} -->"
                   published=false
+                  draft_requested=false
                   release_id=''
 
                   find_workflow_draft() {
@@ -703,14 +704,28 @@ jobs:
                       '[.[] | select(.draft == true and .tag_name == $tag and ((.body // "") | contains($marker)))] | if length == 1 then .[0] else error("expected exactly one workflow draft") end'
                   }
 
+                  wait_for_workflow_draft() {
+                    local release=''
+                    for _ in {1..5}; do
+                      if release=$(find_workflow_draft 2>/dev/null); then
+                        printf '%s\n' "$release"
+                        return 0
+                      fi
+                      sleep 2
+                    done
+                    echo "::error::Timed out waiting for workflow draft $TAG" >&2
+                    return 1
+                  }
+
                   cleanup_draft() {
                     status=$?
                     trap - EXIT
+                    release=''
                     if [[ "$published" != true ]]; then
                       if [[ -n "$release_id" ]]; then
                         release=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" 2>/dev/null || true)
-                      else
-                        release=$(find_workflow_draft 2>/dev/null || true)
+                      elif [[ "$draft_requested" == true ]]; then
+                        release=$(wait_for_workflow_draft 2>/dev/null || true)
                         release_id=$(jq -r '.id // empty' <<<"${release:-{}}")
                       fi
                       if [[ -n "$release" ]] && jq -e \
@@ -736,6 +751,7 @@ jobs:
                   trap cleanup_draft EXIT
 
                   mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | sort)
+                  draft_requested=true
                   gh release create "$TAG" "${assets[@]}" \
                     --draft \
                     --target "$GITHUB_SHA" \
@@ -743,7 +759,7 @@ jobs:
                     --generate-notes \
                     --notes "$marker"
 
-                  release=$(find_workflow_draft)
+                  release=$(wait_for_workflow_draft)
                   release_id=$(jq -er '.id' <<<"$release")
                   jq -e \
                     --arg marker "$marker" \

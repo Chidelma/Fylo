@@ -72,6 +72,17 @@ describe('release recovery and supply-chain gates', () => {
         expect(interop).toContain("FYLO_SKIP_BINARY_BUILD: '1'")
     })
 
+    test('waits for GitHub to index a newly created release draft', async () => {
+        const workflow = await readFile(path.join(root, '.github/workflows/publish.yml'), 'utf8')
+        const publish = workflow.slice(workflow.indexOf('    github-release:'), workflow.length)
+
+        expect(publish).toContain('wait_for_workflow_draft()')
+        expect(publish).toContain('for _ in {1..5}')
+        expect(publish).toContain('draft_requested=true')
+        expect(publish.match(/release=\$\(wait_for_workflow_draft/g)).toHaveLength(2)
+        expect(publish).toContain('elif [[ "$draft_requested" == true ]]')
+    })
+
     test('limits cross-version handshake normalization to release identity and known capabilities', async () => {
         const parity = await readFile(
             path.join(root, 'scripts/verify-rust-release-machine-parity.mjs'),
