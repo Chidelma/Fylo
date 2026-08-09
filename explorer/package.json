@@ -1,6 +1,6 @@
 {
     "name": "fylo-explorer",
-    "version": "26.31.06",
+    "version": "26.32.07",
     "private": true,
     "packageManager": "bun@1.3.11",
     "scripts": {
@@ -13,6 +13,6 @@
         "seed": "(cd .. && bun ./scripts/run-rust.mjs cargo build --locked -p fylo-cli --bin fylo-rust) && bun seed.mjs"
     },
     "devDependencies": {
-        "@d31ma/tachyon": "github:d31ma/Tachyon#ef61b352b567b7b164fa74b6bc70e55858bb7421"
+        "@d31ma/tachyon": "github:d31ma/Tachyon#47775135e456cd8db3c80f4dfde0afaf1273296b"
     }
 }

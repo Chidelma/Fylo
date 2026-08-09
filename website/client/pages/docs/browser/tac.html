@@ -35,6 +35,37 @@
     </div>
 
     <div class="doc-section">
+      <h2>The engine itself in the browser</h2>
+      <p>
+        The JavaScript host below reimplements FYLO's logical model, which is why the
+        browser has lagged the native engine on version control, schema, and
+        encryption. <code>fylo-browser.wasm</code> replaces it with the engine itself:
+        the same Rust that runs natively, owning browser storage through a table of
+        plain C functions the embedder fills — filesystem, entropy, clock, and a
+        diagnostic channel. It imports no binding-generator glue, so a Swift, Kotlin,
+        or Dart embedder fills the same slots.
+      </p>
+      <p>
+        OPFS is only half synchronous: file reads and writes are, but every directory
+        operation returns a promise, and the engine calls its host synchronously. So a
+        bridge worker owns every OPFS handle and the engine worker blocks on it through
+        a <code>SharedArrayBuffer</code> — the design <code>sqlite-wasm</code> uses.
+        That needs the page to be cross-origin isolated
+        (<code>Cross-Origin-Opener-Policy: same-origin</code> and
+        <code>Cross-Origin-Embedder-Policy: require-corp</code>), or
+        <code>SharedArrayBuffer</code> does not exist and the worker says so rather
+        than failing as a disk error.
+      </p>
+      <p>
+        A root's single writer is a Web Lock held for the session, which is what the
+        handshake leaves to the host by reporting
+        <code>exclusiveRoot: false</code>. Verified storing and querying documents over
+        real OPFS in Chromium and Firefox; the JavaScript host below remains the
+        shipped default until it clears the same recovery and soak gates.
+      </p>
+    </div>
+
+    <div class="doc-section">
       <h2>Wasm index scanning</h2>
       <p>
         The browser index scanner has an opt-in Wasm prototype. It keeps the existing

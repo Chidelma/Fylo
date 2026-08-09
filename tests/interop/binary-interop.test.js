@@ -151,8 +151,8 @@ describe('compiled binary language interop', () => {
         expect(cliIdentity.commit).toBe(expectedCommit)
         if (cliIdentity.buildKind === 'release')
             expect(cliIdentity.commit).toMatch(/^[0-9a-f]{40}$/)
-        expect(cliIdentity.dependencies.chex.requiredVersion).toBe('26.28.02')
-        expect(cliIdentity.dependencies.ttid.requiredVersion).toBe('26.28.02')
+        expect(cliIdentity.dependencies.chex.requiredVersion).toBe('26.32.02')
+        expect(cliIdentity.dependencies.ttid.requiredVersion).toBe('26.32.03')
         expect(cliIdentity.capabilities.documentBuckets).toEqual({
             version: 1,
             collectionKind: 'file',
@@ -163,6 +163,7 @@ describe('compiled binary language interop', () => {
                 'rebuildCollection',
                 'verifyCollection',
                 'getDoc',
+                'getFileData',
                 'getLatest',
                 'getMeta',
                 'setMeta',
@@ -176,6 +177,7 @@ describe('compiled binary language interop', () => {
                 'delDocs'
             ],
             putInputs: ['path', 'url'],
+            getOutputs: ['base64', 'path'],
             integrity: 'sha256-full-content'
         })
         if (!['darwin', 'linux'].includes(process.platform)) {

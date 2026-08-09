@@ -9,9 +9,26 @@ import fylo, {
 } from '../../src/browser/index.js'
 import { createMemoryFilesystem } from '../../src/browser/core/memory-filesystem.js'
 import { runBrowserRequest } from '../../src/browser/core/protocol.js'
+import { relativeBridgePath } from '../../src/browser/opfs-bridge.mjs'
 import { runBrowserConformance } from './helpers/conformance.js'
 
 describe('browser runtime', () => {
+    test('browser engine host paths stay inside the granted root', () => {
+        expect(relativeBridgePath('/fylo/root/docs/record.json', '/fylo/root')).toBe(
+            'docs/record.json'
+        )
+        expect(relativeBridgePath('/fylo/root', '/fylo/root')).toBe('')
+        expect(relativeBridgePath('/fylo/.root.fylo-root-owner.lock.json', '/fylo/root')).toBe(
+            '.root.fylo-root-owner.lock.json'
+        )
+        expect(() => relativeBridgePath('/fylo/root-other/record.json', '/fylo/root')).toThrow(
+            'escapes the granted root'
+        )
+        expect(() => relativeBridgePath('/fylo/root/../other', '/fylo/root')).toThrow(
+            'traversal component'
+        )
+    })
+
     test('reference browser runtime satisfies the browser conformance contract', async () => {
         const result = await runBrowserConformance(() => createBrowserFylo({ worker: false }))
         expect(result.userId).toBeString()

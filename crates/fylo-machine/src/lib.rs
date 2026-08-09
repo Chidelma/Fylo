@@ -7,9 +7,12 @@
 mod strict;
 
 use std::io::{BufRead, Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::time::Instant;
 
 use base64::Engine as _;
@@ -22,6 +25,7 @@ use fylo_storage_native::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
+pub use fylo_storage_native::{RootConfig, parse_shard_width};
 pub use strict::StrictValue;
 
 /// Protocol major version implemented by this crate.
@@ -52,8 +56,8 @@ const BUILD_KIND: &str = match option_env!("FYLO_BUILD_KIND") {
     None => "development-compiled",
 };
 const BUILD_TARGET: Option<&str> = option_env!("FYLO_BUILD_TARGET");
-const REQUIRED_CHEX_VERSION: &str = "26.28.02";
-const REQUIRED_TTID_VERSION: &str = "26.28.02";
+const REQUIRED_CHEX_VERSION: &str = "26.32.02";
+const REQUIRED_TTID_VERSION: &str = "26.32.03";
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const MACHINE_ACCESS_OPERATIONS: &[&str] = &[
     "executeSQL",
@@ -80,6 +84,7 @@ const DOCUMENT_BUCKET_OPERATIONS: &[&str] = &[
     "rebuildCollection",
     "verifyCollection",
     "getDoc",
+    "getFileData",
     "getLatest",
     "getMeta",
     "setMeta",
@@ -92,6 +97,15 @@ const DOCUMENT_BUCKET_OPERATIONS: &[&str] = &[
     "delDoc",
     "delDocs",
 ];
+
+/// Operations a published release answered and this one deliberately does not.
+///
+/// The code stays `EUNSUPPORTEDOP` — the handshake capability set is the
+/// machine-readable signal and a negotiating client already handles it — but
+/// "unknown machine operation backupStatus" reads as a packaging accident,
+/// which is exactly how the whole-root backup removal was received. A caller
+/// that names one gets the decision and its replacement instead.
+const RETIRED_OPERATIONS: &[&str] = &["backup", "backupStatus", "backupReconcile", "reconcile"];
 
 /// Frame size limits for one machine session.
 #[derive(Clone, Copy, Debug)]
@@ -161,7 +175,15 @@ pub fn serve<R: BufRead, W: Write>(
     default_root: Option<PathBuf>,
     limits: FrameLimits,
 ) -> std::io::Result<()> {
-    serve_session(input, output, default_root, limits, false, true)
+    serve_session(
+        input,
+        output,
+        default_root,
+        limits,
+        false,
+        true,
+        RootConfig::from_env().unwrap_or_default(),
+    )
 }
 
 /// Execute exactly one bounded request without retaining process-scoped state.
@@ -178,7 +200,15 @@ pub fn serve_once<R: BufRead, W: Write>(
     default_root: Option<PathBuf>,
     limits: FrameLimits,
 ) -> std::io::Result<()> {
-    serve_session(input, output, default_root, limits, false, false)
+    serve_session(
+        input,
+        output,
+        default_root,
+        limits,
+        false,
+        false,
+        RootConfig::from_env().unwrap_or_default(),
+    )
 }
 
 /// Serve one bounded session after acquiring the default root before the
@@ -197,7 +227,34 @@ pub fn serve_exclusive<R: BufRead, W: Write>(
     default_root: Option<PathBuf>,
     limits: FrameLimits,
 ) -> std::io::Result<()> {
-    serve_session(input, output, default_root, limits, true, true)
+    serve_session(
+        input,
+        output,
+        default_root,
+        limits,
+        true,
+        true,
+        RootConfig::from_env().unwrap_or_default(),
+    )
+}
+
+/// Serve one bounded session with host-supplied runtime knobs.
+///
+/// [`serve`], [`serve_once`], and [`serve_exclusive`] read those knobs from the
+/// process environment. A host that has none — a browser or mobile embedding —
+/// passes them here instead.
+///
+/// # Errors
+///
+/// Returns the first unrecoverable transport failure.
+pub fn serve_configured<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    default_root: Option<PathBuf>,
+    limits: FrameLimits,
+    config: RootConfig,
+) -> std::io::Result<()> {
+    serve_session(input, output, default_root, limits, false, true, config)
 }
 
 fn serve_session<R: BufRead, W: Write>(
@@ -207,6 +264,7 @@ fn serve_session<R: BufRead, W: Write>(
     limits: FrameLimits,
     exclusive_root: bool,
     persistent: bool,
+    config: RootConfig,
 ) -> std::io::Result<()> {
     let limits = limits.clamped();
     let mut leases = std::collections::BTreeMap::new();
@@ -237,6 +295,7 @@ fn serve_session<R: BufRead, W: Write>(
     let mut session = Session {
         default_root,
         limits,
+        config,
         leases: std::cell::RefCell::new(leases),
         cursors: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         cursor_sequence: std::cell::Cell::new(0),
@@ -254,6 +313,7 @@ fn serve_session<R: BufRead, W: Write>(
 struct Session {
     default_root: Option<PathBuf>,
     limits: FrameLimits,
+    config: RootConfig,
     leases: std::cell::RefCell<std::collections::BTreeMap<PathBuf, RootLease>>,
     cursors: std::cell::RefCell<std::collections::BTreeMap<String, CursorState>>,
     cursor_sequence: std::cell::Cell<u64>,
@@ -275,7 +335,7 @@ impl Session {
         input: &mut R,
         output: &mut W,
     ) -> std::io::Result<FrameOutcome> {
-        let started = Instant::now();
+        let started = Clock::start();
         let (frame, read, oversized, delimited) = self.read_request_frame(input)?;
         if read == 0 && frame.is_empty() {
             return Ok(FrameOutcome::Eof);
@@ -394,6 +454,7 @@ impl Session {
         match operation {
             "handshake" => Ok(self.handshake()),
             "getDoc" => self.get_document(request),
+            "getFileData" => self.get_file_data(request),
             "findDocs" => self.find_documents(request),
             "inspectCollection" => self.inspect_collection(request),
             "verifyCollection" => self.verify_collection(request),
@@ -404,6 +465,7 @@ impl Session {
             "createCollection" => self.create_collection(request),
             "dropCollection" => self.drop_collection(request),
             "rebuildCollection" => self.rebuild_collection(request),
+            "reshardCollection" => self.reshard_collection(request),
             "putData" => self.put_data(request),
             "patchDoc" => self.patch_document(request),
             "delDoc" => self.delete_document(request),
@@ -428,6 +490,16 @@ impl Session {
             "schemaValidate" => self.schema_validate(request),
             "schemaMaterialize" => self.schema_materialize(request),
             "importBulkData" => self.import_bulk_data(request),
+            _ if RETIRED_OPERATIONS.contains(&operation) => Err(MachineError::new(
+                "EUNSUPPORTEDOP",
+                format!(
+                    "machine operation {operation} was retired in 26.31.06 (ADR 0007, \
+                     filesystem-only native storage). Whole-root backup, verification, and \
+                     restore are filesystem procedures: see \
+                     docs/operations/filesystem-snapshot-restore.md. verifyCollection remains \
+                     the in-process integrity check"
+                ),
+            )),
             _ => Err(MachineError::new(
                 "EUNSUPPORTEDOP",
                 format!("unknown machine operation {operation}"),
@@ -438,7 +510,10 @@ impl Session {
     fn handshake(&self) -> Value {
         let capabilities = serde_json::Map::from_iter([
             ("handshake".into(), Value::Bool(true)),
-            ("exclusiveRoot".into(), Value::Bool(true)),
+            (
+                "exclusiveRoot".into(),
+                Value::Bool(RootLease::platform_enforces_exclusivity()),
+            ),
             (
                 "queryPagination".into(),
                 json!({
@@ -460,7 +535,12 @@ impl Session {
                     "version": 1,
                     "collectionKind": "file",
                     "operations": DOCUMENT_BUCKET_OPERATIONS,
-                    "putInputs": ["path", "url"],
+                    "putInputs": if cfg!(target_family = "wasm") {
+                        &["path"][..]
+                    } else {
+                        &["path", "url"][..]
+                    },
+                    "getOutputs": ["base64", "path"],
                     "integrity": "sha256-full-content"
                 }),
             ),
@@ -597,6 +677,84 @@ impl Session {
         Ok(json!({ identifier: document }))
     }
 
+    /// Read one raw file's content.
+    ///
+    /// `getDoc` answers a file collection with a manifest and no bytes, and
+    /// nothing in that manifest locates the object — `key` is the source path
+    /// it was ingested from. Without this the private
+    /// `.buckets/<collection>/docs/<shard>/<id><ext>` layout is the only read
+    /// interface, which made ADR 0006's shard change break consumers that had
+    /// no supported alternative.
+    ///
+    /// With `path` the content is written to that absolute path and only the
+    /// receipt returns, so an object larger than one response frame is still
+    /// readable. Without it the content returns base64 in `data`.
+    fn get_file_data(&self, request: &Value) -> Result<Value, MachineError> {
+        let engine = self.engine(request)?;
+        let collection = require_string(request, "collection")?;
+        let identifier = require_string(request, "id")?;
+        let actor = actor(request)?;
+        if engine
+            .inspect(collection)
+            .map_err(|error| engine_error(&error))?
+            .kind
+            != CollectionKind::File
+        {
+            return Err(MachineError::new(
+                "EBADREQUEST",
+                "getFileData requires a file collection",
+            ));
+        }
+        let file = match actor.as_ref() {
+            Some(actor) => engine.get_file_as(collection, identifier, actor),
+            None => engine.get_file(collection, identifier),
+        };
+        let file = match file {
+            Ok(file) => file,
+            Err(error) if error.storage_code() == Some(NativeStorageErrorCode::NotFound) => {
+                return Ok(json!({}));
+            }
+            Err(error) => return Err(engine_error(&error)),
+        };
+        let checksum = file.file.checksum_sha256.clone();
+        let length = file.bytes.len();
+        if let Some(path) = request.get("path") {
+            let path = path.as_str().ok_or_else(|| {
+                MachineError::new(
+                    "EBADREQUEST",
+                    "machine request field \"path\" must be a string",
+                )
+            })?;
+            let written = write_machine_file(path, &file.bytes)?;
+            return Ok(json!({
+                "id": identifier,
+                "path": written,
+                "contentLength": length,
+                "checksumSHA256": checksum,
+            }));
+        }
+        // Base64 inflates by 4/3 and the frame carries the envelope too, so a
+        // request that would only fail at the frame boundary is refused here
+        // with the alternative named.
+        if length.saturating_mul(4) / 3 >= self.limits.max_response_bytes {
+            return Err(MachineError::new(
+                "EFRAME_RESPONSE_TOO_LARGE",
+                format!(
+                    "raw file is {length} bytes and does not fit a {}-byte response frame; \
+                     supply \"path\" to write it to disk instead",
+                    self.limits.max_response_bytes
+                ),
+            ));
+        }
+        Ok(json!({
+            "id": identifier,
+            "contentLength": length,
+            "checksumSHA256": checksum,
+            "encoding": "base64",
+            "data": base64::engine::general_purpose::STANDARD.encode(&file.bytes),
+        }))
+    }
+
     fn find_documents(&self, request: &Value) -> Result<Value, MachineError> {
         let engine = self.engine(request)?;
         let collection = require_string(request, "collection")?;
@@ -713,6 +871,7 @@ impl Session {
         let repository_root = self.root(request)?;
         let active_root = active_worktree(&repository_root)?;
         NativeWriteRoot::open_with_repository(active_root, repository_root)
+            .map(|writer| writer.with_config(self.config))
             .map_err(|error| storage_error(&error))
     }
 
@@ -741,6 +900,7 @@ impl Session {
             }
             (None, _) => WriteEngine::open_with_repository(root, repository_root),
         }
+        .map(|engine| engine.with_config(self.config))
         .map_err(|error| engine_error(&error))
     }
 
@@ -826,6 +986,36 @@ impl Session {
             .drop_collection(collection)
             .map_err(|error| storage_error(&error))?;
         Ok(json!({ "collection": collection }))
+    }
+
+    /// Move a collection to a different shard width.
+    ///
+    /// The implementation is a rename per record with no content rewritten —
+    /// documents are the source of truth and the index is derived — so this
+    /// reports how many records moved rather than a new identity for any of
+    /// them. It is resumable: the descriptor records the destination and the
+    /// width being left before a single record moves, so an interrupted run
+    /// leaves every record findable under one candidate or another and
+    /// re-running finishes what remains.
+    fn reshard_collection(&self, request: &Value) -> Result<Value, MachineError> {
+        let collection = require_string(request, "collection")?;
+        let Some(width) = request.get("width").and_then(Value::as_u64) else {
+            return Err(MachineError::new(
+                "EBADREQUEST",
+                "machine request field \"width\" must be a non-negative integer",
+            ));
+        };
+        let width = u32::try_from(width).map_err(|_| {
+            MachineError::new(
+                "EBADREQUEST",
+                format!("shard width is out of range: {width}"),
+            )
+        })?;
+        let moved = self
+            .writer(request)?
+            .reshard_collection(collection, width)
+            .map_err(|error| storage_error(&error))?;
+        Ok(json!({ "collection": collection, "shardWidth": width, "moved": moved }))
     }
 
     fn rebuild_collection(&self, request: &Value) -> Result<Value, MachineError> {
@@ -1512,7 +1702,7 @@ impl Session {
         output: &mut W,
         operation: Option<&str>,
         request_id: Option<&str>,
-        started: Instant,
+        started: Clock,
         result: &Value,
     ) -> std::io::Result<()> {
         let frame = json!({
@@ -1520,7 +1710,7 @@ impl Session {
             "ok": true,
             "op": operation,
             "requestId": request_id,
-            "durationMs": started.elapsed().as_secs_f64() * 1000.0,
+            "durationMs": elapsed_millis(started),
             "result": result,
         });
         let encoded = serde_json::to_string(&frame).unwrap_or_default();
@@ -1547,7 +1737,7 @@ impl Session {
         output: &mut W,
         operation: Option<&str>,
         request_id: Option<&str>,
-        started: Instant,
+        started: Clock,
         error: &MachineError,
     ) -> std::io::Result<()> {
         let frame = json!({
@@ -1555,7 +1745,7 @@ impl Session {
             "ok": false,
             "op": operation,
             "requestId": request_id,
-            "durationMs": started.elapsed().as_secs_f64() * 1000.0,
+            "durationMs": elapsed_millis(started),
             "error": error,
         });
         writeln!(
@@ -1567,9 +1757,58 @@ impl Session {
     }
 }
 
+/// Whole elapsed milliseconds for the response envelope.
+///
+/// `durationMs` is documented and was emitted through v26.30.06 as an integer,
+/// so a statically typed client decodes it into an integer field. Emitting a
+/// float broke the whole frame for those clients, not just the field.
+fn elapsed_millis(started: Clock) -> u64 {
+    started.elapsed_millis()
+}
+
+/// A reading of whatever clock this target has.
+///
+/// `Instant::now` panics on `wasm32-unknown-unknown`, so a browser build reads
+/// the host's wall clock instead. It is not monotonic, so a clock adjustment
+/// mid-request can report zero rather than a negative duration — acceptable for
+/// a telemetry field, and the only reading available.
+#[derive(Clone, Copy)]
+pub(crate) enum Clock {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    Monotonic(Instant),
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    HostWallClock(u64),
+}
+
+impl Clock {
+    fn start() -> Self {
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Self::Monotonic(Instant::now())
+        }
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            Self::HostWallClock(fylo_storage_native::host_now_unix_ms().unwrap_or(0))
+        }
+    }
+
+    fn elapsed_millis(self) -> u64 {
+        match self {
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            Self::Monotonic(started) => {
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+            }
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            Self::HostWallClock(started) => fylo_storage_native::host_now_unix_ms()
+                .unwrap_or(started)
+                .saturating_sub(started),
+        }
+    }
+}
+
 fn active_worktree(repository_root: &std::path::Path) -> Result<PathBuf, MachineError> {
     let head_path = repository_root.join(".fylo-vcs").join("HEAD");
-    let head_metadata = match std::fs::symlink_metadata(&head_path) {
+    let head_metadata = match fylo_vfs::symlink_metadata(&head_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(repository_root.to_path_buf());
@@ -1587,7 +1826,7 @@ fn active_worktree(repository_root: &std::path::Path) -> Result<PathBuf, Machine
             "FYLO repository HEAD is not a regular file",
         ));
     }
-    let head = std::fs::read_to_string(&head_path).map_err(|error| {
+    let head = fylo_vfs::read_to_string(&head_path).map_err(|error| {
         MachineError::new(
             "ECORRUPTMETADATA",
             format!("cannot read FYLO HEAD: {error}"),
@@ -1602,7 +1841,7 @@ fn active_worktree(repository_root: &std::path::Path) -> Result<PathBuf, Machine
     }
     let branch_path = std::path::Path::new(branch);
     if branch.is_empty()
-        || branch_path.is_absolute()
+        || is_rooted(branch_path)
         || branch_path
             .components()
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
@@ -1617,7 +1856,7 @@ fn active_worktree(repository_root: &std::path::Path) -> Result<PathBuf, Machine
         .join("refs")
         .join("heads")
         .join(format!("{branch}.json"));
-    let reference_metadata = std::fs::symlink_metadata(&reference).map_err(|_| {
+    let reference_metadata = fylo_vfs::symlink_metadata(&reference).map_err(|_| {
         MachineError::new(
             "ECORRUPTMETADATA",
             format!("active FYLO branch is missing its ref: {branch}"),
@@ -1633,19 +1872,19 @@ fn active_worktree(repository_root: &std::path::Path) -> Result<PathBuf, Machine
         .join(".fylo-vcs")
         .join("branches")
         .join(branch_path);
-    let target_metadata = std::fs::symlink_metadata(&target).map_err(|_| {
+    let target_metadata = fylo_vfs::symlink_metadata(&target).map_err(|_| {
         MachineError::new(
             "ECORRUPTMETADATA",
             format!("active FYLO branch is missing its worktree: {branch}"),
         )
     })?;
-    let canonical_repository = std::fs::canonicalize(repository_root).map_err(|error| {
+    let canonical_repository = fylo_vfs::canonicalize(repository_root).map_err(|error| {
         MachineError::new(
             "ECORRUPTMETADATA",
             format!("cannot resolve FYLO root: {error}"),
         )
     })?;
-    let canonical_target = std::fs::canonicalize(&target).map_err(|error| {
+    let canonical_target = fylo_vfs::canonicalize(&target).map_err(|error| {
         MachineError::new(
             "ECORRUPTMETADATA",
             format!("cannot resolve active FYLO worktree: {error}"),
@@ -1705,6 +1944,7 @@ fn read_frame<R: BufRead>(
 }
 
 const DEFAULT_IMPORT_MAX_BYTES: usize = 50 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct ImportOptions {
@@ -1783,15 +2023,76 @@ fn string_array(value: &Value, name: &str) -> Result<Vec<String>, MachineError> 
         .collect()
 }
 
+/// Whether a path names a location from the filesystem root.
+///
+/// `Path::is_absolute` answers false for *every* path on
+/// `wasm32-unknown-unknown`: std requires a drive-style prefix outside unix and
+/// WASI, and a host filesystem has none. `has_root` is the question actually
+/// being asked — that the path does not depend on a working directory, which
+/// no FYLO host has.
+fn is_rooted(path: &std::path::Path) -> bool {
+    if cfg!(any(unix, target_os = "wasi")) {
+        path.is_absolute()
+    } else if cfg!(target_family = "wasm") {
+        path.has_root()
+    } else {
+        path.is_absolute()
+    }
+}
+
+/// Write raw-file content to a caller-named absolute path.
+///
+/// The path is the caller's, not FYLO's, so this refuses to follow a link or
+/// replace anything that already exists: an operator naming an existing path by
+/// mistake gets an error rather than a clobbered file.
+fn write_machine_file(path: &str, bytes: &[u8]) -> Result<String, MachineError> {
+    let target = std::path::Path::new(path);
+    if !is_rooted(target) {
+        return Err(MachineError::new(
+            "EBADREQUEST",
+            "machine output path must be an absolute path",
+        ));
+    }
+    if fylo_vfs::symlink_metadata(target).is_ok() {
+        return Err(MachineError::new(
+            "EBADREQUEST",
+            "machine output path already exists",
+        ));
+    }
+    let mut file = fylo_vfs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(target)
+        .map_err(|error| {
+            MachineError::new(
+                "EUNKNOWN",
+                format!("cannot create machine output file: {error}"),
+            )
+        })?;
+    file.write_all(bytes).map_err(|error| {
+        MachineError::new(
+            "EUNKNOWN",
+            format!("cannot write machine output file: {error}"),
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        MachineError::new(
+            "EUNKNOWN",
+            format!("cannot flush machine output file: {error}"),
+        )
+    })?;
+    Ok(target.display().to_string())
+}
+
 fn read_machine_file(path: &str) -> Result<(Vec<u8>, String), MachineError> {
     let path = std::path::Path::new(path);
-    if !path.is_absolute() {
+    if !is_rooted(path) {
         return Err(MachineError::new(
             "EBADREQUEST",
             "machine file path must be an absolute path",
         ));
     }
-    let metadata = std::fs::metadata(path).map_err(|error| {
+    let metadata = fylo_vfs::metadata(path).map_err(|error| {
         MachineError::new("EUNKNOWN", format!("cannot read machine file: {error}"))
     })?;
     if !metadata.is_file() {
@@ -1812,7 +2113,7 @@ fn read_machine_file(path: &str) -> Result<(Vec<u8>, String), MachineError> {
         .filter(|name| !name.is_empty())
         .ok_or_else(|| MachineError::new("EBADREQUEST", "machine file has no UTF-8 filename"))?
         .to_owned();
-    let mut file = std::fs::File::open(path).map_err(|error| {
+    let mut file = fylo_vfs::File::open(path).map_err(|error| {
         MachineError::new("EUNKNOWN", format!("cannot open machine file: {error}"))
     })?;
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
@@ -1831,6 +2132,34 @@ fn read_machine_file(path: &str) -> Result<(Vec<u8>, String), MachineError> {
     Ok((bytes, filename))
 }
 
+/// Fetch is the host's job in a browser build.
+///
+/// A browser already has a network stack with the origin's policy, cookies,
+/// and CORS attached to it. Bundling a TLS client into the Wasm module would
+/// duplicate all of that, add megabytes, and route requests around the
+/// protections the page is subject to. The host ingests the bytes and calls
+/// `putData` with a path instead.
+#[cfg(target_arch = "wasm32")]
+fn unavailable_in_browser(what: &str) -> MachineError {
+    MachineError::new(
+        "EUNSUPPORTEDOP",
+        format!(
+            "{what} is not available in a browser build; fetch the bytes in the host and supply them directly"
+        ),
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fetch_machine_file(_url: &str) -> Result<(Vec<u8>, String), MachineError> {
+    Err(unavailable_in_browser("URL file ingestion"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fetch_import(_url: &str, _options: &ImportOptions) -> Result<Vec<u8>, MachineError> {
+    Err(unavailable_in_browser("URL bulk import"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_machine_file(url: &str) -> Result<(Vec<u8>, String), MachineError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let parsed = reqwest::Url::parse(url).map_err(|error| {
@@ -1896,6 +2225,7 @@ fn fetch_machine_file(url: &str) -> Result<(Vec<u8>, String), MachineError> {
     Ok((bytes, filename))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_import(url: &str, options: &ImportOptions) -> Result<Vec<u8>, MachineError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let parsed = reqwest::Url::parse(url)
@@ -1996,6 +2326,7 @@ fn fetch_import(url: &str, options: &ImportOptions) -> Result<Vec<u8>, MachineEr
     read_import_body(response, options.max_bytes)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_import_body(
     response: reqwest::blocking::Response,
     max_bytes: usize,
@@ -2020,6 +2351,7 @@ fn read_import_body(
     Ok(body)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn decode_data_import(url: &str, max_bytes: usize) -> Result<Vec<u8>, MachineError> {
     let encoded = url
         .strip_prefix("data:")
@@ -2055,6 +2387,7 @@ fn decode_data_import(url: &str, max_bytes: usize) -> Result<Vec<u8>, MachineErr
     Ok(body)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn percent_decode(value: &str) -> Result<Vec<u8>, MachineError> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -2118,6 +2451,7 @@ fn parse_import_documents(
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn host_allowed(hostname: &str, allowed: Option<&[String]>) -> bool {
     let Some(allowed) = allowed.filter(|values| !values.is_empty()) else {
         return true;
@@ -2129,6 +2463,7 @@ fn host_allowed(hostname: &str, allowed: Option<&[String]>) -> bool {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_private(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
@@ -2153,6 +2488,7 @@ fn is_private(address: IpAddr) -> bool {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn private_import_error(hostname: &str) -> MachineError {
     MachineError::new(
         "EUNKNOWN",
@@ -2160,6 +2496,7 @@ fn private_import_error(hostname: &str) -> MachineError {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn import_size_error(max_bytes: usize) -> MachineError {
     MachineError::new(
         "EUNKNOWN",
@@ -2297,7 +2634,7 @@ fn cursor_scope(request: &Value) -> String {
 }
 
 fn unix_millis() -> u64 {
-    std::time::SystemTime::now()
+    fylo_storage_native::wall_clock()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
             u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
@@ -2412,7 +2749,13 @@ fn runtime_target() -> String {
     if let Some(target) = BUILD_TARGET.filter(|target| !target.is_empty()) {
         return target.to_owned();
     }
-    let os = std::env::consts::OS;
+    // WebAssembly targets report an empty OS, which would otherwise render as
+    // a leading-dash fragment like "-wasm32" and tell a supervisor nothing.
+    let os = match std::env::consts::OS {
+        "" if cfg!(all(target_arch = "wasm32", target_os = "unknown")) => "browser",
+        "" if cfg!(target_family = "wasm") => "wasi",
+        other => other,
+    };
     let architecture = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",
@@ -2565,7 +2908,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "fylo-machine-exclusive-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
+            fylo_storage_native::wall_clock()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
@@ -2594,11 +2937,254 @@ mod tests {
         assert_eq!(frames[0]["error"]["code"], json!("EUNSUPPORTEDOP"));
     }
 
+    /// Resharding moves every record, its tombstones, and its raw files. The
+    /// implementation was reachable only from a development binary, so this
+    /// covers the surface an operator actually has.
+    #[test]
+    fn reshard_moves_records_and_keeps_them_readable() {
+        let scratch = std::env::temp_dir().join(format!(
+            "fylo-machine-reshard-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = scratch.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut script =
+            vec![json!({ "op": "createCollection", "collection": "notes", "root": root })];
+        for value in 0..3 {
+            script.push(
+                json!({ "op": "putData", "collection": "notes", "data": { "n": value }, "root": root }),
+            );
+        }
+        script.push(
+            json!({ "op": "reshardCollection", "collection": "notes", "width": 3, "root": root }),
+        );
+        script.push(json!({ "op": "findDocs", "collection": "notes", "query": {}, "root": root }));
+        script.push(
+            json!({ "op": "reshardCollection", "collection": "notes", "width": 0, "root": root }),
+        );
+        let frames = run(&format!(
+            "{}\n",
+            script
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+
+        let reshard = &frames[4];
+        assert!(reshard["ok"].as_bool().unwrap(), "{reshard}");
+        assert_eq!(reshard["result"]["moved"], json!(3));
+        assert_eq!(reshard["result"]["shardWidth"], json!(3));
+        // Every record still reads, which is the only thing a move must preserve.
+        assert_eq!(frames[5]["result"].as_object().unwrap().len(), 3);
+        // The width range is enforced on this path too, not only on create.
+        assert!(!frames[6]["ok"].as_bool().unwrap());
+
+        let shards: Vec<_> = std::fs::read_dir(root.join(".collections/notes/docs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(shards.iter().all(|shard| shard.len() == 3), "{shards:?}");
+
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn a_retired_operation_names_the_decision_instead_of_reading_as_unknown() {
+        for operation in RETIRED_OPERATIONS {
+            let frames = run(&format!("{{\"op\":\"{operation}\"}}\n"));
+            assert_eq!(
+                frames[0]["error"]["code"],
+                json!("EUNSUPPORTEDOP"),
+                "{operation}"
+            );
+            let message = frames[0]["error"]["message"].as_str().unwrap();
+            assert!(message.contains("ADR 0007"), "{message}");
+            assert!(
+                message.contains("filesystem-snapshot-restore.md"),
+                "{message}"
+            );
+        }
+    }
+
+    /// `getDoc` answers a file collection with a manifest that does not locate
+    /// the object, so without this the private bucket layout is the only read
+    /// path. Both output shapes are exercised: the frame has a size ceiling
+    /// that `path` exists to escape.
+    #[test]
+    fn get_file_data_returns_bucket_content_inline_and_to_a_path() {
+        let scratch = std::env::temp_dir().join(format!(
+            "fylo-machine-bucket-{}-{}",
+            std::process::id(),
+            fylo_storage_native::wall_clock()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = scratch.join("root");
+        let source = scratch.join("source.bin");
+        let sink = scratch.join("sink.bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&source, b"hello bucket").unwrap();
+
+        let frames = run(&format!(
+            "{}\n{}\n",
+            json!({ "op": "createCollection", "collection": "files", "kind": "file", "root": root }),
+            json!({ "op": "putData", "collection": "files", "file": { "path": source }, "root": root }),
+        ));
+        let identifier = frames[1]["result"].as_str().unwrap().to_owned();
+
+        let frames = run(&format!(
+            "{}\n{}\n",
+            json!({ "op": "getFileData", "collection": "files", "id": identifier, "root": root }),
+            json!({ "op": "getFileData", "collection": "files", "id": identifier, "path": sink, "root": root }),
+        ));
+        let inline = &frames[0]["result"];
+        assert_eq!(inline["contentLength"], json!(12));
+        assert_eq!(inline["encoding"], json!("base64"));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(inline["data"].as_str().unwrap())
+                .unwrap(),
+            b"hello bucket"
+        );
+        assert_eq!(frames[1]["result"]["path"], json!(sink));
+        assert_eq!(std::fs::read(&sink).unwrap(), b"hello bucket");
+        // The checksum is the manifest's, so both shapes agree with `getDoc`.
+        assert_eq!(
+            inline["checksumSHA256"],
+            frames[1]["result"]["checksumSHA256"]
+        );
+
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    /// Every epoch-millisecond field is a whole number. The JavaScript engine
+    /// passed Node's fractional `mtimeMs` through, so one payload could mix an
+    /// integer `createdAt` with a fractional `lastModified` and fail a client
+    /// that typed the field as an integer.
+    #[test]
+    fn every_timestamp_is_whole_milliseconds() {
+        let scratch = std::env::temp_dir().join(format!(
+            "fylo-machine-timestamps-{}-{}",
+            std::process::id(),
+            fylo_storage_native::wall_clock()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = scratch.join("root");
+        let source = scratch.join("source.bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&source, b"hello bucket").unwrap();
+
+        let frames = run(&format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            json!({ "op": "createCollection", "collection": "files", "kind": "file", "root": root }),
+            json!({ "op": "putData", "collection": "files", "file": { "path": source }, "root": root }),
+            json!({ "op": "createCollection", "collection": "notes", "root": root }),
+            json!({ "op": "putData", "collection": "notes", "data": { "name": "Ada" }, "root": root }),
+            json!({ "op": "findDocs", "collection": "files", "query": {}, "root": root }),
+            json!({ "op": "findDocs", "collection": "notes", "query": {}, "root": root }),
+            json!({ "op": "getMeta", "collection": "notes", "id": "<notes>", "root": root }),
+            json!({ "op": "findDeletedDocs", "collection": "notes", "query": {}, "root": root }),
+        ));
+        let notes = frames[3]["result"].as_str().unwrap().to_owned();
+        let meta = run(&format!(
+            "{}\n{}\n{}\n",
+            json!({ "op": "getDoc", "collection": "files", "id": frames[1]["result"], "root": root }),
+            json!({ "op": "getMeta", "collection": "notes", "id": notes, "root": root }),
+            json!({ "op": "delDoc", "collection": "notes", "id": notes, "root": root }),
+        ));
+
+        let mut seen = std::collections::BTreeSet::new();
+        for frame in frames.iter().chain(meta.iter()) {
+            walk_timestamps(&frame["result"], &mut seen);
+        }
+        // Naming them keeps the test from quietly stopping at `createdAt`,
+        // which was an integer all along.
+        assert_eq!(
+            seen,
+            ["createdAt", "lastModified", "mtime", "updatedAt"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    fn walk_timestamps(value: &Value, seen: &mut std::collections::BTreeSet<String>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, child) in fields {
+                    if matches!(
+                        key.as_str(),
+                        "createdAt" | "updatedAt" | "mtime" | "deletedAt" | "lastModified"
+                    ) {
+                        assert!(child.is_u64(), "{key} is not whole milliseconds: {child}");
+                        seen.insert(key.clone());
+                    }
+                    walk_timestamps(child, seen);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk_timestamps(item, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn get_file_data_refuses_a_document_collection_and_an_occupied_path() {
+        let scratch = std::env::temp_dir().join(format!(
+            "fylo-machine-bucket-refusal-{}-{}",
+            std::process::id(),
+            fylo_storage_native::wall_clock()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = scratch.join("root");
+        let occupied = scratch.join("occupied.bin");
+        let source = scratch.join("source.bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&occupied, b"do not clobber me").unwrap();
+        std::fs::write(&source, b"hello bucket").unwrap();
+
+        let frames = run(&format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({ "op": "createCollection", "collection": "notes", "root": root }),
+            json!({ "op": "getFileData", "collection": "notes", "id": "4VRNF52JPCO", "root": root }),
+            json!({ "op": "createCollection", "collection": "files", "kind": "file", "root": root }),
+            json!({ "op": "putData", "collection": "files", "file": { "path": source }, "root": root }),
+        ));
+        assert_eq!(frames[1]["error"]["code"], json!("EBADREQUEST"));
+        let identifier = frames[3]["result"].as_str().unwrap().to_owned();
+
+        let frames = run(&format!(
+            "{}\n",
+            json!({ "op": "getFileData", "collection": "files", "id": identifier, "path": occupied, "root": root }),
+        ));
+        assert_eq!(frames[0]["error"]["code"], json!("EBADREQUEST"));
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"do not clobber me");
+
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
     #[test]
     fn one_shot_sessions_reject_paged_queries() {
         let session = Session {
             default_root: None,
             limits: FrameLimits::default(),
+            config: RootConfig::default(),
             leases: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             cursors: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             cursor_sequence: std::cell::Cell::new(0),

@@ -4,11 +4,22 @@
 /**
  * Default shard width for a newly created collection.
  *
- * Two characters give 1296 buckets, which suits the 10^4 to 10^7 records per
- * collection that covers almost every deployment. A root records the width it
- * was created with, so changing this never moves an existing record.
+ * One character gives 36 buckets. Sharding exists to stop a single directory
+ * growing unbounded, and enumeration costs one directory read per shard, so a
+ * width past what the record count needs is pure overhead. A root records the
+ * width it was created with, so changing this never moves an existing record.
  */
-export const DEFAULT_SHARD_WIDTH = 2
+export const DEFAULT_SHARD_WIDTH = 1
+
+/**
+ * Narrowest shard a collection may use.
+ *
+ * Zero was once allowed as a flat collection with no shard directory, but
+ * nothing could read one back: enumeration walks `docs/` expecting shard
+ * directories and refuses a file. It is refused rather than fixed because a
+ * single unbounded directory is what sharding exists to prevent.
+ */
+export const MIN_SHARD_WIDTH = 1
 
 /**
  * Widest shard a collection may use. 36^4 is already 1.7 million directories,
@@ -29,16 +40,12 @@ export const MAX_SHARD_WIDTH = 4
  * `created-updated-deleted` lifecycle segments, and sharding the raw string
  * would move a record between directories when it is updated or deleted.
  *
- * A width of 0 is a flat collection with no shard directory at all. Callers
- * join the result as a path segment, and an empty one contributes nothing.
- *
  * @param {string} id
  * @param {number} [width]
  * @returns {string}
  */
 export function shardOf(id, width = DEFAULT_SHARD_WIDTH) {
     const shard = assertShardWidth(width)
-    if (shard === 0) return ''
     return creationSegment(id).slice(-shard).padStart(shard, '0')
 }
 
@@ -86,33 +93,16 @@ export function shardCandidates(id, width, previousWidths = []) {
  * @returns {number}
  */
 export function assertShardWidth(width) {
-    if (!Number.isInteger(width) || Number(width) < 0 || Number(width) > MAX_SHARD_WIDTH) {
+    if (
+        !Number.isInteger(width) ||
+        Number(width) < MIN_SHARD_WIDTH ||
+        Number(width) > MAX_SHARD_WIDTH
+    ) {
         throw new Error(
-            `Shard width must be an integer from 0 to ${MAX_SHARD_WIDTH}: ${String(width)}`
+            `Shard width must be an integer from ${MIN_SHARD_WIDTH} to ${MAX_SHARD_WIDTH}: ${String(width)}`
         )
     }
     return Number(width)
-}
-
-/**
- * The shard width a newly created collection should use, from the environment.
- *
- * This is a default for collections that do not exist yet. It is deliberately
- * not consulted for an existing collection: the layout is a property of the
- * root, and letting a per-process variable decide it would let two processes
- * disagree and relocate every record back and forth.
- *
- * @param {Record<string, string | undefined>} [environment]
- * @returns {number}
- */
-export function configuredShardWidth(environment = process.env) {
-    const raw = environment.FYLO_SHARD_WIDTH
-    if (raw === undefined || raw === '') return DEFAULT_SHARD_WIDTH
-    const parsed = Number(raw)
-    if (!Number.isInteger(parsed)) {
-        throw new Error(`FYLO_SHARD_WIDTH must be an integer from 0 to ${MAX_SHARD_WIDTH}: ${raw}`)
-    }
-    return assertShardWidth(parsed)
 }
 
 /**

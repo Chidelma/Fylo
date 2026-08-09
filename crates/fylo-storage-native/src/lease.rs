@@ -9,7 +9,8 @@
 //! The sentinel file persists after shutdown; the kernel releases its lock on
 //! close, crash, or SIGKILL, so a dead owner never blocks a successor.
 
-use std::fs::{File, OpenOptions, TryLockError};
+use fylo_vfs::{File, OpenOptions};
+use std::fs::TryLockError;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +42,7 @@ pub struct RootLease {
     owner: String,
     sentinel: File,
     metadata_path: PathBuf,
+    kernel_enforced: bool,
 }
 
 impl RootLease {
@@ -54,8 +56,8 @@ impl RootLease {
         // Opening the JavaScript engine has always initialized a missing root.
         // Keep the public machine/CLI contract identical while still deriving
         // the lock identity from the canonical path after creation.
-        std::fs::create_dir_all(root.as_ref()).map_err(NativeStorageError::io)?;
-        let canonical = std::fs::canonicalize(root.as_ref()).map_err(NativeStorageError::io)?;
+        fylo_vfs::create_dir_all(root.as_ref()).map_err(NativeStorageError::io)?;
+        let canonical = fylo_vfs::canonicalize(root.as_ref()).map_err(NativeStorageError::io)?;
         let (sentinel_path, metadata_path) = lease_paths(&canonical)?;
         let sentinel = OpenOptions::new()
             .create(true)
@@ -64,22 +66,30 @@ impl RootLease {
             .truncate(false)
             .open(&sentinel_path)
             .map_err(NativeStorageError::io)?;
-        match sentinel.try_lock() {
-            Ok(()) => {}
+        let kernel_enforced = match sentinel.try_lock() {
+            Ok(()) => true,
             Err(TryLockError::WouldBlock) => {
                 return Err(NativeStorageError::new(
                     NativeStorageErrorCode::RootLocked,
                     describe_owner(&metadata_path, &canonical),
                 ));
             }
+            // WASI preview 1 has no advisory locking. The lease still records
+            // its owner, so a supervisor can see who holds the root, but it is
+            // no longer the kernel refusing a second writer. That difference is
+            // reported by the `exclusiveRoot` handshake capability rather than
+            // being hidden behind an identical-looking success.
+            Err(TryLockError::Error(error)) if error.kind() == std::io::ErrorKind::Unsupported => {
+                false
+            }
             Err(TryLockError::Error(error)) => return Err(NativeStorageError::io(error)),
-        }
+        };
         let owner = super::write::unique_name("rust-root-owner");
         let metadata = LeaseMetadata {
             version: 1,
             root: canonical.to_string_lossy().into_owned(),
             owner: owner.clone(),
-            pid: std::process::id(),
+            pid: super::process_id(),
             host: host_name(),
             acquired_at: super::write::unix_millis()?,
         };
@@ -96,12 +106,13 @@ impl RootLease {
             .open(&metadata_path)
             .map_err(NativeStorageError::io)?;
         file.write_all(&encoded).map_err(NativeStorageError::io)?;
-        file.sync_all().map_err(NativeStorageError::io)?;
+        crate::sync_handle(&file).map_err(NativeStorageError::io)?;
         Ok(Self {
             root: canonical,
             owner,
             sentinel,
             metadata_path,
+            kernel_enforced,
         })
     }
 
@@ -109,6 +120,27 @@ impl RootLease {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Whether the kernel refuses a second writer, or only this record claims
+    /// the root.
+    ///
+    /// False on a target without advisory locking, where a supervisor must not
+    /// assume a failed second open protects it.
+    #[must_use]
+    pub fn kernel_enforced(&self) -> bool {
+        self.kernel_enforced
+    }
+
+    /// Whether this build can have the kernel refuse a second writer at all.
+    ///
+    /// Reported by the handshake so a caller learns the guarantee before it
+    /// opens a production root rather than after a corruption.
+    #[must_use]
+    pub fn platform_enforces_exclusivity() -> bool {
+        // WASI preview 1 exposes no `flock`, and a browser has no shared
+        // namespace to lock in the first place.
+        !cfg!(target_arch = "wasm32")
     }
 
     /// Confirm this process still owns the recorded generation.
@@ -178,14 +210,14 @@ fn describe_owner(metadata_path: &Path, canonical: &Path) -> String {
 }
 
 fn read_metadata(path: &Path) -> Option<LeaseMetadata> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let metadata = fylo_vfs::symlink_metadata(path).ok()?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() > MAX_LEASE_METADATA_BYTES
     {
         return None;
     }
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    serde_json::from_slice(&fylo_vfs::read(path).ok()?).ok()
 }
 
 fn host_name() -> String {
@@ -202,7 +234,7 @@ mod tests {
     #[test]
     fn a_second_lease_on_one_root_is_refused_until_the_first_is_dropped() {
         let directory = std::env::temp_dir().join(super::super::write::unique_name("fylo-lease"));
-        std::fs::create_dir_all(&directory).unwrap();
+        fylo_vfs::create_dir_all(&directory).unwrap();
         let held = RootLease::acquire(&directory).unwrap();
         held.assert_owned().unwrap();
         let refused = RootLease::acquire(&directory).unwrap_err();
@@ -220,7 +252,7 @@ mod tests {
         let root = parent.join("nested").join("db");
         let held = RootLease::acquire(&root).unwrap();
         assert!(root.is_dir());
-        assert_eq!(held.root(), std::fs::canonicalize(&root).unwrap());
+        assert_eq!(held.root(), fylo_vfs::canonicalize(&root).unwrap());
         drop(held);
         let _ = std::fs::remove_dir_all(&parent);
     }

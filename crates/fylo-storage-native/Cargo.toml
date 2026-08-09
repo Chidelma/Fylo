@@ -11,13 +11,20 @@ publish = false
 base64.workspace = true
 fylo-format = { version = "0.1.0", path = "../fylo-format" }
 fylo-query = { version = "0.1.0", path = "../fylo-query" }
-same-file.workspace = true
+fylo-vfs = { version = "0.1.0", path = "../fylo-vfs" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 
+# Inode identity has no meaning on a host filesystem, which has no links.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+same-file.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 xattr.workspace = true
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+rustix.workspace = true
 
 [lints]
 workspace = true

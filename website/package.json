@@ -10,6 +10,6 @@
         "preview": "bun node_modules/@d31ma/tachyon/src/cli/index.js preview --watch"
     },
     "devDependencies": {
-        "@d31ma/tachyon": "github:d31ma/Tachyon#ef61b352b567b7b164fa74b6bc70e55858bb7421"
+        "@d31ma/tachyon": "github:d31ma/Tachyon#47775135e456cd8db3c80f4dfde0afaf1273296b"
     }
 }

@@ -3,12 +3,12 @@
 //! The journal and generation records intentionally use the JavaScript
 //! engine's v1 schemas so either engine can recover an interrupted mutation.
 
+use fylo_vfs::{self as fs, File, OpenOptions};
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -30,6 +30,10 @@ const GENERATION_FORMAT: &str = "fylo.collection-generation.v1";
 const MAX_TRANSACTION_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
 const LOCK_TTL_MILLIS: u64 = 5 * 60 * 1000;
+/// Floor for the index WAL before compaction is worth its rewrite. Above it
+/// the snapshot's own size takes over, so a reader never merges more WAL than
+/// snapshot.
+const INDEX_WAL_COMPACT_BYTES: u64 = 64 * 1024;
 #[cfg(unix)]
 const DEFAULT_ACCESS_MODE: u32 = 0o600;
 
@@ -133,6 +137,7 @@ pub enum SqlMutationResultKind {
 #[derive(Clone, Debug)]
 pub struct NativeWriteRoot {
     root: NativeRoot,
+    config: super::RootConfig,
 }
 
 impl NativeWriteRoot {
@@ -144,7 +149,21 @@ impl NativeWriteRoot {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, NativeStorageError> {
         Ok(Self {
             root: NativeRoot::open(path)?,
+            config: super::RootConfig::default(),
         })
+    }
+
+    /// Apply host-supplied runtime knobs to this writer.
+    #[must_use]
+    pub fn with_config(mut self, config: super::RootConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Runtime knobs this writer was opened with.
+    #[must_use]
+    pub fn config(&self) -> super::RootConfig {
+        self.config
     }
 
     /// Open a materialized worktree whose catalog and repository metadata live
@@ -159,6 +178,7 @@ impl NativeWriteRoot {
     ) -> Result<Self, NativeStorageError> {
         Ok(Self {
             root: NativeRoot::open_with_repository(path, repository_root)?,
+            config: super::RootConfig::default(),
         })
     }
 
@@ -207,7 +227,7 @@ impl NativeWriteRoot {
         encoded: &[u8],
         options: PutDocumentOptions,
     ) -> Result<(), NativeStorageError> {
-        validate_ttid_shape(identifier)?;
+        super::validate_canonical_ttid(identifier)?;
         let document = Document::parse(encoded, DocumentLimits::default()).map_err(|error| {
             NativeStorageError::new(
                 NativeStorageErrorCode::CorruptDocument,
@@ -229,7 +249,7 @@ impl NativeWriteRoot {
         let PutDocumentOptions { metadata, access } = options;
         validate_custom_metadata(&metadata)?;
         let access = access.validate()?;
-        let collection = self.root.collection(collection_name)?;
+        let collection = self.writable_collection(collection_name)?;
         if collection.kind != CollectionKind::Document {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::WrongType,
@@ -272,9 +292,13 @@ impl NativeWriteRoot {
                 )?;
             }
             apply_access(&target, access)?;
-            transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
-            transaction.capture(&collection.path.join("index").join("keys.wal"))?;
-            self.rebuild_index(&collection)?;
+            capture_index(&mut transaction, &collection)?;
+            // The identifier is proven absent above, so nothing to remove.
+            self.apply_index_delta(
+                &collection,
+                &BTreeSet::new(),
+                &record_index_keys(&collection, identifier)?,
+            )?;
             transaction.commit()
         })();
         if let Err(error) = outcome {
@@ -303,7 +327,7 @@ impl NativeWriteRoot {
         bytes: &[u8],
         options: &PutRawFileOptions,
     ) -> Result<(), NativeStorageError> {
-        validate_ttid_shape(identifier)?;
+        super::validate_canonical_ttid(identifier)?;
         if bytes.len() as u64 > super::MAX_RAW_FILE_BYTES {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::FileTooLarge,
@@ -314,7 +338,7 @@ impl NativeWriteRoot {
         super::validate_raw_key(&options.key)?;
         validate_custom_metadata(&options.metadata)?;
         let access = options.access.validate()?;
-        let collection = self.root.collection(collection_name)?;
+        let collection = self.writable_collection(collection_name)?;
         if collection.kind != CollectionKind::File {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::WrongType,
@@ -377,9 +401,13 @@ impl NativeWriteRoot {
             // time makes the stamp self-consistent; on POSIX the attribute
             // write never moved mtime, so this changes nothing.
             restore_modified(&target, &metadata)?;
-            transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
-            transaction.capture(&collection.path.join("index").join("keys.wal"))?;
-            self.rebuild_index(&collection)?;
+            capture_index(&mut transaction, &collection)?;
+            // The identifier is proven absent above, so nothing to remove.
+            self.apply_index_delta(
+                &collection,
+                &BTreeSet::new(),
+                &record_index_keys(&collection, identifier)?,
+            )?;
             transaction.commit()
         })();
         if let Err(error) = outcome {
@@ -421,7 +449,7 @@ impl NativeWriteRoot {
                 format!("document cannot be encoded: {error}"),
             )
         })?;
-        let collection = self.root.collection(collection_name)?;
+        let collection = self.writable_collection(collection_name)?;
         if collection.kind != CollectionKind::Document {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::WrongType,
@@ -433,13 +461,17 @@ impl NativeWriteRoot {
         let stored = collection.read_document(identifier)?;
         require_write_access(stored.access, actor)?;
         let target = stored.path;
+        let before = record_index_keys(&collection, identifier)?;
         let mut transaction = Transaction::begin(self, &collection, "patch-document")?;
         let outcome = (|| {
             transaction.capture(&target)?;
-            transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
-            transaction.capture(&collection.path.join("index").join("keys.wal"))?;
+            capture_index(&mut transaction, &collection)?;
             overwrite_in_place(&target, &canonical)?;
-            self.rebuild_index(&collection)?;
+            self.apply_index_delta(
+                &collection,
+                &before,
+                &record_index_keys(&collection, identifier)?,
+            )?;
             transaction.commit()
         })();
         if let Err(error) = outcome {
@@ -570,7 +602,7 @@ impl NativeWriteRoot {
     ) -> Result<(), NativeStorageError> {
         validate_ttid_shape(identifier)?;
         validate_custom_metadata(&record.clone().into_iter().collect())?;
-        let collection = self.root.collection(collection_name)?;
+        let collection = self.writable_collection(collection_name)?;
         let _lock = CollectionWriteLock::acquire(&collection.path)?;
         self.recover_locked(&collection)?;
         let (target, access) = record_target(&collection, identifier)?;
@@ -583,6 +615,9 @@ impl NativeWriteRoot {
         }
         let record = &record;
         let updated_at = next_meta_updated_at(&target)?;
+        // A document's index keys come from its fields alone, so this is a
+        // no-op delta there; a raw file indexes `meta` and `lastModified`.
+        let before = record_index_keys(&collection, identifier)?;
         let mut transaction = Transaction::begin(self, &collection, "set-metadata")?;
         let outcome = (|| {
             transaction.capture(&target)?;
@@ -601,7 +636,11 @@ impl NativeWriteRoot {
                 super::META_UPDATED_XATTR,
                 updated_at.to_string().as_bytes(),
             )?;
-            self.rebuild_index(&collection)?;
+            self.apply_index_delta(
+                &collection,
+                &before,
+                &record_index_keys(&collection, identifier)?,
+            )?;
             transaction.commit()
         })();
         finish_transaction(transaction, outcome, "metadata")
@@ -628,7 +667,7 @@ impl NativeWriteRoot {
                 "set_record_access requires at least one of uid, gid, or mode",
             ));
         }
-        let collection = self.root.collection(collection_name)?;
+        let collection = self.writable_collection(collection_name)?;
         let _lock = CollectionWriteLock::acquire(&collection.path)?;
         self.recover_locked(&collection)?;
         let (target, descriptor) = record_target(&collection, identifier)?;
@@ -656,7 +695,7 @@ impl NativeWriteRoot {
         actor: Option<&WriteActor>,
     ) -> Result<(), NativeStorageError> {
         validate_ttid_shape(identifier)?;
-        let collection = self.root.collection(collection_name)?;
+        let collection = self.writable_collection(collection_name)?;
         let _lock = CollectionWriteLock::acquire(&collection.path)?;
         self.recover_locked(&collection)?;
         let (source, access) = record_target(&collection, identifier)?;
@@ -675,12 +714,12 @@ impl NativeWriteRoot {
                 "retained document tombstone already exists",
             ));
         }
+        let before = record_index_keys(&collection, identifier)?;
         let mut transaction = Transaction::begin(self, &collection, "delete-document")?;
         let outcome = (|| {
             transaction.capture(&source)?;
             transaction.capture(&target)?;
-            transaction.capture(&collection.path.join("index").join("keys.snapshot"))?;
-            transaction.capture(&collection.path.join("index").join("keys.wal"))?;
+            capture_index(&mut transaction, &collection)?;
             let parent = target.parent().ok_or_else(|| {
                 NativeStorageError::new(
                     NativeStorageErrorCode::UnsafePath,
@@ -692,7 +731,8 @@ impl NativeWriteRoot {
             sync_parent(&source)?;
             sync_parent(&target)?;
             failpoint("after-delete-rename")?;
-            self.rebuild_index(&collection)?;
+            // The record now lives under `.deleted`, which is not indexed.
+            self.apply_index_delta(&collection, &before, &BTreeSet::new())?;
             transaction.commit()
         })();
         if let Err(error) = outcome {
@@ -724,7 +764,7 @@ impl NativeWriteRoot {
         actor: Option<&WriteActor>,
     ) -> Result<(), NativeStorageError> {
         validate_ttid_shape(identifier)?;
-        let collection = self.root.collection(collection_name)?;
+        let collection = self.writable_collection(collection_name)?;
         let _lock = CollectionWriteLock::acquire(&collection.path)?;
         self.recover_locked(&collection)?;
         match record_target(&collection, identifier) {
@@ -775,7 +815,13 @@ impl NativeWriteRoot {
             sync_parent(&source)?;
             sync_parent(&target)?;
             failpoint("after-restore-rename")?;
-            self.rebuild_index(&collection)?;
+            // A live record at this identifier is refused above, so the
+            // tombstone's keys are additions.
+            self.apply_index_delta(
+                &collection,
+                &BTreeSet::new(),
+                &record_index_keys(&collection, identifier)?,
+            )?;
             transaction.commit()
         })();
         finish_transaction(transaction, outcome, "restore")
@@ -798,11 +844,12 @@ impl NativeWriteRoot {
         collection_name: &str,
         width: u32,
     ) -> Result<usize, NativeStorageError> {
-        if width > crate::MAX_SHARD_WIDTH {
+        if !(crate::MIN_SHARD_WIDTH..=crate::MAX_SHARD_WIDTH).contains(&width) {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::Unsupported,
                 format!(
-                    "shard width must be 0 to {}: {width}",
+                    "shard width must be {} to {}: {width}",
+                    crate::MIN_SHARD_WIDTH,
                     crate::MAX_SHARD_WIDTH
                 ),
             ));
@@ -844,6 +891,7 @@ impl NativeWriteRoot {
                     failpoint("after-reshard-rename")?;
                     moved += 1;
                 }
+                remove_emptied_shards(&root)?;
             }
             capture_index(&mut transaction, &collection)?;
             self.rebuild_index(&collection)?;
@@ -1046,11 +1094,15 @@ impl NativeWriteRoot {
             .join("collections");
         let descriptor_path = catalog.join(format!("{collection_name}.json"));
         // An existing collection keeps the width it was built with: the layout
-        // is a property of the root, and the environment only chooses for a
-        // collection that does not exist yet.
+        // is a property of the root, and the host only chooses for a collection
+        // that does not exist yet.
         let width = match &existing {
             Some(collection) => collection.shard_width,
-            None => super::configured_shard_width()?,
+            // Validated here, not just where the CLI parses it: a host that
+            // builds `RootConfig` directly reaches this with any `u32`, and an
+            // out-of-range width would be written into the descriptor and
+            // become the collection's permanent layout.
+            None => super::validated_shard_width(self.config.shard_width)?,
         };
         if existing.is_none() {
             fs::create_dir_all(&catalog).map_err(NativeStorageError::io)?;
@@ -1144,12 +1196,44 @@ impl NativeWriteRoot {
         generate_ttid()
     }
 
+    /// Resolve a collection for a record mutation.
+    ///
+    /// Refuses when the collection's recorded width differs from the one this
+    /// process is configured for. The layout is a property of the root while
+    /// the configuration is per process, so letting a write through would have
+    /// it land under a shard the next reader does not look in. Relocating every
+    /// record is bounded only by collection size, so it never happens
+    /// implicitly inside a write — the caller is told which command does it.
+    ///
+    /// Reads are unaffected, and so are recovery, `rebuild`, and `reshard`:
+    /// resharding is the operation that resolves the mismatch.
+    fn writable_collection(
+        &self,
+        collection_name: &str,
+    ) -> Result<super::NativeCollection, NativeStorageError> {
+        let collection = self.root.collection(collection_name)?;
+        if let Some(configured) = self.config.shard_width
+            && configured != collection.shard_width()
+        {
+            return Err(NativeStorageError::new(
+                NativeStorageErrorCode::ShardWidth,
+                format!(
+                    "collection \"{collection_name}\" is sharded at width {} but this process \
+                     is configured for {configured}; run `fylo reshard {collection_name} --width \
+                     {configured}` to move it, or drop the override",
+                    collection.shard_width()
+                ),
+            ));
+        }
+        Ok(collection)
+    }
+
     fn document_collection(
         &self,
         collection_name: &str,
         operation: &str,
     ) -> Result<super::NativeCollection, NativeStorageError> {
-        let collection = self.root.collection(collection_name)?;
+        let collection = self.writable_collection(collection_name)?;
         if collection.kind != CollectionKind::Document {
             return Err(NativeStorageError::new(
                 NativeStorageErrorCode::WrongType,
@@ -1162,16 +1246,21 @@ impl NativeWriteRoot {
     fn patch_document_locked(
         &self,
         collection: &super::NativeCollection,
-        _identifier: &str,
+        identifier: &str,
         target: &Path,
         canonical: &[u8],
     ) -> Result<(), NativeStorageError> {
+        let before = record_index_keys(collection, identifier)?;
         let mut transaction = Transaction::begin(self, collection, "patch-document")?;
         let outcome = (|| {
             transaction.capture(target)?;
             capture_index(&mut transaction, collection)?;
             overwrite_in_place(target, canonical)?;
-            self.rebuild_index(collection)?;
+            self.apply_index_delta(
+                collection,
+                &before,
+                &record_index_keys(collection, identifier)?,
+            )?;
             transaction.commit()
         })();
         finish_transaction(transaction, outcome, "patch")?;
@@ -1277,6 +1366,7 @@ impl NativeWriteRoot {
         if documents.is_empty() {
             return Ok(());
         }
+        let before = record_index_keys_for(collection, documents)?;
         let mut transaction = Transaction::begin(self, collection, "update-many")?;
         let outcome = (|| {
             capture_documents(&mut transaction, documents)?;
@@ -1284,7 +1374,11 @@ impl NativeWriteRoot {
             for document in documents {
                 overwrite_in_place(&document.path, &document.encoded)?;
             }
-            self.rebuild_index(collection)?;
+            self.apply_index_delta(
+                collection,
+                &before,
+                &record_index_keys_for(collection, documents)?,
+            )?;
             transaction.commit()
         })();
         finish_transaction(transaction, outcome, "SQL UPDATE")
@@ -1298,6 +1392,7 @@ impl NativeWriteRoot {
         if documents.is_empty() {
             return Ok(());
         }
+        let before = record_index_keys_for(collection, documents)?;
         let mut transaction = Transaction::begin(self, collection, "delete-many")?;
         let outcome = (|| {
             capture_documents(&mut transaction, documents)?;
@@ -1311,7 +1406,8 @@ impl NativeWriteRoot {
                 sync_parent(&target)?;
                 failpoint("after-delete-rename")?;
             }
-            self.rebuild_index(collection)?;
+            // Every record moved under `.deleted`, which is not indexed.
+            self.apply_index_delta(collection, &before, &BTreeSet::new())?;
             transaction.commit()
         })();
         finish_transaction(transaction, outcome, "SQL DELETE")
@@ -1350,6 +1446,40 @@ impl NativeWriteRoot {
         )?;
         remove_dir_durable(&root)?;
         Ok(true)
+    }
+
+    /// Record one record's index change as a WAL append instead of walking the
+    /// whole collection.
+    ///
+    /// An index key embeds the identifier of the record that produced it, so
+    /// no key of one record is derivable from another and a mutation can only
+    /// ever add or remove its own. `before` is read before the mutation and
+    /// `after` after it; either is empty when the record does not exist at
+    /// that point, which is what a create and a delete respectively see.
+    fn apply_index_delta(
+        &self,
+        collection: &super::NativeCollection,
+        before: &BTreeSet<String>,
+        after: &BTreeSet<String>,
+    ) -> Result<(), NativeStorageError> {
+        let mut appended = Vec::new();
+        for (sign, key) in before
+            .difference(after)
+            .map(|key| (b'-', key))
+            .chain(after.difference(before).map(|key| (b'+', key)))
+        {
+            appended.push(sign);
+            appended.push(b'\t');
+            appended.extend_from_slice(key.as_bytes());
+            appended.push(b'\n');
+        }
+        if appended.is_empty() {
+            return Ok(());
+        }
+        let index = collection.path.join("index");
+        ensure_directory(&self.root, &index)?;
+        append_synced(&index.join("keys.wal"), &appended)?;
+        compact_index_if_large(collection)
     }
 
     fn rebuild_index(
@@ -1516,7 +1646,7 @@ fn next_meta_updated_at(path: &Path) -> Result<u64, NativeStorageError> {
         .and_then(|value| std::str::from_utf8(value).ok())
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
-    let now = SystemTime::now()
+    let now = super::wall_clock()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
             NativeStorageError::new(
@@ -1535,6 +1665,31 @@ fn next_meta_updated_at(path: &Path) -> Result<u64, NativeStorageError> {
 }
 
 /// Records that are not already under the canonical shard, with where they go.
+/// Remove shard directories a reshard emptied.
+///
+/// Enumeration costs one directory read per shard, so a widening left behind
+/// as many empty directories as it created and the collection would stay slow
+/// to walk forever. `remove_dir` refuses a non-empty directory, which is
+/// exactly the guard wanted here: a shard that still holds a record is left
+/// alone rather than inspected and raced.
+fn remove_emptied_shards(root: &Path) -> Result<(), NativeStorageError> {
+    let Ok(shards) = fs::read_dir(root) else {
+        return Ok(());
+    };
+    for shard in shards {
+        let shard = shard.map_err(NativeStorageError::io)?;
+        if !shard.metadata().map_err(NativeStorageError::io)?.is_dir() {
+            continue;
+        }
+        // A failure means the shard still holds records, or vanished under a
+        // concurrent recovery. Either way it is not this pass's business.
+        if fs::remove_dir(shard.path()).is_ok() {
+            sync_parent(&shard.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn reshard_moves(
     root: &Path,
     width: u32,
@@ -1628,6 +1783,77 @@ fn capture_documents(
     Ok(())
 }
 
+/// Prefix-index keys the collection's live record contributes right now.
+///
+/// A record that does not exist contributes none, so this is also the correct
+/// "before" for a create and "after" for a delete.
+fn record_index_keys(
+    collection: &super::NativeCollection,
+    identifier: &str,
+) -> Result<BTreeSet<String>, NativeStorageError> {
+    let plain = |_: &str, value: &str| Ok::<_, NativeStorageError>(IndexLookupValue::plain(value));
+    match collection.kind {
+        CollectionKind::Document => match collection.read_document(identifier) {
+            Ok(stored) => {
+                let document =
+                    Document::parse(&stored.bytes, DocumentLimits::default()).map_err(|error| {
+                        NativeStorageError::new(
+                            NativeStorageErrorCode::CorruptDocument,
+                            format!("document is invalid during index update: {error}"),
+                        )
+                    })?;
+                index_entries_for_document(identifier, document.fields(), plain)
+            }
+            Err(error) if error.code() == NativeStorageErrorCode::NotFound => Ok(BTreeSet::new()),
+            Err(error) => Err(error),
+        },
+        CollectionKind::File => match collection.read_raw_file(identifier) {
+            Ok(stored) => {
+                let fields = raw_file_index_fields(identifier, &stored)?;
+                index_entries_for_document(identifier, &fields, plain)
+            }
+            Err(error) if error.code() == NativeStorageErrorCode::NotFound => Ok(BTreeSet::new()),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+/// Fold the WAL into the snapshot once a reader would carry too much of it.
+///
+/// The threshold doubles with the snapshot, so a load of `n` records pays for
+/// `O(log n)` compactions and each is amortized `O(1)` per write. Compaction
+/// merges the same bytes the reader already merges, so unlike a rebuild it
+/// never reads a record.
+fn compact_index_if_large(collection: &super::NativeCollection) -> Result<(), NativeStorageError> {
+    let index = collection.path.join("index");
+    let wal = index.join("keys.wal");
+    let snapshot = index.join("keys.snapshot");
+    let length = |path: &Path| {
+        fs::symlink_metadata(path)
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map_or(0, |metadata| metadata.len())
+    };
+    if length(&wal) <= INDEX_WAL_COMPACT_BYTES.max(length(&snapshot)) {
+        return Ok(());
+    }
+    let merged = collection.index_snapshot()?;
+    durable_replace(&snapshot, merged.as_bytes())?;
+    durable_replace(&wal, b"")
+}
+
+/// Union of [`record_index_keys`] over one statement's matched records.
+fn record_index_keys_for(
+    collection: &super::NativeCollection,
+    documents: &[SqlDocument],
+) -> Result<BTreeSet<String>, NativeStorageError> {
+    let mut keys = BTreeSet::new();
+    for document in documents {
+        keys.extend(record_index_keys(collection, &document.identifier)?);
+    }
+    Ok(keys)
+}
+
 fn capture_index(
     transaction: &mut Transaction<'_>,
     collection: &super::NativeCollection,
@@ -1675,7 +1901,7 @@ fn ensure_deleted_parent(
 }
 
 fn generate_ttid() -> Result<String, NativeStorageError> {
-    let elapsed = SystemTime::now()
+    let elapsed = super::wall_clock()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
             NativeStorageError::new(
@@ -1924,6 +2150,23 @@ impl<'a> Transaction<'a> {
         if !self.captured.insert(relative.to_owned()) {
             return Ok(());
         }
+        // Where attributes live in a sidecar file, that file is part of the
+        // record. Capturing it as its own entry means the before-image, the
+        // restore, and the remove-if-absent paths all cover it without any of
+        // them learning what a sidecar is. Bounded at one level: a sidecar's
+        // own sidecar is never captured.
+        #[cfg(all(
+            not(unix),
+            not(windows),
+            not(all(target_arch = "wasm32", target_os = "unknown"))
+        ))]
+        if !target
+            .as_os_str()
+            .to_string_lossy()
+            .ends_with(super::SIDECAR_SUFFIX)
+        {
+            self.capture(&super::sidecar_path(target))?;
+        }
         let present = path_exists_no_follow(target)?;
         let index = self.captures.len();
         let capture = if present {
@@ -2029,8 +2272,8 @@ impl CollectionWriteLock {
         let owner = unique_name("rust-owner");
         let record = LockRecord {
             owner: owner.clone(),
-            pid: std::process::id(),
-            process_identity: process_identity(std::process::id()),
+            pid: super::process_id(),
+            process_identity: process_identity(super::process_id()),
             ts: unix_millis()?,
         };
         if !try_create_lock(&path, &record)? {
@@ -2077,6 +2320,21 @@ fn try_create_lock(path: &Path, record: &LockRecord) -> Result<bool, NativeStora
             true
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        // A host filesystem has no links. Link-then-check exists because
+        // exclusive create is unreliable over NFS, and a filesystem with no
+        // links is not NFS — so the exclusive create the host does offer is
+        // the atomic primitive here.
+        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+            let encoded = serde_json::to_vec(record).map_err(|error| json_error(&error))?;
+            match write_new_synced(path, &encoded) {
+                Ok(()) => {
+                    sync_parent(path)?;
+                    true
+                }
+                Err(error) if error.code() == NativeStorageErrorCode::Io => false,
+                Err(error) => return Err(error),
+            }
+        }
         Err(error) => return Err(NativeStorageError::io(error)),
     };
     fs::remove_file(scratch).map_err(NativeStorageError::io)?;
@@ -2216,7 +2474,7 @@ fn read_captures(root: &Path) -> Result<Vec<Capture>, NativeStorageError> {
         .map_err(NativeStorageError::io)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(NativeStorageError::io)?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+    entries.sort_by_key(fs::DirEntry::file_name);
     if entries.len() > 10_000 {
         return Err(NativeStorageError::new(
             NativeStorageErrorCode::FileTooLarge,
@@ -2462,7 +2720,7 @@ fn overwrite_in_place(path: &Path, bytes: &[u8]) -> Result<(), NativeStorageErro
         .open(path)
         .map_err(NativeStorageError::io)?;
     file.write_all(bytes).map_err(NativeStorageError::io)?;
-    file.sync_all().map_err(NativeStorageError::io)?;
+    crate::sync_handle(&file).map_err(NativeStorageError::io)?;
     failpoint("after-file-sync")?;
     sync_parent(path)
 }
@@ -2503,10 +2761,7 @@ fn raw_file_index_fields(
         Value::String(stored.checksum_sha256.clone()),
     );
     fields.insert("createdAt".into(), Value::from(timestamps.created_at));
-    fields.insert(
-        "lastModified".into(),
-        Value::from(stored.modified_millis_exact),
-    );
+    fields.insert("lastModified".into(), Value::from(stored.modified_millis));
     if !stored.custom_metadata.is_empty() {
         fields.insert(
             "meta".into(),
@@ -2600,7 +2855,7 @@ fn remove_fylo_attribute(path: &Path, name: &str) -> Result<(), NativeStorageErr
         Err(error) if missing_xattr(&error) => return Ok(()),
         Err(error) => return Err(NativeStorageError::io(error)),
     }
-    file.sync_all().map_err(NativeStorageError::io)?;
+    crate::sync_handle(&file).map_err(NativeStorageError::io)?;
     failpoint("after-metadata-write")
 }
 
@@ -2650,16 +2905,34 @@ fn remove_fylo_attribute(path: &Path, name: &str) -> Result<(), NativeStorageErr
         .open(stream)
         .map_err(NativeStorageError::io)?;
     file.write_all(&encoded).map_err(NativeStorageError::io)?;
-    file.sync_all().map_err(NativeStorageError::io)?;
+    crate::sync_handle(&file).map_err(NativeStorageError::io)?;
     failpoint("after-metadata-write")
 }
 
-#[cfg(not(any(unix, windows)))]
-fn remove_fylo_attribute(_path: &Path, _name: &str) -> Result<(), NativeStorageError> {
-    Err(NativeStorageError::new(
-        NativeStorageErrorCode::Unsupported,
-        "FYLO native metadata is unavailable on this platform",
-    ))
+/// Drop one attribute from the record's sidecar, removing the file with the
+/// last entry so an attribute-free record leaves nothing behind.
+#[cfg(all(
+    not(unix),
+    not(windows),
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+fn remove_fylo_attribute(path: &Path, name: &str) -> Result<(), NativeStorageError> {
+    let sidecar = super::sidecar_path(path);
+    let mut attributes = read_sidecar(&sidecar)?;
+    if attributes.remove(name).is_none() {
+        return Ok(());
+    }
+    write_sidecar(&sidecar, &attributes)
+}
+
+/// Drop one attribute from the host's manifest.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn remove_fylo_attribute(path: &Path, name: &str) -> Result<(), NativeStorageError> {
+    let mut attributes = read_host_manifest(path)?;
+    if attributes.remove(name).is_none() {
+        return Ok(());
+    }
+    write_host_manifest(path, &attributes)
 }
 
 #[cfg(unix)]
@@ -2673,7 +2946,7 @@ fn write_fylo_attribute(path: &Path, name: &str, value: &[u8]) -> Result<(), Nat
         .map_err(NativeStorageError::io)?;
     file.set_xattr(name, value)
         .map_err(NativeStorageError::io)?;
-    file.sync_all().map_err(NativeStorageError::io)?;
+    crate::sync_handle(&file).map_err(NativeStorageError::io)?;
     failpoint("after-metadata-write")
 }
 
@@ -2705,20 +2978,113 @@ fn write_fylo_attribute(path: &Path, name: &str, value: &[u8]) -> Result<(), Nat
         .open(stream)
         .map_err(NativeStorageError::io)?;
     file.write_all(&encoded).map_err(NativeStorageError::io)?;
-    file.sync_all().map_err(NativeStorageError::io)?;
+    crate::sync_handle(&file).map_err(NativeStorageError::io)?;
     failpoint("after-metadata-write")
 }
 
-#[cfg(not(any(unix, windows)))]
-fn write_fylo_attribute(
-    _path: &Path,
-    _name: &str,
-    _value: &[u8],
+/// Write one attribute into the record's sidecar.
+///
+/// Read-modify-write of a whole manifest rather than a single-name update: the
+/// record's attributes are a handful of small values, and a durable replace of
+/// the whole file is both simpler and atomic where a partial rewrite would not
+/// be. Windows does the same thing to its alternate data stream.
+#[cfg(all(
+    not(unix),
+    not(windows),
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+fn write_fylo_attribute(path: &Path, name: &str, value: &[u8]) -> Result<(), NativeStorageError> {
+    let sidecar = super::sidecar_path(path);
+    let mut attributes = read_sidecar(&sidecar)?;
+    attributes.insert(name.into(), BASE64.encode(value));
+    write_sidecar(&sidecar, &attributes)
+}
+
+/// Store one attribute through the host.
+///
+/// The host owns the manifest's location, so a browser root keeps no file
+/// beside the record. Read-modify-write of the whole manifest, as Windows does
+/// to its alternate data stream: a record's attributes are a handful of small
+/// values and replacing all of them is atomic where a partial update is not.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn write_fylo_attribute(path: &Path, name: &str, value: &[u8]) -> Result<(), NativeStorageError> {
+    let mut attributes = read_host_manifest(path)?;
+    attributes.insert(name.into(), BASE64.encode(value));
+    write_host_manifest(path, &attributes)
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn read_host_manifest(
+    path: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, NativeStorageError> {
+    let bytes = fylo_vfs::host_read_attrs(path).map_err(NativeStorageError::io)?;
+    if bytes.is_empty() {
+        return Ok(std::collections::BTreeMap::default());
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        NativeStorageError::new(
+            NativeStorageErrorCode::CorruptMetadata,
+            format!("FYLO attribute manifest is corrupt: {error}"),
+        )
+    })
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn write_host_manifest(
+    path: &Path,
+    attributes: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), NativeStorageError> {
-    Err(NativeStorageError::new(
-        NativeStorageErrorCode::Unsupported,
-        "FYLO native metadata is unavailable on this platform",
-    ))
+    let encoded = if attributes.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::to_vec(attributes).map_err(|error| json_error(&error))?
+    };
+    fylo_vfs::host_write_attrs(path, &encoded).map_err(NativeStorageError::io)?;
+    failpoint("after-metadata-write")
+}
+
+#[cfg(all(
+    not(unix),
+    not(windows),
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+fn read_sidecar(
+    sidecar: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, NativeStorageError> {
+    match fs::read(sidecar) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            NativeStorageError::new(
+                NativeStorageErrorCode::CorruptMetadata,
+                format!("FYLO attribute sidecar is corrupt: {error}"),
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(std::collections::BTreeMap::default())
+        }
+        Err(error) => Err(NativeStorageError::io(error)),
+    }
+}
+
+#[cfg(all(
+    not(unix),
+    not(windows),
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+fn write_sidecar(
+    sidecar: &Path,
+    attributes: &std::collections::BTreeMap<String, String>,
+) -> Result<(), NativeStorageError> {
+    if attributes.is_empty() {
+        match fs::remove_file(sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(NativeStorageError::io(error)),
+        }
+        return failpoint("after-metadata-write");
+    }
+    let encoded = serde_json::to_vec(attributes).map_err(|error| json_error(&error))?;
+    durable_replace(sidecar, &encoded)?;
+    failpoint("after-metadata-write")
 }
 
 fn copy_durable(source: &Path, target: &Path) -> Result<(), NativeStorageError> {
@@ -2744,7 +3110,7 @@ fn copy_durable(source: &Path, target: &Path) -> Result<(), NativeStorageError> 
         .map_err(NativeStorageError::io)?;
     std::io::copy(&mut source.take(super::MAX_RAW_FILE_BYTES + 1), &mut output)
         .map_err(NativeStorageError::io)?;
-    output.sync_all().map_err(NativeStorageError::io)?;
+    crate::sync_handle(&output).map_err(NativeStorageError::io)?;
     drop(output);
     // Windows replaces an existing destination only when it is writable, and a
     // retained tombstone is not, so restoring a before-image over one fails
@@ -2756,6 +3122,21 @@ fn copy_durable(source: &Path, target: &Path) -> Result<(), NativeStorageError> 
     sync_parent(target)
 }
 
+/// Append to an existing durable file without rewriting it.
+///
+/// A torn tail is expected rather than guarded against: the index reader stops
+/// at the last complete line, so a crash mid-append loses the entry it was
+/// writing and nothing before it.
+fn append_synced(path: &Path, bytes: &[u8]) -> Result<(), NativeStorageError> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(NativeStorageError::io)?;
+    file.write_all(bytes).map_err(NativeStorageError::io)?;
+    crate::sync_handle(&file).map_err(NativeStorageError::io)
+}
+
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), NativeStorageError> {
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -2763,7 +3144,7 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), NativeStorageError>
         .open(path)
         .map_err(NativeStorageError::io)?;
     file.write_all(bytes).map_err(NativeStorageError::io)?;
-    file.sync_all().map_err(NativeStorageError::io)
+    crate::sync_handle(&file).map_err(NativeStorageError::io)
 }
 
 fn write_json_durable(path: &Path, value: &impl Serialize) -> Result<(), NativeStorageError> {
@@ -2822,7 +3203,7 @@ fn write_if_missing(path: &Path, bytes: &[u8]) -> Result<(), NativeStorageError>
 }
 
 fn now_millis() -> Result<u64, NativeStorageError> {
-    let millis = SystemTime::now()
+    let millis = super::wall_clock()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
             NativeStorageError::new(
@@ -2871,11 +3252,16 @@ fn restore_modified(path: &Path, recorded: &fs::Metadata) -> Result<(), NativeSt
 
 fn sync_directory(path: &Path) -> Result<(), NativeStorageError> {
     let directory = open_directory(path).map_err(NativeStorageError::io)?;
-    match directory.sync_all() {
+    match crate::sync_handle(&directory) {
         Ok(()) => Ok(()),
-        // Some filesystems refuse to flush a directory handle. The rename that
-        // preceded this call is still atomic, so the operation stands.
-        Err(_error) if cfg!(windows) => Ok(()),
+        // Some filesystems refuse to flush a directory handle, and WASI has no
+        // directory sync at all. The rename that preceded this call is still
+        // atomic, so the operation stands. A platform that *can* flush and
+        // fails for another reason still surfaces the error.
+        Err(error) if cfg!(windows) || error.kind() == std::io::ErrorKind::Unsupported => {
+            let _ = error;
+            Ok(())
+        }
         Err(error) => Err(NativeStorageError::io(error)),
     }
 }
@@ -2910,15 +3296,31 @@ fn sibling_scratch(path: &Path) -> PathBuf {
 
 pub(crate) fn unique_name(prefix: &str) -> String {
     let sequence = UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
+    let nanos = super::wall_clock()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{prefix}-{}-{nanos:x}-{sequence:x}", std::process::id())
+    format!("{prefix}-{}-{nanos:x}-{sequence:x}", super::process_id())
 }
 
 pub(crate) fn unix_millis() -> Result<u64, NativeStorageError> {
-    let millis = SystemTime::now()
+    // `SystemTime::now` panics rather than fails on a target with no clock, so
+    // the host supplies one there. Every other target keeps `std`.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        return fylo_vfs::host_now_unix_ms().map_err(|message| {
+            NativeStorageError::new(NativeStorageErrorCode::Io, message.to_owned())
+        });
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        unix_millis_from_std()
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn unix_millis_from_std() -> Result<u64, NativeStorageError> {
+    let millis = super::wall_clock()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
             NativeStorageError::new(
@@ -2953,7 +3355,8 @@ fn safe_relative_path(value: &str) -> Result<PathBuf, NativeStorageError> {
         ));
     }
     let path = PathBuf::from(value);
-    if path.is_absolute()
+    if path.has_root()
+        || path.is_absolute()
         || path
             .components()
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
@@ -3036,8 +3439,22 @@ fn capture_attributes(path: &Path) -> Result<Vec<CapturedAttribute>, NativeStora
 
 // The signature mirrors the Unix implementation so callers stay platform-free.
 #[allow(clippy::unnecessary_wraps)]
-#[cfg(not(any(unix, windows)))]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn capture_attributes(path: &Path) -> Result<Vec<CapturedAttribute>, NativeStorageError> {
+    Ok(read_host_manifest(path)?
+        .into_iter()
+        .map(|(name, value)| CapturedAttribute { name, value })
+        .collect())
+}
+
+#[cfg(all(
+    not(unix),
+    not(windows),
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
 fn capture_attributes(_path: &Path) -> Result<Vec<CapturedAttribute>, NativeStorageError> {
+    // The sidecar is captured as a file in its own right, so its contents are
+    // already covered by the transaction's before-image.
     Ok(Vec::new())
 }
 
@@ -3083,7 +3500,7 @@ fn restore_attributes(
         .open(stream)
         .map_err(NativeStorageError::io)?;
     file.write_all(&encoded).map_err(NativeStorageError::io)?;
-    file.sync_all().map_err(NativeStorageError::io)
+    crate::sync_handle(&file).map_err(NativeStorageError::io)
 }
 
 /// Path of the FYLO metadata stream beside a record.
@@ -3149,7 +3566,25 @@ fn restore_attributes(
     Ok(())
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn restore_attributes(
+    path: &Path,
+    attributes: &[CapturedAttribute],
+) -> Result<(), NativeStorageError> {
+    write_host_manifest(
+        path,
+        &attributes
+            .iter()
+            .map(|attribute| (attribute.name.clone(), attribute.value.clone()))
+            .collect(),
+    )
+}
+
+#[cfg(all(
+    not(unix),
+    not(windows),
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
 fn restore_attributes(
     _path: &Path,
     attributes: &[CapturedAttribute],
@@ -3195,7 +3630,7 @@ fn apply_access(path: &Path, access: WriteAccess) -> Result<(), NativeStorageErr
     failpoint("after-chown")?;
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(NativeStorageError::io)?;
     failpoint("after-chmod")?;
-    file.sync_all().map_err(NativeStorageError::io)
+    crate::sync_handle(&file).map_err(NativeStorageError::io)
 }
 
 #[cfg(not(unix))]
@@ -3346,7 +3781,7 @@ mod tests {
         assert!(
             fixture
                 .0
-                .join(".collections/users/docs/CO/4VRNF52JPCO.json")
+                .join(".collections/users/docs/O/4VRNF52JPCO.json")
                 .is_file()
         );
         assert_eq!(collection.generation().unwrap().generation, 2);
@@ -3843,6 +4278,244 @@ mod tests {
         assert!(
             snapshot.contains("key/eq/%252Ffixtures%252Fsample.bin/4VRNF52JPCO"),
             "{snapshot}"
+        );
+    }
+
+    /// Mutations maintain the index by appending to the WAL rather than
+    /// walking the collection, so the only thing that proves them correct is
+    /// that the merged result still equals what a walk of the records
+    /// produces. Every incremental path is exercised, then rebuilt from truth.
+    #[test]
+    fn incremental_index_updates_match_a_rebuild_from_the_records() {
+        let fixture = TestRoot::create();
+        let writer = NativeWriteRoot::open(&fixture.0).unwrap();
+        let identifiers: Vec<String> = (0..60).map(|index| format!("4VRNF52J{index:03}")).collect();
+        for (index, identifier) in identifiers.iter().enumerate() {
+            writer
+                .put_document(
+                    "users",
+                    identifier,
+                    format!(
+                        r#"{{"name":"row-{index}","score":{index},"tag":"t{}"}}"#,
+                        index % 5
+                    )
+                    .as_bytes(),
+                    PutDocumentOptions::default(),
+                )
+                .unwrap();
+        }
+        writer
+            .patch_document("users", &identifiers[0], br#"{"name":"Grace"}"#, None)
+            .unwrap();
+        writer
+            .patch_document_fields(
+                "users",
+                &identifiers[1],
+                &json!({ "extra": "merged" }).as_object().unwrap().clone(),
+                None,
+            )
+            .unwrap();
+        writer
+            .set_record_metadata(
+                "users",
+                &identifiers[2],
+                &json!({ "reviewed": true }).as_object().unwrap().clone(),
+                None,
+            )
+            .unwrap();
+        writer
+            .delete_document("users", &identifiers[3], None)
+            .unwrap();
+        writer
+            .delete_document("users", &identifiers[4], None)
+            .unwrap();
+        writer
+            .restore_document("users", &identifiers[4], None)
+            .unwrap();
+
+        let collection = writer.root.collection("users").unwrap();
+        // The WAL must actually be carrying entries, or this asserts nothing.
+        let index = collection.path.join("index");
+        assert!(
+            fs::metadata(index.join("keys.wal")).unwrap().len() > 0,
+            "incremental updates never reached the WAL"
+        );
+        let incremental = collection.index_snapshot().unwrap().as_bytes().to_vec();
+
+        writer.rebuild_collection("users").unwrap();
+        let rebuilt = writer
+            .root
+            .collection("users")
+            .unwrap()
+            .index_snapshot()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        assert_eq!(
+            std::str::from_utf8(&incremental).unwrap(),
+            std::str::from_utf8(&rebuilt).unwrap()
+        );
+    }
+
+    /// The handshake advertises `ttid-binary-ascending` and every query cursor
+    /// depends on it. Directory order is (shard, identifier), and ADR 0006 made
+    /// the shard the identifier's trailing characters, so the two orders now
+    /// disagree — these identifiers sort one way by TTID and the other by
+    /// shard.
+    /// TTID matches case-insensitively, so `4vrnf52jpco` and `4VRNF52JPCO`
+    /// are both valid spellings of one identifier. Naming a file after each
+    /// gives one record on a case-insensitive filesystem and two on a
+    /// case-sensitive one, so the non-canonical spelling is refused where it
+    /// would first become a file.
+    /// A flat collection accepted writes and then failed every read, because
+    /// enumeration walks `docs/` expecting shard directories and refuses a
+    /// file. Refusing the width is what stops a root reaching that state.
+    /// The layout is a property of the root; the configuration is per process.
+    /// A write under a mismatched width would land in a shard the next reader
+    /// does not look in, and relocating every record is bounded only by
+    /// collection size, so it never happens implicitly inside a write.
+    #[test]
+    fn refuses_a_write_whose_configured_width_differs_from_the_collection() {
+        let fixture = TestRoot::create();
+        // Created at the default width, with the descriptor that records it.
+        NativeWriteRoot::open(&fixture.0)
+            .unwrap()
+            .create_collection("audit", CollectionKind::Document, None)
+            .unwrap();
+
+        // This process is configured for a different width.
+        let mismatched =
+            NativeWriteRoot::open(&fixture.0)
+                .unwrap()
+                .with_config(super::super::RootConfig {
+                    shard_width: Some(3),
+                    ..super::super::RootConfig::default()
+                });
+        let error = mismatched
+            .put_document(
+                "audit",
+                "4VRNF52JPCO",
+                br#"{"name":"Ada"}"#,
+                PutDocumentOptions::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), NativeStorageErrorCode::ShardWidth);
+        assert_eq!(error.code().as_str(), "ESHARDWIDTH");
+        // The message names the command that resolves it.
+        assert!(error.to_string().contains("fylo reshard audit"), "{error}");
+
+        // Reads are unaffected, and so is the reshard that resolves it.
+        assert!(mismatched.root.collection("audit").is_ok());
+        mismatched.reshard_collection("audit", 3).unwrap();
+        mismatched
+            .put_document(
+                "audit",
+                "4VRNF52JPCO",
+                br#"{"name":"Ada"}"#,
+                PutDocumentOptions::default(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn refuses_a_flat_collection_width() {
+        let fixture = TestRoot::create();
+        let writer =
+            NativeWriteRoot::open(&fixture.0)
+                .unwrap()
+                .with_config(super::super::RootConfig {
+                    shard_width: Some(0),
+                    ..super::super::RootConfig::default()
+                });
+        let error = writer
+            .create_collection("flat", CollectionKind::Document, None)
+            .unwrap_err();
+        assert_eq!(error.code(), NativeStorageErrorCode::CorruptMetadata);
+        assert!(error.to_string().contains("must be 1 to 4"), "{error}");
+    }
+
+    #[test]
+    fn refuses_a_non_canonical_identifier_spelling() {
+        let fixture = TestRoot::create();
+        let writer = NativeWriteRoot::open(&fixture.0).unwrap();
+        let error = writer
+            .put_document(
+                "users",
+                "4vrnf52jpco",
+                br#"{"name":"Ada"}"#,
+                PutDocumentOptions::default(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), NativeStorageErrorCode::InvalidDocumentId);
+        // The message names the spelling to use, so a caller can repair it.
+        assert!(error.to_string().contains("4VRNF52JPCO"), "{error}");
+        // The canonical spelling is accepted, and nothing was left behind.
+        writer
+            .put_document(
+                "users",
+                "4VRNF52JPCO",
+                br#"{"name":"Ada"}"#,
+                PutDocumentOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            writer
+                .root
+                .collection("users")
+                .unwrap()
+                .document_ids()
+                .unwrap(),
+            vec!["4VRNF52JPCO".to_owned()]
+        );
+    }
+
+    #[test]
+    fn enumeration_is_ascending_by_identifier_not_by_shard_directory() {
+        let fixture = TestRoot::create();
+        let writer = NativeWriteRoot::open(&fixture.0).unwrap();
+        for identifier in ["4VRNF52AAZZ", "4VRNF52BB11"] {
+            writer
+                .put_document(
+                    "users",
+                    identifier,
+                    br#"{"name":"Ada"}"#,
+                    PutDocumentOptions::default(),
+                )
+                .unwrap();
+        }
+        let collection = writer.root.collection("users").unwrap();
+        assert_eq!(
+            collection.document_ids().unwrap(),
+            vec!["4VRNF52AAZZ".to_owned(), "4VRNF52BB11".to_owned()],
+            "enumeration followed shard directory order"
+        );
+    }
+
+    #[test]
+    fn compacts_the_index_wal_once_it_outgrows_the_snapshot() {
+        let fixture = TestRoot::create();
+        let writer = NativeWriteRoot::open(&fixture.0).unwrap();
+        for index in 0..300 {
+            writer
+                .put_document(
+                    "users",
+                    &format!("4VRNF52J{index:03}"),
+                    format!(
+                        r#"{{"name":"row-{index}","score":{index},"tag":"t{}"}}"#,
+                        index % 5
+                    )
+                    .as_bytes(),
+                    PutDocumentOptions::default(),
+                )
+                .unwrap();
+        }
+        let index = fixture.0.join(".collections/users/index");
+        let wal = fs::metadata(index.join("keys.wal")).unwrap().len();
+        let snapshot = fs::metadata(index.join("keys.snapshot")).unwrap().len();
+        assert!(snapshot > 0, "compaction never ran");
+        assert!(
+            wal <= INDEX_WAL_COMPACT_BYTES.max(snapshot),
+            "WAL grew to {wal} bytes against a {snapshot}-byte snapshot"
         );
     }
 }

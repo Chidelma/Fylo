@@ -1,5 +1,15 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+    chmod,
+    mkdir,
+    mkdtemp,
+    readFile,
+    readdir,
+    rename,
+    rm,
+    rmdir,
+    writeFile
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -106,6 +116,65 @@ try {
         await rustReader.close()
     }
 
+    // The checks above only cover a document the rollback oracle created. A
+    // document this candidate creates proves the reverse direction too. An
+    // oracle carrying ADR 0006 reads its explicit shard descriptor directly;
+    // an older oracle needs the documented relocation to the leading shard.
+    const rustCreator = await open(rustBinary)
+    let rustBorn
+    try {
+        rustBorn = await required(rustCreator, {
+            op: 'putData',
+            collection,
+            data: { name: 'Grace', score: 1, source: 'rust' }
+        })
+    } finally {
+        await rustCreator.close()
+    }
+
+    const releasedCarriesTrailingLayout =
+        compareCalVer(releasedIdentity.runtimeVersion, '26.31.06') >= 0
+    const releasedBeforeRelocation = await open(releasedBinary)
+    try {
+        const document = await required(releasedBeforeRelocation, {
+            op: 'getDoc',
+            collection,
+            id: rustBorn
+        })
+        if (releasedCarriesTrailingLayout) {
+            assert(
+                document[rustBorn]?.source === 'rust',
+                'previous release could not read a Rust-created document with an explicit shard descriptor'
+            )
+        } else {
+            assert(
+                document[rustBorn] === undefined,
+                'pre-ADR binary unexpectedly read a trailing-shard document; downgrade guidance may be stale'
+            )
+        }
+    } finally {
+        await releasedBeforeRelocation.close()
+    }
+
+    if (!releasedCarriesTrailingLayout) {
+        await relocateToSupersededLayout(join(root, '.collections', collection))
+
+        const releasedAfterRelocation = await open(releasedBinary)
+        try {
+            const document = await required(releasedAfterRelocation, {
+                op: 'getDoc',
+                collection,
+                id: rustBorn
+            })
+            assert(
+                document[rustBorn]?.source === 'rust',
+                'documented shard-layout downgrade did not make a Rust-created document readable by the released binary'
+            )
+        } finally {
+            await releasedAfterRelocation.close()
+        }
+    }
+
     const report = {
         format: 'fylo.rust-released-rollback.v1',
         generatedAt: new Date().toISOString(),
@@ -115,12 +184,16 @@ try {
         },
         rust: { identity: rustIdentity, sha256: await sha256File(rustBinary) },
         rootOwnership: 'sequential-exclusive',
+        shardRollback: releasedCarriesTrailingLayout ? 'direct' : 'relocated',
         identifier,
+        rustCreatedIdentifier: rustBorn,
         checks: {
             releasedRootReadByRust: true,
             rustPatchReadAndQueriedByReleased: true,
             rustMetadataReadByReleased: true,
-            releasedRollbackPatchReadByRust: true
+            releasedRollbackPatchReadByRust: true,
+            rustCreatedDocumentReadByRollbackOracle: true,
+            shardRelocationVerified: releasedCarriesTrailingLayout ? null : true
         },
         passed: true
     }
@@ -129,6 +202,28 @@ try {
     console.log(`Verified released/Rust upgrade and rollback interoperability: ${output}`)
 } finally {
     await rm(workspace, { recursive: true, force: true })
+}
+
+/**
+ * Move every record of one collection into the leading-character shard a
+ * pre-26.31.06 release looks under, as documented in
+ * `docs/operations/shard-layout-downgrade.md`.
+ */
+async function relocateToSupersededLayout(collectionRoot) {
+    for (const namespace of ['docs', '.deleted']) {
+        const root_ = join(collectionRoot, namespace)
+        for (const shard of await readdir(root_, { withFileTypes: true }).catch(() => [])) {
+            if (!shard.isDirectory()) continue
+            for (const name of await readdir(join(root_, shard.name))) {
+                const superseded = join(root_, name.slice(0, 2))
+                if (superseded === join(root_, shard.name)) continue
+                await mkdir(superseded, { recursive: true })
+                await rename(join(root_, shard.name, name), join(superseded, name))
+            }
+            // Only ever an emptied source shard: rmdir refuses anything else.
+            await rmdir(join(root_, shard.name)).catch(() => {})
+        }
+    }
 }
 
 async function open(binary) {
@@ -168,6 +263,17 @@ async function sha256File(path) {
 
 function assert(value, message) {
     if (!value) throw new Error(message)
+}
+
+function compareCalVer(left, right) {
+    const parse = (value) => value.split(/[.-]/).map((part) => Number(part))
+    const a = parse(left)
+    const b = parse(right)
+    for (let index = 0; index < Math.max(a.length, b.length); index++) {
+        const delta = (a[index] ?? 0) - (b[index] ?? 0)
+        if (delta !== 0) return delta
+    }
+    return 0
 }
 
 function requiredOption(name) {

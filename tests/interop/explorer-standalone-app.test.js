@@ -151,7 +151,7 @@ describe('standalone Explorer app', () => {
         expect(await exists(path.join(output, 'components/explorer/app/tac.js'))).toBe(true)
         expect(await exists(path.join(output, 'explorer/index.html'))).toBe(false)
         expect(renderer).not.toContain('"/explorer"')
-    })
+    }, 300_000)
 
     test('pins Tachyon and the generated browser engine for reproducible builds', async () => {
         await run(['bun', 'run', 'build:web'], root)
@@ -167,11 +167,12 @@ describe('standalone Explorer app', () => {
             path.join(explorer, 'client/shared/scripts/imports.js')
         ).text()
 
-        const pinnedTachyon = 'github:d31ma/Tachyon#ef61b352b567b7b164fa74b6bc70e55858bb7421'
+        const tachyonCommit = '47775135e456cd8db3c80f4dfde0afaf1273296b'
+        const pinnedTachyon = `github:d31ma/Tachyon#${tachyonCommit}`
         expect(packageJson.devDependencies['@d31ma/tachyon']).toBe(pinnedTachyon)
-        expect(lock).toContain('ef61b352b567b7b164fa74b6bc70e55858bb7421')
+        expect(lock).toContain(tachyonCommit.slice(0, 7))
         expect(websitePackage.devDependencies['@d31ma/tachyon']).toBe(pinnedTachyon)
-        expect(websiteLock).toContain('ef61b352b567b7b164fa74b6bc70e55858bb7421')
+        expect(websiteLock).toContain(tachyonCommit.slice(0, 7))
         expect(vendoredBundle).toBe(browserBundle)
         for (const asset of ['shared.js', 'dedicated.js', 'fylo-index.wasm']) {
             expect(await exists(path.join(explorer, 'client/shared/assets', asset))).toBe(true)

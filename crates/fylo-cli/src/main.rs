@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use fylo_engine::{AccessContext, ReadOnlyEngine};
 use fylo_format::decode_ttid;
-use fylo_machine::{FrameLimits, serve, serve_exclusive, serve_once};
+use fylo_machine::{FrameLimits, RootConfig, serve_configured, serve_exclusive, serve_once};
 use fylo_query::{QueryLimits, ScanQuery, StructuredQuery, prepare_sql};
 use serde_json::{Map, Value, json};
 
@@ -52,6 +52,9 @@ fn run(arguments: &[String]) -> Result<String, String> {
             return pretty(&machine_result(&json!({ "op": "handshake" }), None)?);
         }
         return Ok(VERSION.trim().to_owned());
+    }
+    if RETIRED_COMMANDS.contains(&command) {
+        return Err(retired_command(command));
     }
     if uses_compat_cli(arguments) {
         return run_compat_cli(arguments);
@@ -203,13 +206,20 @@ fn run_machine_loop(arguments: &[String]) -> ExitCode {
     };
     let mut input = BufReader::new(io::stdin().lock());
     let mut output = io::stdout().lock();
+    let config = match machine_config(arguments) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let result = if arguments
         .iter()
         .any(|argument| argument == "--exclusive-root")
     {
         serve_exclusive(&mut input, &mut output, root, limits)
     } else {
-        serve(&mut input, &mut output, root, limits)
+        serve_configured(&mut input, &mut output, root, limits, config)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -251,6 +261,27 @@ fn machine_result(request: &Value, root: Option<PathBuf>) -> Result<Value, Strin
     Err(format!("{code}: {message}"))
 }
 
+/// Resolve the engine's runtime knobs for this invocation.
+///
+/// The CLI is the one composition root that still has a process environment,
+/// so it is the only place that reads one. An explicit flag wins over the
+/// variable so a caller can override an inherited environment without
+/// unsetting it.
+fn machine_config(arguments: &[String]) -> Result<RootConfig, String> {
+    let mut config = RootConfig::from_env().map_err(|error| error.to_string())?;
+    if arguments
+        .iter()
+        .any(|argument| argument == "--strict-schema")
+    {
+        config.strict_schema = true;
+    }
+    if let Some(width) = option(arguments, "--shard-width") {
+        config.shard_width =
+            Some(fylo_machine::parse_shard_width(width).map_err(|error| error.to_string())?);
+    }
+    Ok(config)
+}
+
 fn machine_limits(arguments: &[String]) -> Result<FrameLimits, String> {
     Ok(FrameLimits {
         max_request_bytes: optional_usize(arguments, "--max-request-bytes")?
@@ -282,7 +313,7 @@ fn uses_compat_cli(arguments: &[String]) -> bool {
     let command = arguments.first().map(String::as_str).unwrap_or_default();
     match command {
         "checkout" | "branch" | "commit" | "status" | "diff" | "restore-commit" | "merge"
-        | "latest" | "rebuild" | "verify" | "deleted" | "restore" | "schema" => true,
+        | "latest" | "rebuild" | "reshard" | "verify" | "deleted" | "restore" | "schema" => true,
         "inspect" | "get" => positionals(arguments).len() > 1,
         "log" => option(arguments, "--limit").is_none(),
         "sql" => option(arguments, "--statement").is_none(),
@@ -381,6 +412,24 @@ fn run_compat_cli(arguments: &[String]) -> Result<String, String> {
             1,
             "collection name for rebuild",
         )?,
+        "reshard" => {
+            collection_request(
+                &mut request,
+                "reshardCollection",
+                &values,
+                1,
+                "collection name for reshard",
+            )?;
+            let width = required_option(arguments, "--width")?;
+            request.insert(
+                "width".into(),
+                json!(
+                    width
+                        .parse::<u32>()
+                        .map_err(|error| format!("invalid --width: {error}"))?
+                ),
+            );
+        }
         "verify" => collection_request(
             &mut request,
             "verifyCollection",
@@ -1274,8 +1323,24 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
+/// Commands a published release accepted and this one deliberately does not.
+///
+/// Falling through to the usage banner reads as a packaging accident, which is
+/// how the whole-root backup removal was received. Naming the decision costs a
+/// line and saves an operator a bisect.
+const RETIRED_COMMANDS: &[&str] = &["backup", "reconcile", "restore-backup"];
+
+fn retired_command(command: &str) -> String {
+    format!(
+        "fylo {command} was retired in 26.31.06 (ADR 0007, filesystem-only native storage).\n\
+         Whole-root backup, verification, and restore are filesystem procedures: see\n\
+         docs/operations/filesystem-snapshot-restore.md. `fylo verify <collection>` remains\n\
+         the in-process integrity check."
+    )
+}
+
 fn usage() -> String {
-    "Usage:\n  fylo checkout [-b] <branch> [--root <path>] [--json]\n  fylo branch [--root <path>] [--json]\n  fylo commit -m <message> [--root <path>] [--json]\n  fylo log [--root <path>] [--json]\n  fylo status [--root <path>] [--json]\n  fylo diff [<from>] [<to>] [--root <path>] [--json]\n  fylo restore-commit <commit-id> [--root <path>] [--force] [--json]\n  fylo merge <ref> [-m <message>] [--root <path>] [--json]\n  fylo version [--output json]\n  fylo \"<SQL>\"\n  fylo sql \"<SQL>\"\n  fylo exec --request <json|@path|-> [--root <path>]\n  fylo exec --loop [--root <path>] [--exclusive-root]\n  fylo inspect <collection> [--root <path>] [--json]\n  fylo get <collection> <doc-id> [--root <path>] [--json]\n  fylo latest <collection> <doc-id> [--root <path>] [--json] [--id-only]\n  fylo rebuild <collection> [--root <path>] [--json]\n  fylo verify <collection> [--root <path>] [--json]\n  fylo deleted <collection> [--root <path>] [--json]\n  fylo restore <collection> <doc-id> [--root <path>] [--json]\n  fylo schema inspect <collection> [--schema-dir <path>] [--json]\n  fylo schema current <collection> [--schema-dir <path>] [--json]\n  fylo schema history <collection> [--schema-dir <path>] [--json]\n  fylo schema doctor <collection> [--schema-dir <path>] [--json]\n  fylo schema validate <collection> <json|@path|-> [--schema-dir <path>] [--json]\n  fylo schema materialize <collection> <json|@path|-> [--schema-dir <path>] [--json]\n\nOptions:\n  --root <path>   Override FYLO_ROOT for this command\n  --schema-dir <path> Override FYLO_SCHEMA for schema admin commands\n  --json          Emit machine-readable JSON output\n  --id-only       Return only the resolved document id for latest\n  -b              Create a new branch during checkout\n  -m, --message <v> Commit message\n  --force         Allow restore-commit to overwrite uncommitted changes\n  --request <v>   Machine request payload, @file path, or - for stdin\n  --exclusive-root Acquire an exclusive crash-safe root lease for exec --loop\n  --max-request-bytes <n> Maximum NDJSON request bytes, excluding LF\n  --max-response-bytes <n> Maximum NDJSON response bytes, excluding LF\n  --output <mode> Output mode for version: text or json\n  --version       Print the FYLO runtime version\n  --help          Show this message"
+    "Usage:\n  fylo checkout [-b] <branch> [--root <path>] [--json]\n  fylo branch [--root <path>] [--json]\n  fylo commit -m <message> [--root <path>] [--json]\n  fylo log [--root <path>] [--json]\n  fylo status [--root <path>] [--json]\n  fylo diff [<from>] [<to>] [--root <path>] [--json]\n  fylo restore-commit <commit-id> [--root <path>] [--force] [--json]\n  fylo merge <ref> [-m <message>] [--root <path>] [--json]\n  fylo version [--output json]\n  fylo \"<SQL>\"\n  fylo sql \"<SQL>\"\n  fylo exec --request <json|@path|-> [--root <path>]\n  fylo exec --loop [--root <path>] [--exclusive-root]\n  fylo inspect <collection> [--root <path>] [--json]\n  fylo get <collection> <doc-id> [--root <path>] [--json]\n  fylo latest <collection> <doc-id> [--root <path>] [--json] [--id-only]\n  fylo rebuild <collection> [--root <path>] [--json]\n  fylo reshard <collection> --width <n> [--root <path>] [--json]\n  fylo verify <collection> [--root <path>] [--json]\n  fylo deleted <collection> [--root <path>] [--json]\n  fylo restore <collection> <doc-id> [--root <path>] [--json]\n  fylo schema inspect <collection> [--schema-dir <path>] [--json]\n  fylo schema current <collection> [--schema-dir <path>] [--json]\n  fylo schema history <collection> [--schema-dir <path>] [--json]\n  fylo schema doctor <collection> [--schema-dir <path>] [--json]\n  fylo schema validate <collection> <json|@path|-> [--schema-dir <path>] [--json]\n  fylo schema materialize <collection> <json|@path|-> [--schema-dir <path>] [--json]\n\nOptions:\n  --root <path>   Override FYLO_ROOT for this command\n  --schema-dir <path> Override FYLO_SCHEMA for schema admin commands\n  --json          Emit machine-readable JSON output\n  --id-only       Return only the resolved document id for latest\n  -b              Create a new branch during checkout\n  -m, --message <v> Commit message\n  --force         Allow restore-commit to overwrite uncommitted changes\n  --request <v>   Machine request payload, @file path, or - for stdin\n  --exclusive-root Acquire an exclusive crash-safe root lease for exec --loop\n  --strict-schema Validate writes against the collection head schema (FYLO_STRICT)\n  --shard-width <n> Shard width for collections created by this session (FYLO_SHARD_WIDTH)\n  --width <n>     Destination shard width for reshard\n  --max-request-bytes <n> Maximum NDJSON request bytes, excluding LF\n  --max-response-bytes <n> Maximum NDJSON response bytes, excluding LF\n  --output <mode> Output mode for version: text or json\n  --version       Print the FYLO runtime version\n  --help          Show this message"
         .replace(
             "  --request <v>   Machine request payload, @file path, or - for stdin",
             "  --page-size <n> Repeat headers every n rows in text output\n  --align <mode>  Cell alignment: left, center, right, or auto\n  --request <v>   Machine request payload, @file path, or - for stdin",

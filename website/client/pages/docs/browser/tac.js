@@ -7,7 +7,7 @@ export default class extends Tac {
     if (this.isBrowser) document.title = TITLE
   }
 
-  loaderCode = `<script src="https://d31ma.github.io/FYLO/version/26.30.04/fylo.js"></` + `script>`
+  loaderCode = `<script src="https://d31ma.github.io/FYLO/version/26.32.07/fylo.js"></` + `script>`
 
   useCode = `const db = await Fylo.open()
 
@@ -33,7 +33,7 @@ await db.ready()`
 cd explorer && bun run serve    # http://localhost:8080
 cd explorer && bun run bundle   # production bundle at explorer/dist/web`
 
-  zipCode = `VERSION=26.30.04
+  zipCode = `VERSION=26.32.07
 curl -fLO "https://github.com/d31ma/Fylo/releases/download/v\${VERSION}/fylo-explorer-\${VERSION}.zip"
 mkdir "fylo-explorer-\${VERSION}"
 unzip "fylo-explorer-\${VERSION}.zip" -d "fylo-explorer-\${VERSION}"
