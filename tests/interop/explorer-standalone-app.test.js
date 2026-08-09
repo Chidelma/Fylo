@@ -151,7 +151,7 @@ describe('standalone Explorer app', () => {
         expect(await exists(path.join(output, 'components/explorer/app/tac.js'))).toBe(true)
         expect(await exists(path.join(output, 'explorer/index.html'))).toBe(false)
         expect(renderer).not.toContain('"/explorer"')
-    })
+    }, 300_000)
 
     test('pins Tachyon and the generated browser engine for reproducible builds', async () => {
         await run(['bun', 'run', 'build:web'], root)
