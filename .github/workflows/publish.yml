@@ -76,6 +76,7 @@ jobs:
                   bun ./scripts/build-executable.mjs --outfile ./dist-bin/fylo-windows-x64.exe
 
             - name: Verify compiled Windows executable behavior
+              shell: pwsh
               env:
                   FYLO_REQUIRE_WINDOWS_NATIVE: '1'
                   FYLO_WINDOWS_BINARY: dist-bin/fylo-windows-x64.exe
@@ -88,6 +89,7 @@ jobs:
                   bun test tests/interop/native-release-root-lease.test.js --timeout 120000 --parallel=1
 
             - name: Verify exact Rust CLI and model-checked soak behavior
+              shell: pwsh
               env:
                   FYLO_RUST_BINARY: dist-bin/fylo-windows-x64.exe
                   FYLO_SKIP_RUST_BUILD: '1'
@@ -515,6 +517,26 @@ jobs:
             - name: Build local-first web bundle
               run: bun run build:web:wasm
 
+            - name: Build WASI engine
+              run: |
+                  set -euo pipefail
+                  # run-rust.mjs pins the toolchain but does not add targets, and
+                  # no other job builds WASI, so this runner has to add it here.
+                  toolchain=$(grep -oE 'channel *= *"[^"]+"' rust-toolchain.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+                  rustup target add wasm32-wasip1 --toolchain "$toolchain"
+                  bun run rust:build:wasi
+
+            - name: Verify portable release artifacts
+              run: |
+                  set -euo pipefail
+                  chmod +x release-assets/fylo-linux-x64
+                  bun ./scripts/verify-artifact-interchange.mjs \
+                    --binary release-assets/fylo-linux-x64 \
+                    --wasm target/wasm32-wasip1/release/fylo-rust.wasm
+                  bun run rust:browser:host
+                  bun ./scripts/verify-browser-wasm-budgets.mjs \
+                    --output target/wasm-budget-release.json
+
             - name: Package self-hosted Explorer
               env:
                   VERSION: ${{ needs.version.outputs.version }}
@@ -552,6 +574,8 @@ jobs:
                   cp dist-web/shared.js release-assets/shared.js
                   cp dist-web/dedicated.js release-assets/dedicated.js
                   cp dist-web/fylo-index.wasm release-assets/fylo-index.wasm
+                  cp dist-web/fylo-browser.wasm release-assets/fylo-browser.wasm
+                  cp target/wasm32-wasip1/release/fylo-rust.wasm release-assets/fylo.wasm
                   cp website/client/shared/assets/install.sh release-assets/install.sh
                   cp website/client/shared/assets/install.ps1 release-assets/install.ps1
 
@@ -576,6 +600,7 @@ jobs:
                   expected=$(cat <<EOF
                   dedicated.js
                   fylo-${VERSION}.spdx.json
+                  fylo-browser.wasm
                   fylo-clients.tar.gz
                   fylo-explorer-${VERSION}.zip
                   fylo-index.wasm
@@ -585,6 +610,7 @@ jobs:
                   fylo-macos-x64
                   fylo-web.mjs
                   fylo-windows-x64.exe
+                  fylo.wasm
                   install.ps1
                   install.sh
                   shared.js

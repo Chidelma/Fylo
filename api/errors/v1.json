@@ -1,61 +1,233 @@
 {
     "version": 1,
     "errors": [
-        { "code": "EBADREQUEST", "retryable": false },
-        { "code": "EUNSUPPORTEDOP", "retryable": false },
-        { "code": "EUNKNOWN", "retryable": false },
-        { "code": "EFRAME_REQUEST_TOO_LARGE", "retryable": false },
-        { "code": "EFRAME_RESPONSE_TOO_LARGE", "retryable": false },
-        { "code": "EFRAME_TRUNCATED", "retryable": false },
-        { "code": "EFRAME_UTF8", "retryable": false },
-        { "code": "EFRAME_JSON", "retryable": false },
-        { "code": "EFRAME_DUPLICATE_KEY", "retryable": false },
-        { "code": "EINVALIDCURSOR", "retryable": false },
-        { "code": "EQUERYITEMTOOLARGE", "retryable": false },
-        { "code": "EQUERYSNAPSHOTTOOLARGE", "retryable": false },
-        { "code": "EQUERYLOOPREQUIRED", "retryable": false },
-        { "code": "EROOTLOCKED", "retryable": true },
-        { "code": "EROOTLEASELOST", "retryable": false },
-        { "code": "EINVALIDDOCID", "retryable": false },
-        { "code": "EARRAYOFOBJECTS", "retryable": false },
-        { "code": "EDECRYPTFAILED", "retryable": false },
-        { "code": "EACCES", "retryable": false },
-        { "code": "EQUERY_INPUT_SIZE", "retryable": false },
-        { "code": "EQUERY_INVALID", "retryable": false },
-        { "code": "EQUERY_EMPTY", "retryable": false },
-        { "code": "EQUERY_COUNT", "retryable": false },
-        { "code": "EQUERY_TERM_SIZE", "retryable": false },
-        { "code": "EINDEX_SNAPSHOT_SIZE", "retryable": false },
-        { "code": "EINDEX_KEY_SIZE", "retryable": false },
-        { "code": "EINDEX_SNAPSHOT_FORMAT", "retryable": false },
-        { "code": "EINDEX_SNAPSHOT_ORDER", "retryable": false },
-        { "code": "EQUERY_MATCH_COUNT", "retryable": false },
-        { "code": "EQUERY_OUTPUT_SIZE", "retryable": false },
-        { "code": "EWASM_FETCH", "retryable": true },
-        { "code": "EWASM_COMPILE", "retryable": false },
-        { "code": "EWASM_INSTANTIATE", "retryable": false },
-        { "code": "EWASM_ABI", "retryable": false },
-        { "code": "EWASM_SNAPSHOT", "retryable": false },
-        { "code": "EWASM_QUERY", "retryable": false },
-        { "code": "EWASM_MEMORY", "retryable": false },
-        { "code": "EFORMAT_SIZE", "retryable": false },
-        { "code": "EFORMAT_JSON", "retryable": false },
-        { "code": "EDOCUMENTROOT", "retryable": false },
-        { "code": "EFORMAT_DEPTH", "retryable": false },
-        { "code": "EFORMAT_NODES", "retryable": false },
-        { "code": "EFORMAT_ENCODE", "retryable": false },
-        { "code": "ENATIVE_IO", "retryable": true },
-        { "code": "ENATIVE_UNSAFE_PATH", "retryable": false },
-        { "code": "ENATIVE_WRONG_TYPE", "retryable": false },
-        { "code": "ENATIVE_FILE_SIZE", "retryable": false },
-        { "code": "ENATIVE_METADATA", "retryable": false },
-        { "code": "ENATIVE_INDEX", "retryable": false },
-        { "code": "ENATIVE_COLLECTION", "retryable": false },
-        { "code": "ENATIVE_UNSUPPORTED", "retryable": false },
-        { "code": "EENGINE_STORAGE", "retryable": false },
-        { "code": "EENGINE_FORMAT", "retryable": false },
-        { "code": "EENGINE_QUERY", "retryable": false },
-        { "code": "EENGINE_CORRUPT", "retryable": false },
-        { "code": "EENGINE_CONCURRENT_WRITE", "retryable": true }
+        {
+            "code": "EBADREQUEST",
+            "retryable": false
+        },
+        {
+            "code": "EUNSUPPORTEDOP",
+            "retryable": false
+        },
+        {
+            "code": "EUNKNOWN",
+            "retryable": false
+        },
+        {
+            "code": "EFRAME_REQUEST_TOO_LARGE",
+            "retryable": false
+        },
+        {
+            "code": "EFRAME_RESPONSE_TOO_LARGE",
+            "retryable": false
+        },
+        {
+            "code": "EFRAME_TRUNCATED",
+            "retryable": false
+        },
+        {
+            "code": "EFRAME_UTF8",
+            "retryable": false
+        },
+        {
+            "code": "EFRAME_JSON",
+            "retryable": false
+        },
+        {
+            "code": "EFRAME_DUPLICATE_KEY",
+            "retryable": false
+        },
+        {
+            "code": "EINVALIDCURSOR",
+            "retryable": false
+        },
+        {
+            "code": "EQUERYITEMTOOLARGE",
+            "retryable": false
+        },
+        {
+            "code": "EQUERYSNAPSHOTTOOLARGE",
+            "retryable": false
+        },
+        {
+            "code": "EQUERYLOOPREQUIRED",
+            "retryable": false
+        },
+        {
+            "code": "EROOTLOCKED",
+            "retryable": true
+        },
+        {
+            "code": "EROOTLEASELOST",
+            "retryable": false
+        },
+        {
+            "code": "EINVALIDDOCID",
+            "retryable": false
+        },
+        {
+            "code": "EARRAYOFOBJECTS",
+            "retryable": false
+        },
+        {
+            "code": "EDECRYPTFAILED",
+            "retryable": false
+        },
+        {
+            "code": "EACCES",
+            "retryable": false
+        },
+        {
+            "code": "EQUERY_INPUT_SIZE",
+            "retryable": false
+        },
+        {
+            "code": "EQUERY_INVALID",
+            "retryable": false
+        },
+        {
+            "code": "ESHARDWIDTH",
+            "retryable": false
+        },
+        {
+            "code": "EQUERY_EMPTY",
+            "retryable": false
+        },
+        {
+            "code": "EQUERY_COUNT",
+            "retryable": false
+        },
+        {
+            "code": "EQUERY_TERM_SIZE",
+            "retryable": false
+        },
+        {
+            "code": "EINDEX_SNAPSHOT_SIZE",
+            "retryable": false
+        },
+        {
+            "code": "EINDEX_KEY_SIZE",
+            "retryable": false
+        },
+        {
+            "code": "EINDEX_SNAPSHOT_FORMAT",
+            "retryable": false
+        },
+        {
+            "code": "EINDEX_SNAPSHOT_ORDER",
+            "retryable": false
+        },
+        {
+            "code": "EQUERY_MATCH_COUNT",
+            "retryable": false
+        },
+        {
+            "code": "EQUERY_OUTPUT_SIZE",
+            "retryable": false
+        },
+        {
+            "code": "EWASM_FETCH",
+            "retryable": true
+        },
+        {
+            "code": "EWASM_COMPILE",
+            "retryable": false
+        },
+        {
+            "code": "EWASM_INSTANTIATE",
+            "retryable": false
+        },
+        {
+            "code": "EWASM_ABI",
+            "retryable": false
+        },
+        {
+            "code": "EWASM_SNAPSHOT",
+            "retryable": false
+        },
+        {
+            "code": "EWASM_QUERY",
+            "retryable": false
+        },
+        {
+            "code": "EWASM_MEMORY",
+            "retryable": false
+        },
+        {
+            "code": "EFORMAT_SIZE",
+            "retryable": false
+        },
+        {
+            "code": "EFORMAT_JSON",
+            "retryable": false
+        },
+        {
+            "code": "EDOCUMENTROOT",
+            "retryable": false
+        },
+        {
+            "code": "EFORMAT_DEPTH",
+            "retryable": false
+        },
+        {
+            "code": "EFORMAT_NODES",
+            "retryable": false
+        },
+        {
+            "code": "EFORMAT_ENCODE",
+            "retryable": false
+        },
+        {
+            "code": "ENATIVE_IO",
+            "retryable": true
+        },
+        {
+            "code": "ENATIVE_UNSAFE_PATH",
+            "retryable": false
+        },
+        {
+            "code": "ENATIVE_WRONG_TYPE",
+            "retryable": false
+        },
+        {
+            "code": "ENATIVE_FILE_SIZE",
+            "retryable": false
+        },
+        {
+            "code": "ENATIVE_METADATA",
+            "retryable": false
+        },
+        {
+            "code": "ENATIVE_INDEX",
+            "retryable": false
+        },
+        {
+            "code": "ENATIVE_COLLECTION",
+            "retryable": false
+        },
+        {
+            "code": "ENATIVE_UNSUPPORTED",
+            "retryable": false
+        },
+        {
+            "code": "EENGINE_STORAGE",
+            "retryable": false
+        },
+        {
+            "code": "EENGINE_FORMAT",
+            "retryable": false
+        },
+        {
+            "code": "EENGINE_QUERY",
+            "retryable": false
+        },
+        {
+            "code": "EENGINE_CORRUPT",
+            "retryable": false
+        },
+        {
+            "code": "EENGINE_CONCURRENT_WRITE",
+            "retryable": true
+        }
     ]
 }

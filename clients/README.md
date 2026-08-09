@@ -338,7 +338,7 @@ directly — fully offline, no backend, no network.
 For a regular website, add a version-pinned loader to the document head:
 
 ```html
-<script src="https://d31ma.github.io/FYLO/version/26.31.06/fylo.js"></script>
+<script src="https://d31ma.github.io/FYLO/version/26.32.07/fylo.js"></script>
 ```
 
 Then open the browser-local database from your application code:
@@ -357,7 +357,7 @@ want the newest release. For direct ESM imports, the engine is published beside
 the loader:
 
 ```js
-import { createBrowserClient } from 'https://d31ma.github.io/FYLO/version/26.31.06/fylo-web.mjs'
+import { createBrowserClient } from 'https://d31ma.github.io/FYLO/version/26.32.07/fylo-web.mjs'
 
 const db = createBrowserClient()
 await db.ready()

@@ -22,8 +22,8 @@ use fylo_query::{
 use fylo_storage_native::{
     AccessDescriptor, CollectionKind, GenerationStatus, IndexVerification, NativeAccess,
     NativeCollection, NativeRoot, NativeStorageError, NativeStorageErrorCode, NativeWriteRoot,
-    PutDocumentOptions, RepositoryHistory, StoredRawFile, VersionVerification, WriteAccess,
-    WriteActor,
+    PutDocumentOptions, RepositoryHistory, RootConfig, StoredRawFile, VersionVerification,
+    WriteAccess, WriteActor,
 };
 use schema::SchemaTools;
 use serde::Serialize;
@@ -51,6 +51,27 @@ pub struct WriteEngine {
     writer: NativeWriteRoot,
     encryption: Option<EncryptionReader>,
     schema: Option<std::rc::Rc<SchemaTools>>,
+}
+
+pub use fylo_storage_native::RootConfig as EngineConfig;
+
+impl WriteEngine {
+    /// Apply host-supplied runtime knobs to this engine and its writer.
+    ///
+    /// Every `open_*` constructor starts from the default, so a host that
+    /// wants non-default behavior chains this rather than choosing between a
+    /// combinatorial set of constructors.
+    #[must_use]
+    pub fn with_config(mut self, config: RootConfig) -> Self {
+        self.writer = self.writer.with_config(config);
+        self
+    }
+
+    /// Runtime knobs this engine was opened with.
+    #[must_use]
+    pub fn config(&self) -> RootConfig {
+        self.writer.config()
+    }
 }
 
 impl WriteEngine {
@@ -334,20 +355,14 @@ impl WriteEngine {
             // Validate before encrypting: CHEX must see the plaintext the
             // schema describes, and the `_v` stamp it returns must survive.
             //
-            // The JavaScript engine validates and stamps `_v` only under
-            // `FYLO_STRICT`, so an unconditional native stamp would make the
-            // same put produce different bytes in the two engines.
+            // The JavaScript engine validates and stamps `_v` only in strict
+            // mode, so an unconditional native stamp would make the same put
+            // produce different bytes in the two engines.
             let fields = match self.schema.as_ref() {
-                // An empty `FYLO_STRICT` is falsy in JavaScript, so it must
-                // not enable validation here either.
-                Some(schema)
-                    if std::env::var("FYLO_STRICT").is_ok_and(|value| !value.is_empty()) =>
-                {
-                    schema
-                        .validate_against_head(collection, &fields)
-                        .map_err(EngineError::schema)?
-                        .unwrap_or(fields)
-                }
+                Some(schema) if self.writer.config().strict_schema => schema
+                    .validate_against_head(collection, &fields)
+                    .map_err(EngineError::schema)?
+                    .unwrap_or(fields),
                 _ => fields,
             };
             encryption
@@ -548,8 +563,8 @@ impl ReadOnlyEngine {
                 metadata: CanonicalMetadata {
                     id: identifier.to_owned(),
                     created_at: timestamps.created_at,
-                    updated_at: stored.modified_millis_exact,
-                    mtime: stored.modified_millis_exact,
+                    updated_at: stored.modified_millis,
+                    mtime: stored.modified_millis,
                 },
                 document,
             })
@@ -722,7 +737,7 @@ impl ReadOnlyEngine {
             Ok(ReadDeletedDocument {
                 id: identifier.to_owned(),
                 created_at: timestamps.created_at,
-                deleted_at: stored.modified_millis_exact,
+                deleted_at: stored.modified_millis,
                 document,
             })
         })
@@ -771,7 +786,7 @@ impl ReadOnlyEngine {
                 .read_deleted_raw_file(identifier)
                 .map_err(EngineError::storage)?;
             require_read_access(stored.access_descriptor, actor)?;
-            let deleted_at = stored.modified_millis_exact;
+            let deleted_at = stored.modified_millis;
             Ok(ReadDeletedFile {
                 deleted_at,
                 file: build_read_file(identifier, stored)?,
@@ -1287,8 +1302,8 @@ impl ReadOnlyEngine {
                     metadata: CanonicalMetadata {
                         id: identifier,
                         created_at: timestamps.created_at,
-                        updated_at: stored.modified_millis_exact,
-                        mtime: stored.modified_millis_exact,
+                        updated_at: stored.modified_millis,
+                        mtime: stored.modified_millis,
                     },
                     document,
                 });
@@ -1349,7 +1364,7 @@ impl ReadOnlyEngine {
                 records.push(ReadDeletedDocument {
                     id: identifier,
                     created_at: timestamps.created_at,
-                    deleted_at: stored.modified_millis_exact,
+                    deleted_at: stored.modified_millis,
                     document,
                 });
                 if query
@@ -1543,8 +1558,8 @@ fn build_read_file(identifier: &str, stored: StoredRawFile) -> Result<ReadFile, 
     let metadata = CanonicalMetadata {
         id: identifier.to_owned(),
         created_at: timestamps.created_at,
-        updated_at: stored.modified_millis_exact,
-        mtime: stored.modified_millis_exact,
+        updated_at: stored.modified_millis,
+        mtime: stored.modified_millis,
     };
     Ok(ReadFile {
         file: RawFileManifest {
@@ -1556,7 +1571,7 @@ fn build_read_file(identifier: &str, stored: StoredRawFile) -> Result<ReadFile, 
             etag: stored.checksum_sha256.clone(),
             checksum_sha256: stored.checksum_sha256,
             created_at: timestamps.created_at,
-            last_modified: stored.modified_millis_exact,
+            last_modified: stored.modified_millis,
         },
         metadata,
         custom_metadata: stored.custom_metadata.into_iter().collect(),
@@ -1570,7 +1585,7 @@ fn raw_file_index_fields(
     stored: StoredRawFile,
 ) -> Result<Map<String, Value>, EngineError> {
     let custom_metadata = stored.custom_metadata.clone();
-    let last_modified = stored.modified_millis_exact;
+    let last_modified = stored.modified_millis;
     let manifest = build_read_file(identifier, stored)?.file;
     let Value::Object(mut fields) = serde_json::to_value(manifest).map_err(|error| {
         EngineError::new(
@@ -1738,8 +1753,8 @@ pub struct ReadDeletedDocument {
     pub id: String,
     /// TTID creation timestamp.
     pub created_at: u64,
-    /// Tombstone modification/deletion timestamp.
-    pub deleted_at: f64,
+    /// Tombstone modification/deletion timestamp in whole Unix milliseconds.
+    pub deleted_at: u64,
     /// Stored JSON document.
     pub document: Document,
 }
@@ -1765,8 +1780,8 @@ pub struct ReadFile {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadDeletedFile {
-    /// Tombstone modification/deletion timestamp.
-    pub deleted_at: f64,
+    /// Tombstone modification/deletion timestamp in whole Unix milliseconds.
+    pub deleted_at: u64,
     /// Raw-file body and metadata.
     #[serde(flatten)]
     pub file: ReadFile,
@@ -1793,8 +1808,8 @@ pub struct RawFileManifest {
     pub checksum_sha256: String,
     /// TTID creation time in Unix milliseconds.
     pub created_at: u64,
-    /// Filesystem modification time in Unix milliseconds.
-    pub last_modified: f64,
+    /// Filesystem modification time in whole Unix milliseconds.
+    pub last_modified: u64,
 }
 
 /// Read-only collection inspection result.

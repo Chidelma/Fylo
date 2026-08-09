@@ -4,8 +4,10 @@ members = [
     "crates/fylo-format",
     "crates/fylo-engine",
     "crates/fylo-query",
+    "crates/fylo-vfs",
     "crates/fylo-storage-native",
     "crates/fylo-machine",
+    "crates/fylo-wasm",
     "crates/fylo-cli",
     "src/browser/wasm",
     "xtask",
@@ -14,8 +16,10 @@ default-members = [
     "crates/fylo-format",
     "crates/fylo-engine",
     "crates/fylo-query",
+    "crates/fylo-vfs",
     "crates/fylo-storage-native",
     "crates/fylo-machine",
+    "crates/fylo-wasm",
     "crates/fylo-cli",
     "xtask",
 ]
@@ -35,6 +39,7 @@ getrandom = "0.4.3"
 hmac = "0.13.0"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustix = { version = "1.1.4", default-features = false, features = ["fs"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 ryu-js = "1.0.3"
 same-file = "1.0.6"

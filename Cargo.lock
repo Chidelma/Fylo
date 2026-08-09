@@ -656,6 +656,7 @@ dependencies = [
  "fylo-engine",
  "fylo-query",
  "fylo-storage-native",
+ "fylo-vfs",
  "reqwest",
  "rustls",
  "serde",
@@ -679,11 +680,26 @@ dependencies = [
  "base64",
  "fylo-format",
  "fylo-query",
+ "fylo-vfs",
+ "rustix",
  "same-file",
  "serde",
  "serde_json",
  "sha2",
  "xattr",
+]
+
+[[package]]
+name = "fylo-vfs"
+version = "0.1.0"
+
+[[package]]
+name = "fylo-wasm"
+version = "0.1.0"
+dependencies = [
+ "fylo-machine",
+ "fylo-vfs",
+ "getrandom 0.4.3",
 ]
 
 [[package]]

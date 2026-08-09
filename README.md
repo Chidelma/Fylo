@@ -107,6 +107,28 @@ cd ../explorer && bun install --frozen-lockfile && bun run serve
 
 ## Architecture
 
+### Three artifacts, one engine
+
+The same engine ships three ways. They share the source, the on-disk format,
+and the NDJSON machine protocol, and differ only where a platform cannot supply
+something — the handshake capabilities report which.
+
+| Artifact            | Target                   | Storage                         | Driven by                         |
+| ------------------- | ------------------------ | ------------------------------- | --------------------------------- |
+| `fylo`              | native                   | `std::fs`                       | a spawned process                 |
+| `fylo.wasm`         | `wasm32-wasip1`          | `std::fs` over WASI preopens    | any WASI runtime                  |
+| `fylo-browser.wasm` | `wasm32-unknown-unknown` | a host table the embedder fills | a browser Worker, or any embedder |
+
+`fylo` and `fylo.wasm` are **interchangeable**: a shim spawns either, writes
+NDJSON to stdin, reads NDJSON from stdout, and cannot tell which it got.
+WebAssembly is not a browser technology — `wasm32-wasip1` has real files and
+real stdio, so the same engine runs under any WASI runtime on a server.
+
+The browser build owns its storage rather than delegating to a JavaScript
+engine, which is why version control, schema, and encryption reach the browser
+at all. See the [artifact matrix](docs/releases/artifact-matrix.md) for what
+each one can and cannot do, and why.
+
 Document collections live under `.collections`; buckets (for raw files) live
 under `.buckets`. The two are structurally identical — only the top-level
 directory differs. Collections hold `Record` values; buckets hold `Blob`/`File`
@@ -116,15 +138,15 @@ values:
 <root>/.collections/<collection>/   ← documents (Record)
 <root>/.buckets/<bucket>/           ← raw files (Blob / File), same internal layout:
   docs/                    ← one file per document/object (TTID-named)
-    4U/
+    W/                     ← shard: trailing characters of the creation segment
       4UUB32VGUDW.json
   .deleted/                ← soft-deleted payloads (hidden sibling of docs/)
-    4U/
+    W/
       4UUB32VGUDW.json
   index/                   ← local filesystem prefix index catalog
     manifest.json          ← format version marker
     keys.snapshot          ← sorted index keys, mmap'd for O(log n) lookup
-    keys.wal               ← append-only mutation log (compacted at 1 MiB)
+    keys.wal               ← append-only mutation log (compacted once it outgrows the snapshot)
   events/
     <collection>.ndjson    ← append-only event journal
   locks/                   ← advisory file locks
@@ -376,7 +398,7 @@ const sameId = await db.users.patch(id, { team: 'core-platform' })
 ### Delete
 
 ```ts
-await db.users.delete(sameId) // moves payload to .deleted/4U/4UUB32VGUDW.json
+await db.users.delete(sameId) // moves payload to .deleted/W/4UUB32VGUDW.json
 ```
 
 Soft-deleted files retain their TTID filename, use file `mtime` as `deletedAt`,
@@ -496,15 +518,31 @@ application-level export, filesystem mount, or backup concern.
 FYLO stores the bytes unchanged at:
 
 ```text
-.buckets/assets/docs/<TTID-prefix>/<TTID>.<original-extension>
+.buckets/assets/docs/<shard>/<TTID>.<original-extension>
 ```
+
+**That path is internal and versioned, not an interface.** `<shard>` is derived
+from the identifier by a rule that has already changed once
+([ADR 0006](docs/adr/0006-shard-records-by-the-trailing-creation-characters.md))
+and may change again. Read content through `getFileData` (below) or the client
+API; do not compute the path.
 
 No source path or URL is retained. Metadata is derived from the stored file,
 with the logical `key` stored as a `user.fylo.key` extended attribute (xattr)
 on the file itself, so it travels with the bytes across moves:
 `name`, `key`, `extension`, `contentType`, `contentLength`, `etag`,
-`checksumSHA256`, `createdAt`, and `lastModified`. These fields use the normal
+`checksumSHA256`, `createdAt`, and `lastModified`. `key` is the record's
+logical name, not a location inside the bucket. These fields use the normal
 prefix index and can be queried with `find()`.
+
+Every timestamp FYLO returns is a **whole** number of epoch milliseconds.
+`createdAt` is decoded from the TTID; `lastModified` — like `updatedAt`,
+`mtime`, and `deletedAt` on documents — is the filesystem modification time,
+truncated to the millisecond. The JavaScript engine passed Node's fractional
+`fs.stat().mtimeMs` straight through, which meant one payload could mix
+`1785784975586` and `1785784975653.6606` and break a client that typed epoch
+milliseconds as an integer. Sub-millisecond filesystem precision is not
+something FYLO orders records by, so the type is now uniform instead.
 
 Developer-defined metadata rides along the same way, as `user.fylo.meta.*`
 xattrs on the document or raw file. `put` has two metadata-focused forms:
@@ -582,6 +620,40 @@ Compiled executable callers use a tagged absolute path:
         "path": "/uploads/greeting.txt",
         "key": "/incoming/greeting.txt"
     }
+}
+```
+
+`getDoc` answers a file collection with the manifest and no bytes. `getFileData`
+returns the content, in either of the two shapes the handshake advertises as
+`documentBuckets.getOutputs`:
+
+```json
+{ "op": "getFileData", "root": "/mnt/fylo", "collection": "assets", "id": "4VU2UX8MC3K" }
+```
+
+```json
+{
+    "id": "4VU2UX8MC3K",
+    "contentLength": 12,
+    "checksumSHA256": "a8359ee3…",
+    "encoding": "base64",
+    "data": "aGVsbG8gYnVja2V0"
+}
+```
+
+Adding an absolute `path` writes the content there and returns only the
+receipt, which is how an object larger than one response frame is read. The
+path must not already exist — `getFileData` never replaces a file it did not
+create — and an inline read that would not fit the frame is refused with
+`EFRAME_RESPONSE_TOO_LARGE` naming `path` as the alternative.
+
+```json
+{
+    "op": "getFileData",
+    "root": "/mnt/fylo",
+    "collection": "assets",
+    "id": "4VU2UX8MC3K",
+    "path": "/tmp/greeting.txt"
 }
 ```
 
@@ -880,6 +952,7 @@ fylo sql "SELECT * FROM posts" --page-size 25
 # Admin
 fylo inspect posts --root /mnt/fylo --json
 fylo rebuild posts --root /mnt/fylo
+fylo reshard posts --width 2 --root /mnt/fylo --json  # move to a wider shard layout
 fylo verify assets --root /mnt/fylo --json  # integrity audit; exits 1 on corruption
 fylo get posts 4UUB32VGUDW --root /mnt/fylo --json
 fylo deleted posts --root /mnt/fylo --json
@@ -989,7 +1062,8 @@ and does not create the configured root or initialize a collection.
 
 Capability records are versioned contracts. `documentBuckets.version === 1`
 advertises raw-file collections (`kind: "file"`), their supported machine
-operations, path/URL ingestion, and full-content SHA-256 verification.
+operations, path/URL ingestion, `getFileData`'s base64 and path outputs, and
+full-content SHA-256 verification.
 `machineAccess.version === 1` advertises the operations that enforce trusted
 POSTIX access, the accepted descriptor and actor fields, and the `EACCES` /
 query-omission denial semantics. `machineAccess` is present only in macOS and
@@ -997,7 +1071,7 @@ Linux builds; its absence means the runtime does not provide that authorization
 boundary. Consumers should reject a missing or unknown capability version
 before touching a production root.
 
-Supported operations: `handshake`, `executeSQL`, `createCollection`, `dropCollection`, `inspectCollection`, `rebuildCollection`, `getDoc`, `getLatest`, `getMeta`, `setMeta`, `findDocs`, `findDeletedDocs`, `restoreDoc`, `joinDocs`, `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`, `delDocs`, `importBulkData`, `checkout`, `branch`, `commit`, `log`, `status`, `diff`, `restoreCommit`, `merge`, `schemaInspect`, `schemaCurrent`, `schemaHistory`, `schemaDoctor`, `schemaValidate`, `schemaMaterialize`.
+Supported operations: `handshake`, `executeSQL`, `createCollection`, `dropCollection`, `inspectCollection`, `rebuildCollection`, `reshardCollection`, `verifyCollection`, `getDoc`, `getFileData`, `getLatest`, `getMeta`, `setMeta`, `findDocs`, `findDeletedDocs`, `restoreDoc`, `joinDocs`, `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`, `delDocs`, `importBulkData`, `checkout`, `branch`, `commit`, `log`, `status`, `diff`, `restoreCommit`, `merge`, `schemaInspect`, `schemaCurrent`, `schemaHistory`, `schemaDoctor`, `schemaValidate`, `schemaMaterialize`.
 
 Document and raw-file CRUD/query operations accept an optional `access`
 object. Puts accept `{ uid?, gid?, mode? }`; reads, metadata, queries, updates,
@@ -1192,7 +1266,9 @@ atomic link/rename semantics supported storage targets.
 | **Frequency leaks on encryption**    | HMAC blind indexes for `$eq` reveal value repetition even without decryption.                                                                                                                        |
 | **Process-global cipher**            | One key per process for all `$encrypted` fields. No per-collection key rotation built in.                                                                                                            |
 | **No cross-collection transactions** | SQL mutations and ordinary writes are atomic within one collection; there is no atomic multi-collection commit.                                                                                      |
-| **Timestamp metadata**               | `createdAt` comes from TTID; `updatedAt` comes from file modification metadata.                                                                                                                      |
+| **Timestamp metadata**               | `createdAt` comes from TTID; `updatedAt` comes from file modification metadata. Every timestamp is whole epoch milliseconds.                                                                         |
+| **Canonical identifiers**            | TTID matches case-insensitively but FYLO names a file after the identifier, so a write with a non-canonical spelling is refused. `ttid canonicalize` repairs one.                                    |
+| **Shard width is per collection**    | Recorded in the catalog descriptor and 1–4. A write configured for a different width fails with `ESHARDWIDTH`; `fylo reshard` moves the collection.                                                  |
 | **Bulk import for trusted sources**  | SSRF guard blocks private addresses and caps at 50 MiB. Not for user-provided URLs.                                                                                                                  |
 
 ---

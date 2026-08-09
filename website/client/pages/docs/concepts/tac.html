@@ -56,9 +56,13 @@
     <div class="doc-section">
       <h2>Document</h2>
       <p>
-        One JSON file. Its filename is the document's TTID, sharded into a
-        two-character prefix directory so no single directory grows unbounded. A
-        document may contain scalars, nested objects, and arrays of scalars.
+        One JSON file. Its filename is the document's TTID, placed in a shard
+        directory taken from the <em>trailing</em> characters of that TTID so no single
+        directory grows unbounded. Trailing, because a TTID is time-ordered and its
+        leading characters barely move — sharding on those put months of records in
+        one directory. The width is a property of the collection, one character by
+        default. A document may contain scalars, nested objects, and arrays of
+        scalars.
       </p>
       <p>
         It may <em>not</em> contain an array of objects at any depth. FYLO reads that

@@ -31,6 +31,12 @@
       </p>
       <pre class="code-block"><code>{basicCode}</code></pre>
       <p>
+        <code>getDoc</code> answers a bucket with the manifest and no bytes.
+        <code>getFileData</code> returns the content — base64 inline, or written to an
+        absolute <code>path</code> when it exceeds one response frame. The layout below
+        is internal and versioned: read through the operation, not the path.
+      </p>
+      <p>
         FYLO stores the bytes unchanged and retains no source path or URL:
       </p>
       <pre class="code-block"><code>{pathCode}</code></pre>

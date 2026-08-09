@@ -27,9 +27,14 @@ export const EXPLORER_LIMITS = Object.freeze({
 
 const BUILD_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/
 
+// Only `bundle` runs fingerprint-assets.mjs, so `serve` leaves the placeholder
+// in place. It is absence, not a bad token — and it fails the pattern anyway
+// because it leads with an underscore.
+const UNFINGERPRINTED = '__FYLO_ASSET_VERSION__'
+
 /** @param {unknown} value @returns {string} */
 export function validatedBuildToken(value) {
-    if (value === undefined || value === null || value === '') return ''
+    if (value === undefined || value === null || value === '' || value === UNFINGERPRINTED) return ''
     const token = String(value)
     if (!BUILD_TOKEN.test(token)) throw new Error('Invalid FYLO Explorer build token')
     return token

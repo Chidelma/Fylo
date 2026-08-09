@@ -9,8 +9,8 @@ export default class extends Tac {
 
   ops = [
     { group: 'Session', items: 'handshake' },
-    { group: 'Collections', items: 'createCollection, dropCollection, inspectCollection, rebuildCollection, verifyCollection' },
-    { group: 'Documents', items: 'getDoc, getLatest, putData, batchPutData, patchDoc, patchDocs, delDoc, delDocs, restoreDoc, importBulkData' },
+    { group: 'Collections', items: 'createCollection, dropCollection, inspectCollection, rebuildCollection, reshardCollection, verifyCollection' },
+    { group: 'Documents', items: 'getDoc, getFileData, getLatest, putData, batchPutData, patchDoc, patchDocs, delDoc, delDocs, restoreDoc, importBulkData' },
     { group: 'Metadata', items: 'getMeta, setMeta' },
     { group: 'Queries', items: 'findDocs, findDeletedDocs, joinDocs, executeSQL' },
     { group: 'Version control', items: 'checkout, branch, commit, log, status, diff, restoreCommit, merge' },

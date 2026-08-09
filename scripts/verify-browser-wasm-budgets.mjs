@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path'
 
 const MAX_WASM_BYTES = 128 * 1024
 const MAX_WASM_GZIP_BYTES = 64 * 1024
+const MAX_ENGINE_WASM_BYTES = 1792 * 1024
+const MAX_ENGINE_WASM_GZIP_BYTES = 640 * 1024
 const MAX_HOST_BYTES = 192 * 1024
 const outputArgument = process.argv.indexOf('--output')
 const output =
@@ -13,6 +15,7 @@ const output =
 
 const assets = {
     wasm: await measure('dist-web/fylo-index.wasm'),
+    engineWasm: await measure('dist-web/fylo-browser.wasm'),
     host: await measure('dist-web/fylo.mjs')
 }
 const evidence = {
@@ -20,6 +23,8 @@ const evidence = {
     budgets: {
         wasmBytes: MAX_WASM_BYTES,
         wasmGzipBytes: MAX_WASM_GZIP_BYTES,
+        engineWasmBytes: MAX_ENGINE_WASM_BYTES,
+        engineWasmGzipBytes: MAX_ENGINE_WASM_GZIP_BYTES,
         hostBytes: MAX_HOST_BYTES,
         initializationMs: 100,
         indexedQueryMinimumSpeedup: 1.2
@@ -29,6 +34,12 @@ const evidence = {
 
 assertWithin('Wasm payload', assets.wasm.bytes, MAX_WASM_BYTES)
 assertWithin('gzip Wasm payload', assets.wasm.gzipBytes, MAX_WASM_GZIP_BYTES)
+assertWithin('browser engine Wasm payload', assets.engineWasm.bytes, MAX_ENGINE_WASM_BYTES)
+assertWithin(
+    'gzip browser engine Wasm payload',
+    assets.engineWasm.gzipBytes,
+    MAX_ENGINE_WASM_GZIP_BYTES
+)
 assertWithin('browser host payload', assets.host.bytes, MAX_HOST_BYTES)
 
 if (output) {

@@ -8,6 +8,10 @@ if (releasedBinary === rustBinary) throw new Error('released and Rust binaries m
 
 const registry = JSON.parse(await readFile('api/machine/v1/operations.json', 'utf8'))
 const canonicalOperations = registry.operations.map(({ name }) => name).sort()
+const candidateOnlyOperations = ['getFileData', 'reshardCollection']
+const releasedOperations = canonicalOperations.filter(
+    (operation) => !candidateOnlyOperations.includes(operation)
+)
 const workspace = await mkdtemp(join(tmpdir(), 'fylo-release-machine-parity-'))
 const schemaRoot = join(workspace, 'schema')
 const rawSource = join(workspace, 'source.bin')
@@ -19,14 +23,14 @@ try {
     const released = await runScenario('released', releasedBinary, join(workspace, 'released'))
     const rust = await runScenario('rust', rustBinary, join(workspace, 'rust'))
 
-    assertEqual(released.operations, canonicalOperations, 'released operation coverage')
+    assertEqual(released.operations, releasedOperations, 'released operation coverage')
     assertEqual(rust.operations, canonicalOperations, 'Rust operation coverage')
     assert(released.nonEmptyResults > 20, 'released corpus produced too few non-empty results')
     assert(rust.nonEmptyResults > 20, 'Rust corpus produced too few non-empty results')
     assertEqual(released.transcript, rust.transcript, 'released/Rust machine semantics')
 
     console.log(
-        `Verified all ${canonicalOperations.length} canonical machine operations against the immutable release and Rust (${rust.transcript.length} semantic checkpoints)`
+        `Verified ${releasedOperations.length} shared machine operations against the immutable release and all ${canonicalOperations.length} against Rust (${rust.transcript.length} semantic checkpoints)`
     )
 } finally {
     await rm(workspace, { recursive: true, force: true })
@@ -263,6 +267,18 @@ async function runScenario(label, binary, root) {
             { identifier: 'raw-source' }
         )
         await request('get-raw-file', { op: 'getDoc', collection: 'assets', id: fileId })
+        if (label === 'rust') {
+            await request(
+                'get-raw-file-data',
+                { op: 'getFileData', collection: 'assets', id: fileId },
+                { record: false }
+            )
+            await request(
+                'reshard-assets',
+                { op: 'reshardCollection', collection: 'assets', width: 2 },
+                { record: false }
+            )
+        }
         await request('verify-assets', { op: 'verifyCollection', collection: 'assets' })
 
         await request('rebuild-records', { op: 'rebuildCollection', collection: 'records' })
@@ -501,6 +517,8 @@ function normalizeHandshake(value) {
     delete normalized.capabilities?.documentBuckets
     delete normalized.capabilities?.machineAccess
     delete normalized.capabilities?.wholeRootBackup
+    delete normalized.dependencies?.chex?.requiredVersion
+    delete normalized.dependencies?.ttid?.requiredVersion
     return normalized
 }
 

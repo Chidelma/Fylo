@@ -3,7 +3,8 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const withWasm = process.argv.includes('--wasm')
+const engineOnly = process.argv.includes('--engine-only')
+const withWasm = process.argv.includes('--wasm') || engineOnly
 const bunVersion = (
     process.env.FYLO_BUN_VERSION ??
     (await readFile(new URL('../.bun-version', import.meta.url), 'utf8'))
@@ -14,45 +15,68 @@ if (Bun.version !== bunVersion) {
 }
 
 await mkdir(new URL('../dist-web/', import.meta.url), { recursive: true })
-await run('bun', [
-    'build',
-    './src/browser/index.js',
-    '--target=browser',
-    '--outfile',
-    './dist-web/fylo.mjs'
-])
-await run('bun', [
-    'build',
-    './src/browser/worker/shared.js',
-    '--target=browser',
-    '--outfile',
-    './dist-web/shared.js'
-])
-await run('bun', [
-    'build',
-    './src/browser/worker/dedicated.js',
-    '--target=browser',
-    '--outfile',
-    './dist-web/dedicated.js'
-])
+if (!engineOnly) {
+    await run('bun', [
+        'build',
+        './src/browser/index.js',
+        '--target=browser',
+        '--outfile',
+        './dist-web/fylo.mjs'
+    ])
+    await run('bun', [
+        'build',
+        './src/browser/worker/shared.js',
+        '--target=browser',
+        '--outfile',
+        './dist-web/shared.js'
+    ])
+    await run('bun', [
+        'build',
+        './src/browser/worker/dedicated.js',
+        '--target=browser',
+        '--outfile',
+        './dist-web/dedicated.js'
+    ])
+}
+
+// The index kernel accelerates queries beside the JavaScript core; the browser
+// engine is the whole engine. Both are wasm32-unknown-unknown, so they share
+// one toolchain setup.
+// The engine reaches `getrandom` through both 0.3 and 0.4 (aes-gcm pulls the
+// latter), and neither supports wasm32-unknown-unknown without a backend. Both
+// majors call the same `__getrandom_v03_custom` symbol, which `fylo-wasm`
+// exports over the host table, so one cfg covers them. It stays scoped to this
+// build: the index kernel has no such shim to satisfy the flag.
+const CUSTOM_ENTROPY = '--cfg getrandom_backend="custom"'
+
+const WASM_ARTIFACTS = [
+    ['fylo_browser_index.wasm', 'fylo-index.wasm', 'src/browser/wasm/Cargo.toml', ''],
+    ['fylo_wasm.wasm', 'fylo-browser.wasm', 'crates/fylo-wasm/Cargo.toml', CUSTOM_ENTROPY]
+]
 
 if (withWasm) {
-    await buildWasm()
-    await rm(new URL('../dist-web/fylo-index.wasm', import.meta.url), { force: true })
-    await cp(
-        new URL(
-            '../target/wasm32-unknown-unknown/release/fylo_browser_index.wasm',
-            import.meta.url
-        ),
-        new URL('../dist-web/fylo-index.wasm', import.meta.url)
+    const artifacts = engineOnly ? WASM_ARTIFACTS.slice(1) : WASM_ARTIFACTS
+    for (const [built, published, manifest, rustflags] of artifacts) {
+        await buildWasm(manifest, rustflags)
+        await rm(new URL(`../dist-web/${published}`, import.meta.url), { force: true })
+        await cp(
+            new URL(`../target/wasm32-unknown-unknown/release/${built}`, import.meta.url),
+            new URL(`../dist-web/${published}`, import.meta.url)
+        )
+    }
+}
+
+if (engineOnly) {
+    console.log('Built dist-web/fylo-browser.wasm')
+} else {
+    console.log(
+        `Built dist-web/fylo.mjs, shared.js, dedicated.js${
+            withWasm ? `, ${WASM_ARTIFACTS.map(([, published]) => published).join(', ')}` : ''
+        }`
     )
 }
 
-console.log(
-    `Built dist-web/fylo.mjs, shared.js, dedicated.js${withWasm ? ', fylo-index.wasm' : ''}`
-)
-
-async function buildWasm() {
+async function buildWasm(manifest, rustflags) {
     const toolchain = await rustToolchain()
     const rustc = await capture('rustup', ['which', 'rustc', '--toolchain', toolchain]).catch(
         async () => {
@@ -69,13 +93,17 @@ async function buildWasm() {
             'cargo',
             'build',
             '--manifest-path',
-            'src/browser/wasm/Cargo.toml',
+            manifest,
             '--release',
             '--target',
             'wasm32-unknown-unknown',
             '--locked'
         ],
-        { ...process.env, RUSTC: rustc.trim() }
+        {
+            ...process.env,
+            RUSTC: rustc.trim(),
+            RUSTFLAGS: [process.env.RUSTFLAGS, rustflags].filter(Boolean).join(' ')
+        }
     )
 }
 

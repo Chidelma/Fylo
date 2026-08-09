@@ -22,6 +22,7 @@
 
 import { spawn } from 'node:child_process'
 
+const MAX_SHARD_WIDTH = 4
 const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const MAX_FRAME_BYTES = 64 * 1024 * 1024
@@ -75,6 +76,20 @@ export class Fylo {
         )
         args.push('--max-request-bytes', String(this.maxRequestBytes))
         args.push('--max-response-bytes', String(this.maxResponseBytes))
+        // Engine knobs are constructor options, not inherited environment, so
+        // one process can drive two roots with different settings and a browser
+        // host can pass the same keys where no environment exists.
+        if (opts.strictSchema) args.push('--strict-schema')
+        if (opts.shardWidth !== undefined) {
+            if (
+                !Number.isInteger(opts.shardWidth) ||
+                opts.shardWidth < 0 ||
+                opts.shardWidth > MAX_SHARD_WIDTH
+            ) {
+                throw new TypeError(`shardWidth must be an integer from 0 to ${MAX_SHARD_WIDTH}`)
+            }
+            args.push('--shard-width', String(opts.shardWidth))
+        }
         this._proc = spawn(opts.binary ?? 'fylo', args, { stdio: ['pipe', 'pipe', 'inherit'] })
         this._queue = [] // pending { resolve, reject } in request order
         this._responseBuffer = Buffer.allocUnsafe(this.maxResponseBytes)

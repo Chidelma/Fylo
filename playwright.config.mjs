@@ -13,7 +13,9 @@ export default defineConfig({
         trace: 'retain-on-failure'
     },
     webServer: {
-        command: 'python3 -m http.server 4173 --bind 127.0.0.1',
+        // Cross-origin isolation, without which SharedArrayBuffer — and the
+        // Atomics bridge OPFS needs — does not exist.
+        command: 'node scripts/serve-isolated.mjs 4173 .',
         url: 'http://127.0.0.1:4173/tests/browser/fixtures/wasm-opfs.html',
         reuseExistingServer: true,
         timeout: 30_000

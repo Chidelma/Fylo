@@ -35,15 +35,15 @@ if (-not $Destination) {
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 Install-VerifiedGitHubBinary `
     -Repository 'd31ma/TTID' `
-    -Version 'v26.28.02' `
+    -Version 'v26.32.03' `
     -Asset 'ttid-windows-x64.exe' `
-    -ExpectedSha256 'b4beab399741b46a82d037cfef2b298418e7596245684aed91154aee8d6771aa' `
+    -ExpectedSha256 '41c06d2305e40ceb34baefc214610a869defc772501047e39c23427e0ff8565f' `
     -Executable 'ttid.exe'
 Install-VerifiedGitHubBinary `
     -Repository 'd31ma/CHEX' `
-    -Version 'v26.28.02' `
+    -Version 'v26.32.02' `
     -Asset 'chex-windows-x64.exe' `
-    -ExpectedSha256 'd00d48eeaf5f24fa39ec8dfc2f6963ab8ab1a38e20523e239bea63498815bd18' `
+    -ExpectedSha256 '3aa465447849d1f0d43318cd7c0e3c69a7db8cc06055a0c6ba0b4d53c24334bc' `
     -Executable 'chex.exe'
 
 $env:Path = "$Destination;$env:Path"

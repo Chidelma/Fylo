@@ -4,14 +4,15 @@
 //! acquires a writer lock. It rejects linked components below the canonical
 //! root and bounds every metadata, document, and index read.
 
+use fylo_vfs::{self as fs, File, Metadata};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{self, File, Metadata};
 use std::io::{Read, Take};
 use std::path::{Component, Path, PathBuf};
 
 use fylo_format::decode_ttid;
 use fylo_query::{IndexSnapshot, QueryLimits};
+#[cfg(not(target_family = "wasm"))]
 use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +21,8 @@ use sha2::{Digest, Sha256};
 mod lease;
 mod write;
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub use fylo_vfs::host_now_unix_ms;
 pub use lease::RootLease;
 pub use write::FAILPOINTS;
 pub use write::version::RepositoryStatus;
@@ -759,6 +762,24 @@ impl NativeRoot {
         Ok((file, opened))
     }
 
+    /// Prove the open handle still names the path it was opened from.
+    ///
+    /// The native check compares inode identity, which is what catches a
+    /// symlink or rename swapped in between `verify_path` and the read. No
+    /// WebAssembly target can answer it: a browser host has no inodes, and WASI
+    /// scopes the guest to preopened directories it cannot escape or symlink
+    /// out of. The path check alone is the guarantee there (ADR 0008).
+    #[cfg(target_family = "wasm")]
+    fn verify_open_file_identity(
+        &self,
+        path: &Path,
+        _file: &File,
+    ) -> Result<(), NativeStorageError> {
+        self.verify_path(path, ExpectedType::File)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     fn verify_open_file_identity(
         &self,
         path: &Path,
@@ -1039,7 +1060,7 @@ impl NativeCollection {
         Ok(state)
     }
 
-    /// List validated live document identifiers in lexical path order.
+    /// List validated live document identifiers in ascending TTID order.
     ///
     /// # Errors
     ///
@@ -1125,6 +1146,13 @@ impl NativeCollection {
                 ids.push(identifier.to_owned());
             }
         }
+        // Directory order is (shard, identifier), and ADR 0006 made the shard
+        // the identifier's *trailing* characters. While it was the leading
+        // ones the two orders coincided and this sort was invisible; now they
+        // do not, and the `ttid-binary-ascending` ordering the handshake
+        // advertises — and every query cursor depends on — has to be restored
+        // explicitly. Raw files already sort: they collect into a `BTreeSet`.
+        ids.sort();
         Ok(ids)
     }
 
@@ -1307,7 +1335,6 @@ impl NativeCollection {
         Ok(StoredBytes {
             bytes,
             modified_millis: modified_millis(&metadata)?,
-            modified_millis_exact: modified_millis_f64(&metadata)?,
             access: decode_access_descriptor(&attributes)?,
             path,
         })
@@ -1378,7 +1405,6 @@ impl NativeCollection {
         self.root.verify_open_file_identity(&path, &file)?;
         let computed_checksum = sha256_hex(&bytes);
         let modified_millis = modified_millis(&metadata)?;
-        let modified_millis_exact = modified_millis_f64(&metadata)?;
         let checksum_sha256 = cached_checksum(
             attributes.get(CHECKSUM_XATTR),
             metadata.len(),
@@ -1394,7 +1420,6 @@ impl NativeCollection {
             custom_metadata,
             access_descriptor,
             modified_millis,
-            modified_millis_exact,
             access: native_access(&metadata),
             path,
         })
@@ -1425,6 +1450,12 @@ impl NativeCollection {
         for entry in read_dir_sorted(&shard)? {
             let path = entry.path();
             let filename = path_utf8_name(&path, "raw-file")?;
+            // A record's sidecar shares its identifier prefix, so the same
+            // rule the enumerators use has to apply here or the resolver picks
+            // the sidecar and rejects its extension.
+            if is_scratch_file(filename) {
+                continue;
+            }
             if raw_file_identifier(filename) != Some(identifier) {
                 continue;
             }
@@ -1612,11 +1643,8 @@ impl NativeCollection {
 pub struct StoredBytes {
     /// Document bytes.
     pub bytes: Vec<u8>,
-    /// Filesystem modification time in Unix milliseconds.
+    /// Filesystem modification time in whole Unix milliseconds.
     pub modified_millis: u64,
-    /// Filesystem modification time with the same fractional-millisecond
-    /// precision exposed by JavaScript `fs.stat().mtimeMs`.
-    pub modified_millis_exact: f64,
     /// Optional portable FYLO access descriptor.
     pub access: Option<AccessDescriptor>,
     /// Verified native path.
@@ -1640,11 +1668,8 @@ pub struct StoredRawFile {
     pub custom_metadata: BTreeMap<String, Value>,
     /// Optional portable FYLO access descriptor.
     pub access_descriptor: Option<AccessDescriptor>,
-    /// Filesystem modification time in Unix milliseconds.
+    /// Filesystem modification time in whole Unix milliseconds.
     pub modified_millis: u64,
-    /// Filesystem modification time with the sub-millisecond precision exposed
-    /// by JavaScript `fs.stat().mtimeMs`.
-    pub modified_millis_exact: f64,
     /// Native owner, group, and mode where the platform exposes them.
     pub access: NativeAccess,
     /// Verified native path.
@@ -1889,6 +1914,9 @@ pub enum NativeStorageErrorCode {
     RootLeaseLost,
     /// A SQL mutation was malformed or used an unsupported execution shape.
     InvalidQuery,
+    /// A record write targeted a collection whose recorded shard width differs
+    /// from the one this process is configured for.
+    ShardWidth,
     /// The preview does not support the requested collection/operation.
     Unsupported,
 }
@@ -1913,6 +1941,7 @@ impl NativeStorageErrorCode {
             Self::RootLocked => "EROOTLOCKED",
             Self::RootLeaseLost => "EROOTLEASELOST",
             Self::InvalidQuery => "EQUERY_INVALID",
+            Self::ShardWidth => "ESHARDWIDTH",
             Self::Unsupported => "ENATIVE_UNSUPPORTED",
         }
     }
@@ -1967,7 +1996,7 @@ impl std::error::Error for NativeStorageError {
 #[cfg(unix)]
 fn read_fylo_attributes(
     file: &File,
-    _path: &Path,
+    path: &Path,
 ) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
     use xattr::FileExt;
 
@@ -2014,6 +2043,15 @@ fn read_fylo_attributes(
         }
         attributes.insert(name.to_owned(), value);
     }
+    // A record written where extended attributes do not exist carries them in
+    // a sidecar instead. File System Access lets a browser write into a real
+    // folder the user picked, so that folder can arrive here — and without
+    // this fallback its raw files are unreadable, because the logical `key` is
+    // required. Only consulted when the record has no FYLO xattrs of its own,
+    // so a native record is never shadowed by a stray file.
+    if attributes.is_empty() {
+        return read_sidecar_attributes(&sidecar_path(path));
+    }
     Ok(attributes)
 }
 
@@ -2030,7 +2068,9 @@ fn read_fylo_attributes(
     let stream = PathBuf::from(stream);
     let metadata = match fs::metadata(&stream) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return read_sidecar_attributes(&sidecar_path(path));
+        }
         Err(error) => return Err(NativeStorageError::io(error)),
     };
     if metadata.len() > MAX_WINDOWS_ADS_MANIFEST_BYTES {
@@ -2039,13 +2079,93 @@ fn read_fylo_attributes(
             "Windows FYLO ADS manifest exceeds 16 MiB",
         ));
     }
-    let encoded: BTreeMap<String, String> = serde_json::from_slice(
-        &fs::read(stream).map_err(NativeStorageError::io)?,
-    )
-    .map_err(|error| {
+    decode_attribute_manifest(&fs::read(stream).map_err(NativeStorageError::io)?)
+}
+
+/// Read one record's attributes from its sidecar.
+///
+/// WebAssembly has no extended attributes under WASI and none in a browser, so
+/// the attributes FYLO would otherwise hang off the inode live in a sibling
+/// file. The encoding is the one Windows already uses for its alternate data
+/// stream — a JSON map of name to base64 value — so the three platforms differ
+/// only in where the manifest is kept, not in what it says.
+/// Read one record's attributes from its sidecar.
+///
+/// WebAssembly has no extended attributes under WASI and none in a browser, so
+/// the attributes FYLO would otherwise hang off the inode live in a sibling
+/// file. The encoding is the one Windows already uses for its alternate data
+/// stream — a JSON map of name to base64 value — so the three platforms differ
+/// only in where the manifest is kept, not in what it says.
+#[cfg(all(
+    not(unix),
+    not(windows),
+    not(all(target_arch = "wasm32", target_os = "unknown"))
+))]
+fn read_fylo_attributes(
+    _file: &File,
+    path: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
+    read_sidecar_attributes(&sidecar_path(path))
+}
+
+/// Read one record's attributes from the host.
+///
+/// A browser stores nothing beside the record: the host owns the manifest and
+/// decides where it lives, so a root can hold one manifest rather than a file
+/// per record. The bytes are the same JSON-and-base64 map every other platform
+/// uses, so the engine's view of an attribute never changes.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn read_fylo_attributes(
+    _file: &File,
+    path: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
+    let manifest = fylo_vfs::host_read_attrs(path).map_err(NativeStorageError::io)?;
+    decode_attribute_manifest(&manifest)
+}
+
+/// Decode one attribute sidecar into the same map an xattr read produces.
+///
+/// Shared rather than per-platform: a root written by a browser or WASI build
+/// carries its attributes here, and a native binary opening that same folder —
+/// which File System Access makes possible, since the user picks a real
+/// directory — has to be able to read them.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn read_sidecar_attributes(
+    sidecar: &Path,
+) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
+    const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
+    let metadata = match fs::symlink_metadata(sidecar) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(NativeStorageError::io(error)),
+    };
+    if !metadata.is_file() {
+        return Ok(BTreeMap::new());
+    }
+    if metadata.len() > MAX_SIDECAR_BYTES {
+        return Err(NativeStorageError::new(
+            NativeStorageErrorCode::FileTooLarge,
+            "FYLO attribute sidecar exceeds 16 MiB",
+        ));
+    }
+    decode_attribute_manifest(&fs::read(sidecar).map_err(NativeStorageError::io)?)
+}
+
+/// Decode a JSON-and-base64 attribute manifest, wherever it was stored.
+///
+/// Windows keeps it in an alternate data stream, a WASI root keeps it in a
+/// sidecar file, and a browser host keeps it wherever it likes. The engine's
+/// view of an attribute is the same in all three.
+fn decode_attribute_manifest(
+    manifest: &[u8],
+) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
+    if manifest.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let encoded: BTreeMap<String, String> = serde_json::from_slice(manifest).map_err(|error| {
         NativeStorageError::new(
             NativeStorageErrorCode::CorruptMetadata,
-            format!("Windows FYLO ADS manifest is corrupt: {error}"),
+            format!("FYLO attribute manifest is corrupt: {error}"),
         )
     })?;
     encoded
@@ -2065,17 +2185,6 @@ fn read_fylo_attributes(
                 })
         })
         .collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn read_fylo_attributes(
-    _file: &File,
-    _path: &Path,
-) -> Result<BTreeMap<String, Vec<u8>>, NativeStorageError> {
-    Err(NativeStorageError::new(
-        NativeStorageErrorCode::Unsupported,
-        "FYLO native metadata is unavailable on this platform",
-    ))
 }
 
 fn required_utf8_attribute(
@@ -2342,10 +2451,9 @@ fn native_access(_metadata: &Metadata) -> NativeAccess {
     }
 }
 
-#[cfg(windows)]
 fn decode_base64(encoded: &str) -> Result<Vec<u8>, &'static str> {
     if !encoded.len().is_multiple_of(4) {
-        return Err("Windows FYLO ADS manifest contains invalid base64");
+        return Err("FYLO attribute manifest contains invalid base64");
     }
     let mut output = Vec::with_capacity(encoded.len() / 4 * 3);
     let quartets = encoded.as_bytes().chunks_exact(4);
@@ -2381,7 +2489,6 @@ fn decode_base64(encoded: &str) -> Result<Vec<u8>, &'static str> {
     Ok(output)
 }
 
-#[cfg(windows)]
 fn base64_value(byte: u8) -> Result<u8, &'static str> {
     match byte {
         b'A'..=b'Z' => Ok(byte - b'A'),
@@ -2445,45 +2552,178 @@ fn validate_version_hash(hash: &str) -> Result<(), NativeStorageError> {
     }
 }
 
-/// Default shard width for a collection whose descriptor records none.
-pub const DEFAULT_SHARD_WIDTH: u32 = 2;
-/// Widest shard a collection may use.
-pub const MAX_SHARD_WIDTH: u32 = 4;
-
-/// Shard width for a collection that does not exist yet.
+/// Flush one file or directory handle to the filesystem.
 ///
-/// Deliberately not consulted for an existing collection: the layout is a
-/// property of the root, so letting a per-process variable decide it would let
-/// two processes disagree and relocate every record back and forth. Reading it
-/// here is what keeps a natively created collection legible to the JavaScript
-/// engine, which reads the same variable.
+/// Everywhere except Apple this is [`File::sync_all`]. On Apple platforms
+/// `sync_all` is `fcntl(F_FULLFSYNC)` — a full drive-cache flush measured at
+/// 5.7 ms per call on APFS against 0.06 ms for `fsync`. A single document
+/// write issues more than a dozen flushes, so the Rust cutover silently
+/// bought a stronger durability primitive than the JavaScript runtime it
+/// replaced and paid ~14x write latency for it. This restores the flush
+/// v26.30.06 performed: it survives process death, not power loss.
 ///
 /// # Errors
 ///
-/// Returns an error when the variable is set to something that is not an
-/// integer within range.
-pub fn configured_shard_width() -> Result<u32, NativeStorageError> {
-    let Ok(raw) = std::env::var("FYLO_SHARD_WIDTH") else {
-        return Ok(DEFAULT_SHARD_WIDTH);
-    };
-    if raw.is_empty() {
-        return Ok(DEFAULT_SHARD_WIDTH);
+/// Returns the underlying flush failure.
+#[cfg(target_vendor = "apple")]
+pub(crate) fn sync_handle(file: &File) -> std::io::Result<()> {
+    rustix::fs::fsync(file).map_err(std::io::Error::from)
+}
+
+/// Flush one file or directory handle to the filesystem.
+///
+/// # Errors
+///
+/// Returns the underlying flush failure.
+#[cfg(not(target_vendor = "apple"))]
+pub(crate) fn sync_handle(file: &File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
+/// The wall clock, from `std` or from the host where `std` has none.
+///
+/// `SystemTime::now` panics rather than fails on `wasm32-unknown-unknown`, and
+/// a panic in a module with no stdio reaches the embedder as a bare trap. One
+/// helper means one place to answer that, and it returns the same type so no
+/// caller changes shape.
+#[must_use]
+pub fn wall_clock() -> std::time::SystemTime {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let millis = fylo_vfs::host_now_unix_ms().unwrap_or(0);
+        std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis)
     }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        std::time::SystemTime::now()
+    }
+}
+
+/// Runtime knobs a host supplies when it opens a root.
+///
+/// These were process environment variables, which only a process has. A
+/// browser or mobile host has no environment, so every knob is now an explicit
+/// value and the environment is consulted at exactly one place — the CLI
+/// composition root, through [`RootConfig::from_env`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RootConfig {
+    /// Validate a document against its collection's head schema on write.
+    ///
+    /// The JavaScript engine stamped `_v` only under `FYLO_STRICT`, so this
+    /// stays opt-in: an unconditional stamp would make one put produce
+    /// different bytes in the two engines.
+    pub strict_schema: bool,
+    /// Shard width for collections that do not exist yet.
+    ///
+    /// Never consulted for a collection that already exists: the layout is a
+    /// property of the root, so letting a per-host value decide would let two
+    /// hosts disagree and relocate every record back and forth.
+    pub shard_width: Option<u32>,
+}
+
+impl RootConfig {
+    /// Read the knobs from the process environment.
+    ///
+    /// Only a composition root should call this. On a host without an
+    /// environment — WebAssembly included — every read fails and the default
+    /// applies, which is the same answer an unset variable gives natively.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `FYLO_SHARD_WIDTH` is set to something that is not
+    /// an integer within range.
+    pub fn from_env() -> Result<Self, NativeStorageError> {
+        Ok(Self {
+            strict_schema: std::env::var("FYLO_STRICT").is_ok_and(|value| !value.is_empty()),
+            shard_width: match std::env::var("FYLO_SHARD_WIDTH") {
+                Ok(raw) if !raw.is_empty() => Some(parse_shard_width(&raw)?),
+                _ => None,
+            },
+        })
+    }
+}
+
+/// This process's identifier, or zero where the platform has none.
+///
+/// `std::process::id` panics on WebAssembly rather than failing, and a lock
+/// record carries the pid only so a later reader can ask whether the owner is
+/// still alive. A platform with no pids also has no way to answer that, so zero
+/// is the honest value and `lock_owner_alive` already treats an unverifiable
+/// owner as stale.
+#[must_use]
+pub fn process_id() -> u32 {
+    #[cfg(target_family = "wasm")]
+    {
+        0
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::id()
+    }
+}
+
+/// Default shard width for a collection whose descriptor records none.
+///
+/// One character is 36 buckets. Sharding exists to stop a single directory
+/// growing unbounded, and enumeration costs one `read_dir` per shard, so a
+/// width past what the record count needs is pure overhead: measured on 400
+/// documents, width 2 produced 303 directories holding 1.3 records each and
+/// took 2.3x as long to walk as width 1's 18. Collections that outgrow 36
+/// buckets set their own width; `reshard` moves them without changing identity.
+pub const DEFAULT_SHARD_WIDTH: u32 = 1;
+
+/// The default before it became 1.
+///
+/// A descriptor that pins no width falls back to whatever the default is, so
+/// changing it moves those collections. Keeping the previous default as a read
+/// candidate means a root written under it still resolves.
+const PREVIOUS_DEFAULT_SHARD_WIDTH: u32 = 2;
+/// Narrowest shard a collection may use.
+///
+/// Zero was once allowed as a "flat" collection with no shard directory, but
+/// nothing could read one back: enumeration walks `docs/` expecting each entry
+/// to be a shard directory and refuses a file, so a flat collection accepted
+/// writes and then failed every read, `rebuildCollection` included. It is
+/// refused at the boundary rather than fixed because it is the exact failure
+/// ADR 0006 exists to remove — one unbounded directory.
+pub const MIN_SHARD_WIDTH: u32 = 1;
+/// Widest shard a collection may use.
+pub const MAX_SHARD_WIDTH: u32 = 4;
+
+/// Parse and range-check one host-supplied shard width.
+///
+/// # Errors
+///
+/// Returns an error when the value is not an integer within range.
+pub fn parse_shard_width(raw: &str) -> Result<u32, NativeStorageError> {
     let parsed = raw.parse::<u32>().map_err(|_| {
         NativeStorageError::new(
             NativeStorageErrorCode::CorruptMetadata,
-            format!("FYLO_SHARD_WIDTH must be an integer from 0 to {MAX_SHARD_WIDTH}: {raw}"),
+            format!(
+                "shard width must be an integer from {MIN_SHARD_WIDTH} to {MAX_SHARD_WIDTH}: {raw}"
+            ),
         )
     })?;
     validate_shard_width(Some(parsed))
 }
 
+/// Validate a host-supplied width, falling back to the default when unset.
+///
+/// # Errors
+///
+/// Returns an error when the width is outside the supported range.
+pub fn validated_shard_width(width: Option<u32>) -> Result<u32, NativeStorageError> {
+    validate_shard_width(width)
+}
+
 fn validate_shard_width(width: Option<u32>) -> Result<u32, NativeStorageError> {
     let width = width.unwrap_or(DEFAULT_SHARD_WIDTH);
-    if width > MAX_SHARD_WIDTH {
+    if !(MIN_SHARD_WIDTH..=MAX_SHARD_WIDTH).contains(&width) {
         return Err(NativeStorageError::new(
             NativeStorageErrorCode::CorruptMetadata,
-            format!("collection shard width must be 0 to {MAX_SHARD_WIDTH}: {width}"),
+            format!(
+                "collection shard width must be {MIN_SHARD_WIDTH} to {MAX_SHARD_WIDTH}: {width}"
+            ),
         ));
     }
     Ok(width)
@@ -2502,9 +2742,6 @@ fn validate_shard_width(width: Option<u32>) -> Result<u32, NativeStorageError> {
 /// would move a record between directories when it is updated or deleted.
 #[must_use]
 pub fn shard_of(identifier: &str, width: u32) -> String {
-    if width == 0 {
-        return String::new();
-    }
     let created = creation_segment(identifier);
     let width = width as usize;
     let shard: String = created
@@ -2565,9 +2802,15 @@ pub fn shard_candidates(identifier: &str, width: u32, previous: &[u32]) -> Vec<S
             candidates.push(shard);
         }
     }
-    let legacy = legacy_shard_of(identifier);
-    if !candidates.contains(&legacy) {
-        candidates.push(legacy);
+    // Covers a descriptor that pins no width and was written while the default
+    // was 2; the layout superseded by ADR 0006 is always last.
+    for fallback in [
+        shard_of(identifier, PREVIOUS_DEFAULT_SHARD_WIDTH),
+        legacy_shard_of(identifier),
+    ] {
+        if !candidates.contains(&fallback) {
+            candidates.push(fallback);
+        }
     }
     candidates
 }
@@ -2617,6 +2860,31 @@ fn validate_ttid_shape(identifier: &str) -> Result<(), NativeStorageError> {
     Ok(())
 }
 
+/// Reject an identifier that is valid but not canonically spelled.
+///
+/// TTID matches identifiers case-insensitively and only ever emits uppercase,
+/// so one identifier has many accepted spellings. FYLO names a file after it:
+/// two spellings are one record on a case-insensitive filesystem and two on a
+/// case-sensitive one, which makes the record count depend on the host. The
+/// caller is told rather than silently rewritten — `getDoc` should return the
+/// identifier that was asked for, and `ttid canonicalize` is the repair.
+///
+/// Only applied where an identifier first becomes a file. Reading, patching,
+/// and enumerating stay lenient so a root written before this still opens.
+fn validate_canonical_ttid(identifier: &str) -> Result<(), NativeStorageError> {
+    validate_ttid_shape(identifier)?;
+    if identifier.bytes().any(|byte| byte.is_ascii_lowercase()) {
+        return Err(NativeStorageError::new(
+            NativeStorageErrorCode::InvalidDocumentId,
+            format!(
+                "FYLO document identifier is not canonical: {identifier} (expected {})",
+                identifier.to_ascii_uppercase()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn path_exists_no_follow(path: &Path) -> Result<bool, NativeStorageError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -2655,6 +2923,23 @@ fn is_scratch_file(name: &str) -> bool {
     Path::new(name)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+        || name.ends_with(SIDECAR_SUFFIX)
+}
+
+/// Suffix of the attribute sidecar a platform without extended attributes
+/// writes beside each record.
+///
+/// Enumeration must skip it or the sidecar would be read back as a record of
+/// its own, so [`is_scratch_file`] — which every enumerator already consults —
+/// owns the rule rather than each caller repeating it.
+pub const SIDECAR_SUFFIX: &str = ".fylo-attrs";
+
+/// Path of one record's attribute sidecar.
+#[must_use]
+pub fn sidecar_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(SIDECAR_SUFFIX);
+    PathBuf::from(name)
 }
 
 fn modified_millis(metadata: &Metadata) -> Result<u64, NativeStorageError> {
@@ -2674,21 +2959,6 @@ fn modified_millis(metadata: &Metadata) -> Result<u64, NativeStorageError> {
             "file modification time exceeds u64 milliseconds",
         )
     })
-}
-
-#[allow(clippy::cast_precision_loss)] // JavaScript fs.stat().mtimeMs is an f64.
-fn modified_millis_f64(metadata: &Metadata) -> Result<f64, NativeStorageError> {
-    let duration = metadata
-        .modified()
-        .map_err(NativeStorageError::io)?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| {
-            NativeStorageError::new(
-                NativeStorageErrorCode::CorruptMetadata,
-                format!("file modification time predates the Unix epoch: {error}"),
-            )
-        })?;
-    Ok(duration.as_secs() as f64 * 1000.0 + f64::from(duration.subsec_nanos()) / 1_000_000.0)
 }
 
 #[cfg(windows)]
@@ -2721,7 +2991,7 @@ fn directory_contains_exact_name(
 mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::UNIX_EPOCH;
 
     use super::*;
 
@@ -2734,15 +3004,10 @@ mod tests {
         }
 
         fn create_named(prefix: &str) -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
+            let nonce = wall_clock().duration_since(UNIX_EPOCH).unwrap().as_nanos();
             let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "{prefix}-{}-{nonce}-{sequence}",
-                std::process::id()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("{prefix}-{}-{nonce}-{sequence}", process_id()));
             fs::create_dir_all(path.join(".collections/users/docs/4V")).unwrap();
             fs::create_dir_all(path.join(".collections/users/index")).unwrap();
             fs::write(

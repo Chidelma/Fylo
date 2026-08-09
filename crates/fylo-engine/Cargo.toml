@@ -13,7 +13,6 @@ boa_engine.workspace = true
 fylo-format = { version = "0.1.0", path = "../fylo-format" }
 fylo-query = { version = "0.1.0", path = "../fylo-query" }
 fylo-storage-native = { version = "0.1.0", path = "../fylo-storage-native" }
-getrandom.workspace = true
 hmac.workspace = true
 pbkdf2.workspace = true
 serde.workspace = true
@@ -23,6 +22,16 @@ zeroize.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 xattr.workspace = true
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+getrandom.workspace = true
+
+# A browser build takes entropy from the host VFS table rather than from Web
+# Crypto through a binding generator, so no `wasm_js` feature is enabled: it
+# would put `__wbindgen_placeholder__` imports in the module and oblige every
+# embedder to ship JavaScript glue. See `fylo-wasm`'s `__getrandom_v03_custom`.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom.workspace = true
 
 [lints]
 workspace = true

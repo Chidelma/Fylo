@@ -11,11 +11,15 @@ publish = false
 fylo-engine = { version = "0.1.0", path = "../fylo-engine" }
 fylo-query = { version = "0.1.0", path = "../fylo-query" }
 fylo-storage-native = { version = "0.1.0", path = "../fylo-storage-native" }
+fylo-vfs = { version = "0.1.0", path = "../fylo-vfs" }
 base64.workspace = true
-reqwest.workspace = true
-rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# A browser build uses the host's fetch, so it carries no TLS client.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest.workspace = true
+rustls.workspace = true
 
 [lints]
 workspace = true

@@ -70,20 +70,19 @@ class TTID {
 }
 
 // src/core/shard.js
-var DEFAULT_SHARD_WIDTH = 2;
+var DEFAULT_SHARD_WIDTH = 1;
+var MIN_SHARD_WIDTH = 1;
 var MAX_SHARD_WIDTH = 4;
 function shardOf(id, width = DEFAULT_SHARD_WIDTH) {
   const shard = assertShardWidth(width);
-  if (shard === 0)
-    return "";
   return creationSegment(id).slice(-shard).padStart(shard, "0");
 }
 function legacyShardOf(id) {
   return creationSegment(id).slice(0, 2);
 }
 function assertShardWidth(width) {
-  if (!Number.isInteger(width) || Number(width) < 0 || Number(width) > MAX_SHARD_WIDTH) {
-    throw new Error(`Shard width must be an integer from 0 to ${MAX_SHARD_WIDTH}: ${String(width)}`);
+  if (!Number.isInteger(width) || Number(width) < MIN_SHARD_WIDTH || Number(width) > MAX_SHARD_WIDTH) {
+    throw new Error(`Shard width must be an integer from ${MIN_SHARD_WIDTH} to ${MAX_SHARD_WIDTH}: ${String(width)}`);
   }
   return Number(width);
 }

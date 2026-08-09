@@ -6,8 +6,8 @@
 //! moved. The incremental hinted path is a performance optimization of the
 //! same result, so the full scan is byte-compatible with it.
 
+use fylo_vfs as fs;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -1687,7 +1687,7 @@ fn copy_extended_metadata(source: &Path, target: &Path) -> Result<(), NativeStor
         .open(PathBuf::from(target_stream))
         .map_err(NativeStorageError::io)?;
     file.write_all(&bytes).map_err(NativeStorageError::io)?;
-    file.sync_all().map_err(NativeStorageError::io)?;
+    crate::sync_handle(&file).map_err(NativeStorageError::io)?;
     super::restore_modified(target, &recorded)
 }
 
@@ -1715,7 +1715,8 @@ fn unsafe_repository_path() -> NativeStorageError {
 
 fn safe_relative_path(path: &str) -> Result<PathBuf, NativeStorageError> {
     let path = Path::new(path);
-    if path.is_absolute()
+    if path.has_root()
+        || path.is_absolute()
         || path
             .components()
             .any(|component| !matches!(component, std::path::Component::Normal(_)))
@@ -1859,7 +1860,7 @@ fn apply_metadata_blob(target: &Path, bytes: &[u8]) -> Result<(), NativeStorageE
         .open(PathBuf::from(stream))
         .map_err(NativeStorageError::io)?;
     file.write_all(&encoded).map_err(NativeStorageError::io)?;
-    file.sync_all().map_err(NativeStorageError::io)?;
+    crate::sync_handle(&file).map_err(NativeStorageError::io)?;
     super::restore_modified(target, &recorded)
 }
 
