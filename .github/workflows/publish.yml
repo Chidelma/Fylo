@@ -515,9 +515,15 @@ jobs:
                   path: release-assets
 
             - name: Build local-first web bundle
+              env:
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_BUILD_KIND: release
               run: bun run build:web:wasm
 
             - name: Build WASI engine
+              env:
+                  FYLO_BUILD_COMMIT: ${{ github.sha }}
+                  FYLO_BUILD_KIND: release
               run: |
                   set -euo pipefail
                   # run-rust.mjs pins the toolchain but does not add targets, and
