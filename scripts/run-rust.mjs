@@ -44,10 +44,19 @@ async function rustupWhich(binary) {
         let output = ''
         child.stdout.on('data', (chunk) => (output += chunk))
         child.once('error', reject)
-        child.once('exit', (code) =>
-            code === 0
-                ? resolve(output.trim())
-                : reject(new Error(`rustup which ${binary} exited with ${code}`))
-        )
+        child.once('close', (code) => {
+            if (code !== 0) {
+                reject(new Error(`rustup which ${binary} exited with ${code}`))
+                return
+            }
+
+            const resolved = output.trim()
+            if (!resolved) {
+                reject(new Error(`rustup which ${binary} returned an empty path`))
+                return
+            }
+
+            resolve(resolved)
+        })
     })
 }

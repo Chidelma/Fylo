@@ -41,6 +41,13 @@ describe('Rust CI qualification contract', () => {
         expect(workflow).toContain('RUSTDOCFLAGS: -D warnings')
     })
 
+    test('the pinned Rust launcher waits for captured paths and rejects empty output', async () => {
+        const launcher = await Bun.file('scripts/run-rust.mjs').text()
+
+        expect(launcher).toContain("child.once('close', (code) =>")
+        expect(launcher).toContain('rustup which ${binary} returned an empty path')
+    })
+
     test('supply-chain, coverage, and provenance tools are exact and retained', async () => {
         const [manifest, workflow] = await Promise.all([
             Bun.file('package.json').json(),
