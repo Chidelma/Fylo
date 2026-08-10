@@ -1,6 +1,7 @@
 name: CI
 
 on:
+    workflow_call:
     push:
         branches: [main, codex/rust-rewrite]
     pull_request:
@@ -13,7 +14,11 @@ permissions:
 
 concurrency:
     group: ci-${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    cancel-in-progress: true
+
+env:
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: '1'
 
 jobs:
     quality:
@@ -23,7 +28,7 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Setup Bun
               uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -47,12 +52,18 @@ jobs:
                   bun run predicate:verify
                   bun run sql:verify
 
-            - name: Check formatting, Clippy, and tests
+            - name: Check formatting, compilation, Clippy, and tests
               run: |
                   bun run rust:fmt
+                  bun run rust:check
                   bun run rust:clippy
                   bun run rust:test
                   bun ./scripts/run-rust.mjs cargo build --locked -p fylo-cli --bin fylo-rust
+
+            - name: Build warning-free public documentation
+              run: bun run rust:doc
+              env:
+                  RUSTDOCFLAGS: -D warnings
 
             - name: Check JavaScript host and client surfaces
               run: |
@@ -60,11 +71,100 @@ jobs:
                   bun run lint
                   bun test tests/browser/*.test.js --timeout 120000 --parallel=1
 
-            - name: Install cargo-deny
-              run: bun ./scripts/run-rust.mjs cargo install cargo-deny --version 0.19.4 --locked
+    supply-chain:
+        name: Dependency, license, and source policy
+        runs-on: ubuntu-24.04
+        timeout-minutes: 25
 
-            - name: Check dependency policy
+        steps:
+            - name: Checkout
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
+            - name: Install pinned cargo-deny
+              run: bun ./scripts/run-rust.mjs cargo install cargo-deny --version 0.19.7 --locked
+
+            - name: Check dependency, license, advisory, and source policy
               run: bun run rust:deny
+
+    coverage:
+        name: Rust workspace coverage ratchet
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install pinned coverage support
+              run: |
+                  set -euo pipefail
+                  toolchain=$(grep -oE 'channel *= *"[^"]+"' rust-toolchain.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+                  rustup component add llvm-tools-preview --toolchain "$toolchain"
+                  bun ./scripts/run-rust.mjs cargo install cargo-llvm-cov --version 0.8.6 --locked
+
+            - name: Enforce the measured whole-workspace coverage floor
+              run: bun run rust:coverage
+
+            - name: Retain machine-readable coverage evidence
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: rust-coverage-${{ github.sha }}
+                  path: target/coverage.lcov
+                  if-no-files-found: error
+                  retention-days: 90
+
+    provenance:
+        name: SBOM and auditable binary evidence
+        runs-on: ubuntu-24.04
+        timeout-minutes: 35
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+              with:
+                  bun-version-file: .bun-version
+
+            - name: Install pinned Rust toolchain
+              run: rustup show active-toolchain
+
+            - name: Install pinned SBOM and auditable-build tools
+              run: |
+                  bun ./scripts/run-rust.mjs cargo install cargo-cyclonedx --version 0.5.7 --locked
+                  bun ./scripts/run-rust.mjs cargo install cargo-auditable --version 0.7.0 --locked
+
+            - name: Generate CycloneDX bills of materials
+              run: bun ./scripts/run-rust.mjs cargo cyclonedx --all --format json
+
+            - name: Build a release executable with its dependency list embedded
+              run: >-
+                  bun ./scripts/run-rust.mjs cargo auditable build
+                  --release --locked -p fylo-cli --bin fylo-rust
+
+            - name: Retain provenance inputs
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+              with:
+                  name: rust-provenance-${{ github.sha }}
+                  path: |
+                      **/*.cdx.json
+                      target/release/fylo-rust
+                  if-no-files-found: error
+                  retention-days: 90
 
     portable-artifacts:
         name: Portable WASI and browser artifacts
@@ -73,7 +173,7 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Setup Bun
               uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -135,7 +235,7 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Setup Bun
               uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -235,7 +335,7 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Setup Bun
               uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -280,7 +380,7 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Setup Bun
               uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -348,7 +448,7 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Install pinned Miri toolchain
               run: |

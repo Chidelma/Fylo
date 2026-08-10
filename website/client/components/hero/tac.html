@@ -1,35 +1,40 @@
 <section class="hero" aria-labelledby="hero-heading">
-  <div class="w-container w-container--lg hero-inner">
-    <h1 id="hero-heading">
-      <span class="hero-grad">The document store</span>
-      <span class="hero-plain">that speaks your language.</span>
-    </h1>
+    <div class="w-container w-container--lg hero-inner">
+        <h1 id="hero-heading">
+            <span class="hero-grad">The document store</span>
+            <span class="hero-plain">that speaks your language.</span>
+        </h1>
 
-    <p class="hero-sub">
-      One canonical JSON file per document. Zero-payload prefix indexes. Git-like version control
-      for your data. If an index ever drifts, FYLO rebuilds it from the documents — files are
-      always the source of truth.
-    </p>
+        <p class="hero-sub">
+            One canonical JSON file per document. Zero-payload prefix indexes. Git-like version
+            control for your data. If an index ever drifts, FYLO rebuilds it from the documents —
+            files are always the source of truth.
+        </p>
 
-    <div class="hero-install" role="button" tabindex="0" on:click="copyInstall()" aria-label="Copy install command">
-      <span class="hero-prompt" aria-hidden="true">❯</span>
-      <code class="hero-cmd">{installCmd}</code>
-      <logic :if="installCopied">
-        <span class="hero-copied">copied ✓</span>
-      </logic><logic else="">
-        <span class="hero-copy-hint">copy</span>
-      </logic>
+        <div
+            class="hero-install"
+            role="button"
+            tabindex="0"
+            on:click="copyInstall()"
+            aria-label="Copy install command"
+        >
+            <span class="hero-prompt" aria-hidden="true">❯</span>
+            <code class="hero-cmd">{installCmd}</code>
+            <span class="hero-copy-hint">copy</span>
+        </div>
+
+        <div class="hero-actions">
+            <a class="w-btn w-btn-filled w-btn--lg" href="/download"
+                >Download <span aria-hidden="true">→</span></a
+            >
+            <a class="w-btn w-btn-outlined w-btn--lg" href="/docs">Get started</a>
+        </div>
+
+        <div class="hero-ticks" role="list">
+            <span class="hero-tick" role="listitem">✓ Filesystem-first</span>
+            <span class="hero-tick" role="listitem">✓ Zero native addons</span>
+            <span class="hero-tick" role="listitem">✓ One self-contained binary</span>
+            <span class="hero-tick" role="listitem">✓ 13 language clients included</span>
+        </div>
     </div>
-
-    <div class="hero-actions">
-      <a class="w-btn w-btn-filled w-btn--lg" href="/download">Download <span aria-hidden="true">→</span></a>
-      <a class="w-btn w-btn-outlined w-btn--lg" href="/docs">Get started</a>
-    </div>
-
-    <div class="hero-ticks" role="list">
-      <loop :for="let tick of ticks">
-        <span class="hero-tick" role="listitem">✓ {tick}</span>
-      </loop>
-    </div>
-  </div>
 </section>

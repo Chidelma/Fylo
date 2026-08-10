@@ -9,13 +9,13 @@
 //! # Contract
 //!
 //! The host provides twelve filesystem functions as imports from the
-//! `fylo_host` module — the [`fylo_vfs::HostVfs`] table — and calls:
+//! `fylo_host` module — the `fylo_vfs::HostVfs` table — and calls:
 //!
-//! 1. [`fylo_abi_version`] and refuses an unrecognized answer;
-//! 2. [`fylo_alloc`] to obtain a buffer, writing the NDJSON request into it;
-//! 3. [`fylo_exec`], which returns the response buffer packed as
+//! 1. `fylo_abi_version` and refuses an unrecognized answer;
+//! 2. `fylo_alloc` to obtain a buffer, writing the NDJSON request into it;
+//! 3. `fylo_exec`, which returns the response buffer packed as
 //!    `(pointer << 32) | length`;
-//! 4. [`fylo_free`] on both buffers.
+//! 4. `fylo_free` on both buffers.
 //!
 //! `fylo_exec` takes a batch of newline-delimited frames and answers all of
 //! them, which is `exec --loop` in one call. Query cursors live for the length

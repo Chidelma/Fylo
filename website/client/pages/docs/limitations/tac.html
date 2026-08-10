@@ -1,63 +1,134 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Reference</span>
-    <h1>Limitations</h1>
-    <p class="doc-lede">
-      What FYLO does not do, stated plainly. Most of these are consequences of the
-      filesystem-first design rather than gaps waiting to be filled — knowing them early
-      is cheaper than discovering them in production.
-    </p>
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Reference</span>
+        <h1>Limitations</h1>
+        <p class="doc-lede">
+            What FYLO does not do, stated plainly. Most of these are consequences of the
+            filesystem-first design rather than gaps waiting to be filled — knowing them early is
+            cheaper than discovering them in production.
+        </p>
 
-    <div class="doc-section doc-section--wide">
-      <div class="doc-table-wrap">
-        <table class="doc-table">
-          <thead><tr><th>Limitation</th><th>Detail</th></tr></thead>
-          <tbody>
-            <loop :for="let row of limits">
-              <tr><td>{row.title}</td><td>{row.detail}</td></tr>
-            </loop>
-          </tbody>
-        </table>
-      </div>
+        <div class="doc-section doc-section--wide">
+            <div class="doc-table-wrap">
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Limitation</th>
+                            <th>Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Filesystem-first engine</td>
+                            <td>
+                                One engine writes to a local path. Remote object storage is not a
+                                query, transaction, or built-in backup backend.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Local-filesystem locking</td>
+                            <td>
+                                PID-aware lock files plus kernel-owned takeover claims; live owners
+                                are never evicted by TTL. Use local POSIX filesystems or NTFS, not
+                                network or sync filesystems lacking equivalent atomic semantics.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Indexes are derived</td>
+                            <td>
+                                External writes to data files will not update indexes. Run rebuild()
+                                afterwards.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Frequency leaks on encryption</td>
+                            <td>
+                                HMAC blind indexes for equality reveal value repetition even without
+                                decryption.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Process-global cipher</td>
+                            <td>
+                                One key per process for all $encrypted fields. No per-collection key
+                                rotation is built in.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>No cross-collection transactions</td>
+                            <td>
+                                SQL mutations and ordinary writes are atomic within one collection;
+                                there is no atomic multi-collection commit.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Timestamp metadata</td>
+                            <td>
+                                createdAt comes from the TTID; updatedAt comes from file
+                                modification metadata.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Bulk import for trusted sources</td>
+                            <td>
+                                The SSRF guard blocks private addresses and caps at 50 MiB. It is
+                                not safe for user-provided URLs.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>No arrays of objects</td>
+                            <td>
+                                A document may hold scalars, nested objects, and arrays of scalars —
+                                never an array of objects, at any depth.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="doc-section">
+            <h2>There is no remote access</h2>
+            <p>
+                By design. FYLO has no server and speaks no network protocol. Every client owns its
+                database directly: the CLI and language shims drive the binary against a local root,
+                and the browser and mobile clients embed the engine over an on-device store.
+            </p>
+            <p>
+                If a root must be reached from another machine, that is a filesystem-layer concern —
+                a mounted volume or a synced directory — and it inherits that layer's consistency
+                guarantees, which are usually weaker than the ones FYLO assumes. The supported
+                storage targets are local POSIX filesystems and NTFS.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Where the guarantees hold</h2>
+            <p>
+                Crash recovery is release-gated on local macOS and Linux filesystems and on native
+                x64 Windows over NTFS. POSTIX access control requires a POSIX host — it is not a
+                Windows authorization boundary, and browser, Explorer, and WebView clients cannot
+                enforce it at all. The exclusive root lease is a kernel lock and is unsupported on
+                network, clustered, and object-backed filesystems.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/errors">← Error codes</a>
+            <a href="/docs">Back to overview →</a>
+        </div>
     </div>
-
-    <div class="doc-section">
-      <h2>There is no remote access</h2>
-      <p>
-        By design. FYLO has no server and speaks no network protocol. Every client owns
-        its database directly: the CLI and language shims drive the binary against a local
-        root, and the browser and mobile clients embed the engine over an on-device store.
-      </p>
-      <p>
-        If a root must be reached from another machine, that is a filesystem-layer
-        concern — a mounted volume or a synced directory — and it inherits that layer's
-        consistency guarantees, which are usually weaker than the ones FYLO assumes. The
-        supported storage targets are local POSIX filesystems and NTFS.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Where the guarantees hold</h2>
-      <p>
-        Crash recovery is release-gated on local macOS and Linux filesystems and on native
-        x64 Windows over NTFS. POSTIX access control requires a POSIX host — it is not a
-        Windows authorization boundary, and browser, Explorer, and WebView clients cannot
-        enforce it at all. The exclusive root lease is a kernel lock and is unsupported on
-        network, clustered, and object-backed filesystems.
-      </p>
-    </div>
-
-    <div class="doc-pager">
-      <a href="/docs/errors">← Error codes</a>
-      <a href="/docs">Back to overview →</a>
-    </div>
-  </div>
 </div>

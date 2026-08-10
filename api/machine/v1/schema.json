@@ -61,7 +61,14 @@
                         "schemaHistory",
                         "schemaDoctor",
                         "schemaValidate",
-                        "schemaMaterialize"
+                        "schemaMaterialize",
+                        "queuePublish",
+                        "queueClaim",
+                        "queueAck",
+                        "queueNack",
+                        "queueExtend",
+                        "queueStats",
+                        "queueDeadLetters"
                     ]
                 },
                 "requestId": { "type": "string", "maxLength": 1024 },
@@ -75,6 +82,33 @@
                 "create": { "type": "boolean" },
                 "force": { "type": "boolean" },
                 "message": { "type": "string" },
+                "topic": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 127,
+                    "pattern": "^[^/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$",
+                    "x-maxBytes": 127
+                },
+                "group": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 127,
+                    "pattern": "^[^/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$",
+                    "x-maxBytes": 127
+                },
+                "payload": true,
+                "receipt": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "reason": { "type": "string", "maxLength": 4096 },
+                "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                "delayMs": { "type": "integer", "minimum": 0, "maximum": 2592000000 },
+                "maxMessages": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 100 },
+                "visibilityTimeoutMs": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 86400000
+                },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
                 "source": { "type": "string" },
                 "from": { "type": "string" },
                 "to": { "type": "string" },

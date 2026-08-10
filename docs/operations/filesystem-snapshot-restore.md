@@ -13,7 +13,9 @@ restore protocols.
 2. Record the FYLO binary identity, source path, filesystem type, snapshot tool
    and version, wall-clock time, and the root's byte count.
 3. Copy the entire root, including `.fylo-catalog`, `.fylo-transactions`,
-   `.fylo-vcs`, `.collections`, and `.buckets`. Do not copy only documents.
+   `.fylo-queue/v1`, `.fylo-vcs`, `.collections`, and `.buckets`. Queue
+   messages, leases, consumer progress, dedupe records, and dead letters are
+   durable state; do not copy only documents.
 4. Preserve native metadata. Suitable qualified profiles are:
    - Linux: `rsync -aHAX --numeric-ids` on a local filesystem;
    - macOS: an APFS snapshot/clone or `ditto` with resource forks, ACLs, and
@@ -40,10 +42,15 @@ their flags do not prove that a provider preserves xattrs or ADS.
    is idempotent.
 5. Verify every collection index against its documents, rebuild derived indexes
    when required, and verify the reachable version history and object hashes.
-6. Run the representative non-empty query and permission corpus. Encryption
+6. Verify known queue topic/group pairs with `queueStats` and
+   `queueDeadLetters` without claiming, acknowledging, or rejecting messages.
+   FYLO does not yet expose a whole-queue offline verifier, so this check proves
+   that recorded queue state is readable but does not replace the exact path,
+   size, metadata, and content-hash inventory comparison in step 3.
+7. Run the representative non-empty query and permission corpus. Encryption
    keys remain outside the snapshot and must be supplied through the normal
    secret boundary.
-7. Record elapsed restore time, recovered bytes, verification results, binary
+8. Record elapsed restore time, recovered bytes, verification results, binary
    identity, filesystem, and any metadata that the platform cannot preserve.
 
 A restore is accepted only when integrity and query-equivalence checks pass.

@@ -87,6 +87,70 @@ class Fylo
     op("rebuildCollection", "collection" => collection)
   end
 
+  # --- Durable serverless queue ---
+  def queue_publish(topic, payload, delay_ms: nil, idempotency_key: nil)
+    op("queuePublish", "topic" => topic, "payload" => payload, "delayMs" => delay_ms, "idempotencyKey" => idempotency_key)
+  end
+
+  def queue_claim(topic, group, max_messages: nil, visibility_timeout_ms: nil, max_attempts: nil)
+    op("queueClaim", "topic" => topic, "group" => group, "maxMessages" => max_messages, "visibilityTimeoutMs" => visibility_timeout_ms, "maxAttempts" => max_attempts)
+  end
+
+  def queue_ack(topic, group, id, receipt)
+    op("queueAck", "topic" => topic, "group" => group, "id" => id, "receipt" => receipt)
+  end
+
+  def queue_nack(topic, group, id, receipt, delay_ms: nil, reason: nil)
+    op("queueNack", "topic" => topic, "group" => group, "id" => id, "receipt" => receipt, "delayMs" => delay_ms, "reason" => reason)
+  end
+
+  def queue_extend(topic, group, id, receipt, visibility_timeout_ms: nil)
+    op("queueExtend", "topic" => topic, "group" => group, "id" => id, "receipt" => receipt, "visibilityTimeoutMs" => visibility_timeout_ms)
+  end
+
+  def queue_stats(topic, group)
+    op("queueStats", "topic" => topic, "group" => group)
+  end
+
+  def queue_dead_letters(topic, group, limit: nil)
+    op("queueDeadLetters", "topic" => topic, "group" => group, "limit" => limit)
+  end
+
+  # Process and settle one bounded batch. Ruby has no decorator syntax, so
+  # queue_consumer returns an equivalent callable wrapper.
+  def queue_process(topic, group, max_messages: 1, visibility_timeout_ms: 30_000,
+                    max_attempts: 3, retry_delay_ms: 0, &handler)
+    raise ArgumentError, "queue handler block is required" unless handler
+    deliveries = queue_claim(topic, group, max_messages: max_messages,
+                             visibility_timeout_ms: visibility_timeout_ms,
+                             max_attempts: max_attempts)
+    result = { "claimed" => deliveries.length, "acknowledged" => 0,
+               "retried" => 0, "deadLettered" => 0 }
+    deliveries.each do |delivery|
+      failed = false
+      begin
+        handler.call(delivery)
+      rescue StandardError
+        failed = true
+      end
+      unless failed
+        queue_ack(topic, group, delivery.fetch("id"), delivery.fetch("receipt"))
+        result["acknowledged"] += 1
+      else
+        settled = queue_nack(topic, group, delivery.fetch("id"), delivery.fetch("receipt"),
+                             delay_ms: retry_delay_ms,
+                             reason: "queue handler failed")
+        result[settled["deadLettered"] ? "deadLettered" : "retried"] += 1
+      end
+    end
+    result
+  end
+
+  def queue_consumer(topic, group, **options, &handler)
+    raise ArgumentError, "queue handler block is required" unless handler
+    lambda { queue_process(topic, group, **options, &handler) }
+  end
+
   # --- Documents ---
   def put_data(collection, data)
     op("putData", "collection" => collection, "data" => data)

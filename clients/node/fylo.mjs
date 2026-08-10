@@ -124,6 +124,38 @@ export class Fylo {
             return identity
         })
         void this.ready.catch(() => {})
+        this.queue = Object.freeze({
+            publish: (topic, payload, options = {}) => this.queuePublish(topic, payload, options),
+            claim: (topic, group, options = {}) => this.queueClaim(topic, group, options),
+            ack: (topic, group, delivery, receipt) =>
+                this.queueAck(
+                    topic,
+                    group,
+                    typeof delivery === 'string' ? delivery : delivery.id,
+                    receipt ?? delivery.receipt
+                ),
+            nack: (topic, group, delivery, options = {}) =>
+                this.queueNack(
+                    topic,
+                    group,
+                    typeof delivery === 'string' ? delivery : delivery.id,
+                    typeof delivery === 'string' ? options.receipt : delivery.receipt,
+                    options
+                ),
+            extend: (topic, group, delivery, receiptOrTimeout, visibilityTimeoutMs) =>
+                this.queueExtend(
+                    topic,
+                    group,
+                    typeof delivery === 'string' ? delivery : delivery.id,
+                    typeof delivery === 'string' ? receiptOrTimeout : delivery.receipt,
+                    typeof delivery === 'string' ? visibilityTimeoutMs : receiptOrTimeout
+                ),
+            stats: (topic, group) => this.queueStats(topic, group),
+            deadLetters: (topic, group, limit) => this.queueDeadLetters(topic, group, limit),
+            process: (topic, group, handler, options = {}) =>
+                this.queueProcess(topic, group, handler, options),
+            consumer: (topic, group, options = {}) => this.queueConsumer(topic, group, options)
+        })
         return new Proxy(this, FACADE)
     }
 
@@ -292,6 +324,114 @@ export class Fylo {
     }
     rebuildCollection(collection) {
         return this._op('rebuildCollection', { collection })
+    }
+
+    // --- Durable serverless queue ---
+    queuePublish(topic, payload, options = {}) {
+        return this._op('queuePublish', {
+            topic,
+            payload,
+            delayMs: options.delayMs,
+            idempotencyKey: options.idempotencyKey
+        })
+    }
+    queueClaim(topic, group, options = {}) {
+        return this._op('queueClaim', {
+            topic,
+            group,
+            maxMessages: options.maxMessages,
+            visibilityTimeoutMs: options.visibilityTimeoutMs,
+            maxAttempts: options.maxAttempts
+        })
+    }
+    queueAck(topic, group, id, receipt) {
+        return this._op('queueAck', { topic, group, id, receipt })
+    }
+    queueNack(topic, group, id, receipt, options = {}) {
+        return this._op('queueNack', {
+            topic,
+            group,
+            id,
+            receipt,
+            delayMs: options.delayMs,
+            reason: options.reason
+        })
+    }
+    queueExtend(topic, group, id, receipt, visibilityTimeoutMs) {
+        return this._op('queueExtend', {
+            topic,
+            group,
+            id,
+            receipt,
+            visibilityTimeoutMs
+        })
+    }
+    queueStats(topic, group) {
+        return this._op('queueStats', { topic, group })
+    }
+    queueDeadLetters(topic, group, limit) {
+        return this._op('queueDeadLetters', { topic, group, limit })
+    }
+    /** Process one bounded batch and settle every claimed delivery. */
+    async queueProcess(topic, group, handler, options = {}) {
+        if (typeof handler !== 'function') throw new TypeError('queue handler must be a function')
+        const deliveries = await this.queueClaim(topic, group, {
+            maxMessages: options.maxMessages,
+            visibilityTimeoutMs: options.visibilityTimeoutMs,
+            maxAttempts: options.maxAttempts
+        })
+        const result = {
+            claimed: deliveries.length,
+            acknowledged: 0,
+            retried: 0,
+            deadLettered: 0
+        }
+        for (const delivery of deliveries) {
+            let failed = false
+            try {
+                await handler(delivery)
+            } catch {
+                failed = true
+            }
+            if (!failed) {
+                await this.queueAck(topic, group, delivery.id, delivery.receipt)
+                result.acknowledged += 1
+            } else {
+                const settled = await this.queueNack(topic, group, delivery.id, delivery.receipt, {
+                    delayMs: options.retryDelayMs,
+                    reason: 'queue handler failed'
+                })
+                if (settled.deadLettered) result.deadLettered += 1
+                else result.retried += 1
+            }
+        }
+        return result
+    }
+    /**
+     * ECMAScript/TypeScript decorator factory. The returned function also
+     * wraps an ordinary handler, so no decorator syntax is required.
+     */
+    queueConsumer(topic, group, options = {}) {
+        const db = this
+        return (handler, context) => {
+            if (typeof handler !== 'function') {
+                throw new TypeError('queue consumer can decorate only a function or method')
+            }
+            const consumer = async function (...args) {
+                return db.queueProcess(
+                    topic,
+                    group,
+                    (delivery) => handler.call(this, delivery, ...args),
+                    options
+                )
+            }
+            Object.defineProperty(consumer, 'name', {
+                value: context?.name ? String(context.name) : handler.name,
+                configurable: true
+            })
+            consumer.queueConsumer = Object.freeze({ topic, group, ...options })
+            return consumer
+        }
     }
 
     // --- Documents ---

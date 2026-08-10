@@ -20,7 +20,9 @@
                     Detects your OS and architecture, verifies the checksum, and puts
                     <code>fylo</code> on your PATH.
                 </p>
-                <pre class="code-block"><code>{unixInstall()}</code></pre>
+                <pre
+                    class="code-block"
+                ><code>curl -fsSL https://fylo.del.ma/install.sh | sh</code></pre>
             </article>
 
             <article class="download-panel">
@@ -29,7 +31,7 @@
                     Run in PowerShell — installs under <code>%LOCALAPPDATA%\Fylo</code> and updates
                     your user PATH.
                 </p>
-                <pre class="code-block"><code>{windowsInstall()}</code></pre>
+                <pre class="code-block"><code>irm https://fylo.del.ma/install.ps1 | iex</code></pre>
             </article>
         </div>
 
@@ -44,27 +46,82 @@
                     </tr>
                 </thead>
                 <tbody>
-                    <loop :for="let asset of assets">
-                        <tr>
-                            <td data-label="Platform">{asset.label}</td>
-                            <td data-label="File"><code>{asset.file}</code></td>
-                            <td data-label="Download">
-                                <a
-                                    class="w-btn w-btn-outlined w-btn--sm"
-                                    :href="assetUrl(asset.file)"
-                                    >Download</a
-                                >
-                            </td>
-                        </tr>
-                    </loop>
+                    <tr>
+                        <td data-label="Platform">macOS (Apple Silicon)</td>
+                        <td data-label="File"><code>fylo-macos-arm64</code></td>
+                        <td data-label="Download">
+                            <a
+                                class="w-btn w-btn-outlined w-btn--sm"
+                                href="https://github.com/d31ma/Fylo/releases/latest/download/fylo-macos-arm64"
+                                >Download</a
+                            >
+                        </td>
+                    </tr>
+                    <tr>
+                        <td data-label="Platform">macOS (Intel)</td>
+                        <td data-label="File"><code>fylo-macos-x64</code></td>
+                        <td data-label="Download">
+                            <a
+                                class="w-btn w-btn-outlined w-btn--sm"
+                                href="https://github.com/d31ma/Fylo/releases/latest/download/fylo-macos-x64"
+                                >Download</a
+                            >
+                        </td>
+                    </tr>
+                    <tr>
+                        <td data-label="Platform">Linux (x64)</td>
+                        <td data-label="File"><code>fylo-linux-x64</code></td>
+                        <td data-label="Download">
+                            <a
+                                class="w-btn w-btn-outlined w-btn--sm"
+                                href="https://github.com/d31ma/Fylo/releases/latest/download/fylo-linux-x64"
+                                >Download</a
+                            >
+                        </td>
+                    </tr>
+                    <tr>
+                        <td data-label="Platform">Linux (ARM64)</td>
+                        <td data-label="File"><code>fylo-linux-arm64</code></td>
+                        <td data-label="Download">
+                            <a
+                                class="w-btn w-btn-outlined w-btn--sm"
+                                href="https://github.com/d31ma/Fylo/releases/latest/download/fylo-linux-arm64"
+                                >Download</a
+                            >
+                        </td>
+                    </tr>
+                    <tr>
+                        <td data-label="Platform">Windows (x64)</td>
+                        <td data-label="File"><code>fylo-windows-x64.exe</code></td>
+                        <td data-label="Download">
+                            <a
+                                class="w-btn w-btn-outlined w-btn--sm"
+                                href="https://github.com/d31ma/Fylo/releases/latest/download/fylo-windows-x64.exe"
+                                >Download</a
+                            >
+                        </td>
+                    </tr>
+                    <tr>
+                        <td data-label="Platform">Web (self-hosted Explorer)</td>
+                        <td data-label="File"><code>fylo-explorer-26.33.01.zip</code></td>
+                        <td data-label="Download">
+                            <a
+                                class="w-btn w-btn-outlined w-btn--sm"
+                                href="https://github.com/d31ma/Fylo/releases/latest/download/fylo-explorer-26.33.01.zip"
+                                >Download</a
+                            >
+                        </td>
+                    </tr>
                 </tbody>
             </table>
         </div>
 
         <p class="download-note">
             Every release is checksummed — see
-            <a :href="assetUrl('SHA256SUMS')">SHA256SUMS</a>. Older versions and release notes live
-            on <a href="https://github.com/d31ma/Fylo/releases">GitHub Releases</a>.
+            <a href="https://github.com/d31ma/Fylo/releases/latest/download/SHA256SUMS"
+                >SHA256SUMS</a
+            >. Older versions and release notes live on
+            <a href="https://github.com/d31ma/Fylo/releases">GitHub Releases</a>.
         </p>
     </div>
 </section>

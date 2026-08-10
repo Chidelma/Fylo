@@ -12,7 +12,46 @@ concurrency:
     group: rust-nightly-${{ github.ref }}
     cancel-in-progress: false
 
+env:
+    CARGO_TERM_COLOR: always
+    RUST_BACKTRACE: '1'
+
 jobs:
+    sanitizers:
+        name: Native storage and query sanitizers
+        runs-on: ubuntu-24.04
+        timeout-minutes: 50
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+            - name: Install the pinned nightly toolchain
+              run: >-
+                  rustup toolchain install nightly-2026-07-20
+                  --profile minimal --component rust-src
+
+            - name: Run portable and native libraries under AddressSanitizer
+              run: >-
+                  RUSTFLAGS="-Zsanitizer=address"
+                  cargo +nightly-2026-07-20 test --locked
+                  -p fylo-format -p fylo-query -p fylo-storage-native --lib
+                  -Zbuild-std --target x86_64-unknown-linux-gnu
+
+            - name: Run portable and native libraries under LeakSanitizer
+              run: >-
+                  RUSTFLAGS="-Zsanitizer=leak"
+                  cargo +nightly-2026-07-20 test --locked
+                  -p fylo-format -p fylo-query -p fylo-storage-native --lib
+                  -Zbuild-std --target x86_64-unknown-linux-gnu
+
+            - name: Run portable and native libraries under ThreadSanitizer
+              run: >-
+                  RUSTFLAGS="-Zsanitizer=thread"
+                  cargo +nightly-2026-07-20 test --locked
+                  -p fylo-format -p fylo-query -p fylo-storage-native --lib
+                  -Zbuild-std --target x86_64-unknown-linux-gnu
+
     fuzz:
         name: Retained portable-kernel fuzz evidence
         runs-on: ubuntu-latest
@@ -20,7 +59,7 @@ jobs:
 
         steps:
             - name: Check out source
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
             - name: Install pinned fuzz toolchain
               run: rustup toolchain install nightly-2026-07-20 --profile minimal

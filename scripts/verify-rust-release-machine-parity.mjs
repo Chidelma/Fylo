@@ -8,7 +8,17 @@ if (releasedBinary === rustBinary) throw new Error('released and Rust binaries m
 
 const registry = JSON.parse(await readFile('api/machine/v1/operations.json', 'utf8'))
 const canonicalOperations = registry.operations.map(({ name }) => name).sort()
-const candidateOnlyOperations = ['getFileData', 'reshardCollection']
+const candidateOnlyOperations = [
+    'getFileData',
+    'queueAck',
+    'queueClaim',
+    'queueDeadLetters',
+    'queueExtend',
+    'queueNack',
+    'queuePublish',
+    'queueStats',
+    'reshardCollection'
+]
 const releasedOperations = canonicalOperations.filter(
     (operation) => !candidateOnlyOperations.includes(operation)
 )
@@ -278,6 +288,100 @@ async function runScenario(label, binary, root) {
                 { op: 'reshardCollection', collection: 'assets', width: 2 },
                 { record: false }
             )
+
+            const published = await request(
+                'queue-publish',
+                {
+                    op: 'queuePublish',
+                    topic: 'parity.jobs',
+                    payload: { job: 'candidate-only' },
+                    idempotencyKey: 'parity-job-1'
+                },
+                { record: false }
+            )
+            const firstClaim = await request(
+                'queue-claim-first',
+                {
+                    op: 'queueClaim',
+                    topic: 'parity.jobs',
+                    group: 'parity-workers',
+                    maxAttempts: 3
+                },
+                { record: false }
+            )
+            assert(
+                firstClaim.length === 1 && firstClaim[0].id === published.id,
+                'Rust queue claim did not return the candidate publication'
+            )
+            await request(
+                'queue-nack',
+                {
+                    op: 'queueNack',
+                    topic: 'parity.jobs',
+                    group: 'parity-workers',
+                    id: firstClaim[0].id,
+                    receipt: firstClaim[0].receipt,
+                    reason: 'candidate retry'
+                },
+                { record: false }
+            )
+            const secondClaim = await request(
+                'queue-claim-second',
+                {
+                    op: 'queueClaim',
+                    topic: 'parity.jobs',
+                    group: 'parity-workers',
+                    maxAttempts: 3
+                },
+                { record: false }
+            )
+            assert(
+                secondClaim.length === 1 && secondClaim[0].attempt === 2,
+                'Rust queue retry did not advance the delivery attempt'
+            )
+            await request(
+                'queue-extend',
+                {
+                    op: 'queueExtend',
+                    topic: 'parity.jobs',
+                    group: 'parity-workers',
+                    id: secondClaim[0].id,
+                    receipt: secondClaim[0].receipt,
+                    visibilityTimeoutMs: 30_000
+                },
+                { record: false }
+            )
+            await request(
+                'queue-ack',
+                {
+                    op: 'queueAck',
+                    topic: 'parity.jobs',
+                    group: 'parity-workers',
+                    id: secondClaim[0].id,
+                    receipt: secondClaim[0].receipt
+                },
+                { record: false }
+            )
+            const queueStats = await request(
+                'queue-stats',
+                { op: 'queueStats', topic: 'parity.jobs', group: 'parity-workers' },
+                { record: false }
+            )
+            assert(
+                queueStats.retired === 1 && queueStats.available === 0,
+                'Rust queue acknowledgement was not durable'
+            )
+            const deadLetters = await request(
+                'queue-dead-letters',
+                {
+                    op: 'queueDeadLetters',
+                    topic: 'parity.jobs',
+                    group: 'parity-workers',
+                    limit: 10
+                },
+                { record: false }
+            )
+            assert(deadLetters.length === 0, 'Rust queue unexpectedly dead-lettered the job')
         }
         await request('verify-assets', { op: 'verifyCollection', collection: 'assets' })
 
@@ -516,6 +620,7 @@ function normalizeHandshake(value) {
     delete normalized.runtimeVersion
     delete normalized.capabilities?.documentBuckets
     delete normalized.capabilities?.machineAccess
+    delete normalized.capabilities?.serverlessQueue
     delete normalized.capabilities?.wholeRootBackup
     delete normalized.dependencies?.chex?.requiredVersion
     delete normalized.dependencies?.ttid?.requiredVersion

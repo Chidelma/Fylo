@@ -19,11 +19,16 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 mod lease;
+mod queue;
 mod write;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use fylo_vfs::host_now_unix_ms;
 pub use lease::RootLease;
+pub use queue::{
+    NativeQueue, QueueAckResult, QueueClaimOptions, QueueDeadLetter, QueueDelivery,
+    QueueNackResult, QueuePublishOptions, QueuePublishResult, QueueStats,
+};
 pub use write::FAILPOINTS;
 pub use write::version::RepositoryStatus;
 pub use write::{NativeWriteRoot, PutDocumentOptions, PutRawFileOptions, WriteAccess, WriteActor};
@@ -1919,6 +1924,12 @@ pub enum NativeStorageErrorCode {
     ShardWidth,
     /// The preview does not support the requested collection/operation.
     Unsupported,
+    /// A queue topic, consumer group, message, or option was invalid.
+    InvalidQueue,
+    /// A queue acknowledgement receipt was absent, stale, or incorrect.
+    QueueReceipt,
+    /// Queue state exceeded a published resource bound.
+    QueueLimit,
 }
 
 impl NativeStorageErrorCode {
@@ -1943,6 +1954,9 @@ impl NativeStorageErrorCode {
             Self::InvalidQuery => "EQUERY_INVALID",
             Self::ShardWidth => "ESHARDWIDTH",
             Self::Unsupported => "ENATIVE_UNSUPPORTED",
+            Self::InvalidQueue => "EQUEUE_INVALID",
+            Self::QueueReceipt => "EQUEUE_RECEIPT",
+            Self::QueueLimit => "EQUEUE_LIMIT",
         }
     }
 }
@@ -2919,7 +2933,7 @@ fn read_bounded<R: Read>(
     Ok(bytes)
 }
 
-fn is_scratch_file(name: &str) -> bool {
+pub(crate) fn is_scratch_file(name: &str) -> bool {
     Path::new(name)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
@@ -2930,7 +2944,7 @@ fn is_scratch_file(name: &str) -> bool {
 /// writes beside each record.
 ///
 /// Enumeration must skip it or the sidecar would be read back as a record of
-/// its own, so [`is_scratch_file`] — which every enumerator already consults —
+/// its own, so `is_scratch_file` — which every enumerator already consults —
 /// owns the rule rather than each caller repeating it.
 pub const SIDECAR_SUFFIX: &str = ".fylo-attrs";
 

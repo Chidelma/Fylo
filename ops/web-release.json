@@ -29,18 +29,18 @@
                     "contentTypes": ["text/css"]
                 },
                 {
-                    "path": "/imports.js",
+                    "path": "/shared/scripts/imports.js",
                     "contains": "tachyon:navigate",
                     "contentTypes": ["application/javascript", "text/javascript"]
                 },
                 {
-                    "path": "/components/hero/tac.js",
+                    "path": "/.tachyon/components/hero.js",
                     "contains": "https://fylo.del.ma/install.sh",
                     "contentTypes": ["application/javascript", "text/javascript"]
                 },
                 {
-                    "path": "/fylo-browser-worker.js",
-                    "contains": "self.addEventListener",
+                    "path": "/.tachyon/islands.js",
+                    "contains": "bindDeferred",
                     "contentTypes": ["application/javascript", "text/javascript"]
                 }
             ]

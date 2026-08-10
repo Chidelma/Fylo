@@ -47,6 +47,29 @@ describe('release recovery and supply-chain gates', () => {
         expect(upload).toBeGreaterThan(verify)
     })
 
+    test('never grants release attestation work to a non-default manual-dispatch ref', async () => {
+        const workflow = await readFile(path.join(root, '.github/workflows/publish.yml'), 'utf8')
+        const releaseAssets = workflow.slice(
+            workflow.indexOf('    release-assets:'),
+            workflow.indexOf('    github-release:')
+        )
+        const defaultBranchGate =
+            "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+
+        expect(workflow).toContain('workflow_dispatch:')
+        expect(releaseAssets).toContain(defaultBranchGate)
+        expect(releaseAssets.indexOf(defaultBranchGate)).toBeLessThan(
+            releaseAssets.indexOf("needs.test.result == 'success'")
+        )
+        expect(releaseAssets).toContain('id-token: write')
+        expect(releaseAssets).toContain('attestations: write')
+
+        const canRunPrivilegedAssets = (ref, defaultBranch) => ref === `refs/heads/${defaultBranch}`
+        expect(canRunPrivilegedAssets('refs/heads/main', 'main')).toBe(true)
+        expect(canRunPrivilegedAssets('refs/heads/feature/queue', 'main')).toBe(false)
+        expect(canRunPrivilegedAssets('refs/tags/v26.33.01', 'main')).toBe(false)
+    })
+
     test('keeps the Windows filesystem capability behind native NTFS tests', async () => {
         for (const name of ['ci.yml', 'publish.yml']) {
             const workflow = await readFile(path.join(root, '.github/workflows', name), 'utf8')
@@ -96,7 +119,8 @@ describe('release recovery and supply-chain gates', () => {
         expect(normalizeHandshake).toContain('delete normalized.runtimeVersion')
         expect(normalizeHandshake).toContain('delete normalized.capabilities?.documentBuckets')
         expect(normalizeHandshake).toContain('delete normalized.capabilities?.machineAccess')
-        expect(normalizeHandshake.match(/delete normalized\.capabilities\?\./g)).toHaveLength(3)
+        expect(normalizeHandshake).toContain('delete normalized.capabilities?.serverlessQueue')
+        expect(normalizeHandshake.match(/delete normalized\.capabilities\?\./g)).toHaveLength(4)
         expect(normalizeHandshake).not.toContain('delete normalized.protocolVersion')
         expect(normalizeHandshake).not.toContain('delete normalized.capabilities\n')
     })

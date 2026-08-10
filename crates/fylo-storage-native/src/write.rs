@@ -2640,7 +2640,7 @@ fn cleanup_orphan_transactions(
     Ok(())
 }
 
-fn ensure_directory(root: &NativeRoot, path: &Path) -> Result<(), NativeStorageError> {
+pub(crate) fn ensure_directory(root: &NativeRoot, path: &Path) -> Result<(), NativeStorageError> {
     if path_exists_no_follow(path)? {
         root.verify_path(path, ExpectedType::Directory)?;
         return Ok(());
@@ -3147,13 +3147,16 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), NativeStorageError>
     crate::sync_handle(&file).map_err(NativeStorageError::io)
 }
 
-fn write_json_durable(path: &Path, value: &impl Serialize) -> Result<(), NativeStorageError> {
+pub(crate) fn write_json_durable(
+    path: &Path,
+    value: &impl Serialize,
+) -> Result<(), NativeStorageError> {
     let mut bytes = serde_json::to_vec(value).map_err(|error| json_error(&error))?;
     bytes.push(b'\n');
     durable_replace(path, &bytes)
 }
 
-fn read_bounded_json<T: for<'de> Deserialize<'de>>(
+pub(crate) fn read_bounded_json<T: for<'de> Deserialize<'de>>(
     path: &Path,
     max_bytes: u64,
 ) -> Result<T, NativeStorageError> {

@@ -29,6 +29,35 @@ class FyloException implements Exception {
   String toString() => 'FyloException: $message';
 }
 
+/// Metadata used with [Fylo.queueConsumer]. Dart does not provide runtime
+/// decorator execution, so annotated handlers are explicitly bound to a Fylo.
+class FyloQueueConsumer {
+  final String topic;
+  final String group;
+  final int maxMessages;
+  final int visibilityTimeoutMs;
+  final int maxAttempts;
+  final int retryDelayMs;
+
+  const FyloQueueConsumer(this.topic, this.group,
+      {this.maxMessages = 1,
+      this.visibilityTimeoutMs = 30000,
+      this.maxAttempts = 3,
+      this.retryDelayMs = 0});
+}
+
+class QueueProcessResult {
+  final int claimed;
+  int acknowledged = 0;
+  int retried = 0;
+  int deadLettered = 0;
+
+  QueueProcessResult(this.claimed);
+}
+
+typedef QueueHandler = FutureOr<void> Function(Map<String, dynamic> delivery);
+typedef QueueRunner = Future<QueueProcessResult> Function();
+
 class Fylo {
   static const int maxRequestBytes = 1024 * 1024;
   static const int maxResponseBytes = 8 * 1024 * 1024;
@@ -142,6 +171,109 @@ class Fylo {
       _op('inspectCollection', {'collection': collection});
   Future<dynamic> rebuildCollection(String collection) =>
       _op('rebuildCollection', {'collection': collection});
+
+  // --- Durable serverless queue ---
+  Future<dynamic> queuePublish(String topic, dynamic payload,
+          [Map<String, dynamic> options = const {}]) =>
+      _op('queuePublish', {
+        'topic': topic,
+        'payload': payload,
+        ..._queueOptions(options, const {'delayMs', 'idempotencyKey'})
+      });
+  Future<dynamic> queueClaim(String topic, String group,
+          [Map<String, dynamic> options = const {}]) =>
+      _op('queueClaim', {
+        'topic': topic,
+        'group': group,
+        ..._queueOptions(options,
+            const {'maxMessages', 'visibilityTimeoutMs', 'maxAttempts'})
+      });
+  Future<dynamic> queueAck(
+          String topic, String group, String id, String receipt) =>
+      _op('queueAck',
+          {'topic': topic, 'group': group, 'id': id, 'receipt': receipt});
+  Future<dynamic> queueNack(
+          String topic, String group, String id, String receipt,
+          [Map<String, dynamic> options = const {}]) =>
+      _op('queueNack', {
+        'topic': topic,
+        'group': group,
+        'id': id,
+        'receipt': receipt,
+        ..._queueOptions(options, const {'delayMs', 'reason'})
+      });
+  Future<dynamic> queueExtend(String topic, String group, String id,
+          String receipt, int visibilityTimeoutMs) =>
+      _op('queueExtend', {
+        'topic': topic,
+        'group': group,
+        'id': id,
+        'receipt': receipt,
+        'visibilityTimeoutMs': visibilityTimeoutMs
+      });
+  Future<dynamic> queueStats(String topic, String group) =>
+      _op('queueStats', {'topic': topic, 'group': group});
+  Future<dynamic> queueDeadLetters(String topic, String group,
+          [int limit = 100]) =>
+      _op('queueDeadLetters', {'topic': topic, 'group': group, 'limit': limit});
+
+  /// Copy documented queue options only; unknown and protected fields are ignored.
+  static Map<String, dynamic> _queueOptions(
+          Map<String, dynamic> options, Set<String> allowed) =>
+      {
+        for (final key in allowed)
+          if (options.containsKey(key)) key: options[key]
+      };
+
+  /// Process and settle one bounded queue batch.
+  Future<QueueProcessResult> queueProcess(
+      String topic, String group, QueueHandler handler,
+      [FyloQueueConsumer? options]) async {
+    final config = options ?? FyloQueueConsumer(topic, group);
+    final claimed = await queueClaim(topic, group, {
+      'maxMessages': config.maxMessages,
+      'visibilityTimeoutMs': config.visibilityTimeoutMs,
+      'maxAttempts': config.maxAttempts
+    });
+    if (claimed is! List) {
+      throw FyloException('fylo queue claim returned an invalid delivery list');
+    }
+    final result = QueueProcessResult(claimed.length);
+    for (final item in claimed) {
+      if (item is! Map) {
+        throw FyloException('fylo queue claim returned an invalid delivery');
+      }
+      final delivery = Map<String, dynamic>.from(item);
+      final id = delivery['id'];
+      final receipt = delivery['receipt'];
+      if (id is! String || receipt is! String) {
+        throw FyloException('queue delivery lacks an id or receipt');
+      }
+      var failed = false;
+      try {
+        await handler(delivery);
+      } catch (_) {
+        failed = true;
+      }
+      if (!failed) {
+        await queueAck(topic, group, id, receipt);
+        result.acknowledged++;
+      } else {
+        final settled = await queueNack(topic, group, id, receipt,
+            {'delayMs': config.retryDelayMs, 'reason': 'queue handler failed'});
+        if (settled is Map && settled['deadLettered'] == true) {
+          result.deadLettered++;
+        } else {
+          result.retried++;
+        }
+      }
+    }
+    return result;
+  }
+
+  /// Bind annotated metadata and a handler into a one-batch invocation.
+  QueueRunner queueConsumer(FyloQueueConsumer consumer, QueueHandler handler) =>
+      () => queueProcess(consumer.topic, consumer.group, handler, consumer);
 
   // --- Documents ---
   Future<dynamic> putData(String collection, Map<String, dynamic> data) =>

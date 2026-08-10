@@ -1,24 +1,125 @@
 <section class="features section" aria-labelledby="features-heading">
-  <div class="w-container w-container--xl">
-    <div class="section-head">
-      <span class="eyebrow">Everything you need</span>
-      <h2 id="features-heading">Complexity traded for clarity.</h2>
-      <p>
-        Git-like version control, SQL query surfaces, field-level encryption, and
-        durable queues — in one standalone binary with drop-in clients for {clientCount} languages.
-      </p>
-    </div>
-
-    <div class="w-grid-row features-row">
-      <loop :for="let feature of features">
-        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
-          <div class="w-card w-card--variant-outlined feature-card">
-            <span :class="'w-chip w-chip-tonal w-chip--x-small w-chip-' + feature.color">{feature.area}</span>
-            <h3>{feature.title}</h3>
-            <p>{feature.text}</p>
-          </div>
+    <div class="w-container w-container--xl">
+        <div class="section-head">
+            <span class="eyebrow">Everything you need</span>
+            <h2 id="features-heading">Complexity traded for clarity.</h2>
+            <p>
+                Git-like version control, SQL query surfaces, field-level encryption, and durable
+                queues — in one standalone binary with drop-in clients for {clientCount} languages.
+            </p>
         </div>
-      </loop>
+
+        <div class="w-grid-row features-row">
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-primary">Storage</span>
+                    <h3>Documents are truth</h3>
+                    <p>
+                        Each document is one canonical JSON file on disk, sharded by the trailing
+                        characters of its creation TTID. Easy to inspect, debug, back up, and
+                        rebuild from.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-primary">Indexing</span>
+                    <h3>Zero-payload prefix indexes</h3>
+                    <p>
+                        Path-encoded key-only index entries in an mmap'd sorted catalog. Queries
+                        narrow by binary search, then hydrate only matching documents.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-success">Query</span>
+                    <h3>SQL + NoSQL APIs</h3>
+                    <p>
+                        Query with a JSON operation protocol — put, find, patch, join — or plain SQL
+                        over the same engine. Exact, range, prefix, and trigram strategies.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-success"
+                        >Versioning</span
+                    >
+                    <h3>Git-like version control</h3>
+                    <p>
+                        Branch, commit, diff, merge, and restore your document store. Auto-commit on
+                        writes with content-addressed, deduplicated snapshots.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-warning">Queue</span>
+                    <h3>Serverless without a broker</h3>
+                    <p>
+                        Durable topics, independent consumer groups, visibility leases, delayed
+                        retries, dead letters, and one-batch decorators in every native SDK shim.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-warning"
+                        >Distribution</span
+                    >
+                    <h3>One self-contained binary</h3>
+                    <p>
+                        Download a single executable — no runtime, no daemon, no native addons.
+                        Install once, then use drop-in clients for 13 languages — thin shims plus
+                        local-first browser and mobile.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-error">Security</span>
+                    <h3>Encryption &amp; POSIX access</h3>
+                    <p>
+                        AES-GCM field encryption with HMAC blind indexes, per-record POSIX
+                        UID/GID/mode enforcement, and trusted group membership.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-warning">Recovery</span>
+                    <h3>Filesystem snapshots</h3>
+                    <p>
+                        Quiesce the writer, copy the complete root with native metadata intact, then
+                        verify and restore into a new path. Remote copy and synchronization remain
+                        deployment choices outside the engine.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-success"
+                        >Architecture</span
+                    >
+                    <h3>No server, no protocol</h3>
+                    <p>
+                        Every client owns its database directly — the binary on desktop, OPFS on the
+                        web, or a user-selected folder through File System Access. Browser queries
+                        can run in a worker with Wasm acceleration. Nothing listens on a port.
+                    </p>
+                </div>
+            </div>
+            <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+                <div class="w-card w-card--variant-outlined feature-card">
+                    <span class="w-chip w-chip-tonal w-chip--x-small w-chip-primary">Interop</span>
+                    <h3>One protocol, many languages</h3>
+                    <p>
+                        A compiled executable speaks a JSON machine protocol tested against Python,
+                        Ruby, PHP, Dart, Java, C#, C++, Swift, Kotlin, and Rust.
+                    </p>
+                </div>
+            </div>
+        </div>
     </div>
-  </div>
 </section>

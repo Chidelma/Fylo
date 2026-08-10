@@ -18,6 +18,9 @@ response dict — use it for ops without a dedicated method (branching, schema).
 """
 
 import json
+import asyncio
+import functools
+import inspect
 import subprocess
 import threading
 
@@ -94,6 +97,224 @@ class Fylo:
 
     def rebuild_collection(self, collection):
         return self._op("rebuildCollection", collection=collection)
+
+    # --- Durable serverless queue ---
+    def queue_publish(self, topic, payload, delay_ms=None, idempotency_key=None):
+        return self._op(
+            "queuePublish",
+            topic=topic,
+            payload=payload,
+            delayMs=delay_ms,
+            idempotencyKey=idempotency_key,
+        )
+
+    def queue_claim(
+        self, topic, group, max_messages=None, visibility_timeout_ms=None, max_attempts=None
+    ):
+        return self._op(
+            "queueClaim",
+            topic=topic,
+            group=group,
+            maxMessages=max_messages,
+            visibilityTimeoutMs=visibility_timeout_ms,
+            maxAttempts=max_attempts,
+        )
+
+    def queue_ack(self, topic, group, id, receipt):
+        return self._op("queueAck", topic=topic, group=group, id=id, receipt=receipt)
+
+    def queue_nack(self, topic, group, id, receipt, delay_ms=None, reason=None):
+        return self._op(
+            "queueNack",
+            topic=topic,
+            group=group,
+            id=id,
+            receipt=receipt,
+            delayMs=delay_ms,
+            reason=reason,
+        )
+
+    def queue_extend(self, topic, group, id, receipt, visibility_timeout_ms=None):
+        return self._op(
+            "queueExtend",
+            topic=topic,
+            group=group,
+            id=id,
+            receipt=receipt,
+            visibilityTimeoutMs=visibility_timeout_ms,
+        )
+
+    def queue_stats(self, topic, group):
+        return self._op("queueStats", topic=topic, group=group)
+
+    def queue_dead_letters(self, topic, group, limit=None):
+        return self._op("queueDeadLetters", topic=topic, group=group, limit=limit)
+
+    def queue_process(
+        self,
+        topic,
+        group,
+        handler,
+        max_messages=1,
+        visibility_timeout_ms=30000,
+        max_attempts=3,
+        retry_delay_ms=0,
+    ):
+        """Process and settle one bounded batch; handler failures are retried."""
+        if not callable(handler):
+            raise TypeError("queue handler must be callable")
+        deliveries = self.queue_claim(
+            topic,
+            group,
+            max_messages=max_messages,
+            visibility_timeout_ms=visibility_timeout_ms,
+            max_attempts=max_attempts,
+        )
+        result = {
+            "claimed": len(deliveries),
+            "acknowledged": 0,
+            "retried": 0,
+            "deadLettered": 0,
+        }
+        for delivery in deliveries:
+            failed = False
+            try:
+                outcome = handler(delivery)
+                if inspect.isawaitable(outcome):
+                    if inspect.iscoroutine(outcome):
+                        outcome.close()
+                    raise TypeError("async queue handlers require queue_process_async")
+            except Exception:
+                failed = True
+            if not failed:
+                self.queue_ack(topic, group, delivery["id"], delivery["receipt"])
+                result["acknowledged"] += 1
+            else:
+                settled = self.queue_nack(
+                    topic,
+                    group,
+                    delivery["id"],
+                    delivery["receipt"],
+                    delay_ms=retry_delay_ms,
+                    reason="queue handler failed",
+                )
+                key = "deadLettered" if settled.get("deadLettered") else "retried"
+                result[key] += 1
+        return result
+
+    def queue_consumer(
+        self,
+        topic,
+        group,
+        *,
+        max_messages=1,
+        visibility_timeout_ms=30000,
+        max_attempts=3,
+        retry_delay_ms=0,
+    ):
+        """Decorate a function or method as a one-batch queue invocation."""
+
+        def decorate(handler):
+            if not callable(handler):
+                raise TypeError("queue consumer can decorate only a callable")
+
+            if inspect.iscoroutinefunction(handler):
+
+                @functools.wraps(handler)
+                async def async_consumer(*args, **kwargs):
+                    return await self.queue_process_async(
+                        topic,
+                        group,
+                        lambda delivery: handler(*args, delivery, **kwargs),
+                        max_messages=max_messages,
+                        visibility_timeout_ms=visibility_timeout_ms,
+                        max_attempts=max_attempts,
+                        retry_delay_ms=retry_delay_ms,
+                    )
+
+                async_consumer.__fylo_queue_consumer__ = {
+                    "topic": topic,
+                    "group": group,
+                    "maxMessages": max_messages,
+                    "visibilityTimeoutMs": visibility_timeout_ms,
+                    "maxAttempts": max_attempts,
+                    "retryDelayMs": retry_delay_ms,
+                }
+                return async_consumer
+
+            @functools.wraps(handler)
+            def consumer(*args, **kwargs):
+                return self.queue_process(
+                    topic,
+                    group,
+                    lambda delivery: handler(*args, delivery, **kwargs),
+                    max_messages=max_messages,
+                    visibility_timeout_ms=visibility_timeout_ms,
+                    max_attempts=max_attempts,
+                    retry_delay_ms=retry_delay_ms,
+                )
+
+            consumer.__fylo_queue_consumer__ = {
+                "topic": topic,
+                "group": group,
+                "maxMessages": max_messages,
+                "visibilityTimeoutMs": visibility_timeout_ms,
+                "maxAttempts": max_attempts,
+                "retryDelayMs": retry_delay_ms,
+            }
+            return consumer
+
+        return decorate
+
+    async def queue_process_async(
+        self,
+        topic,
+        group,
+        handler,
+        max_messages=1,
+        visibility_timeout_ms=30000,
+        max_attempts=3,
+        retry_delay_ms=0,
+    ):
+        """Async-handler variant; blocking protocol calls run off the event loop."""
+        deliveries = await asyncio.to_thread(
+            self.queue_claim,
+            topic,
+            group,
+            max_messages,
+            visibility_timeout_ms,
+            max_attempts,
+        )
+        result = {
+            "claimed": len(deliveries),
+            "acknowledged": 0,
+            "retried": 0,
+            "deadLettered": 0,
+        }
+        for delivery in deliveries:
+            failed = False
+            try:
+                await handler(delivery)
+            except Exception:
+                failed = True
+            if not failed:
+                await asyncio.to_thread(
+                    self.queue_ack, topic, group, delivery["id"], delivery["receipt"]
+                )
+                result["acknowledged"] += 1
+            else:
+                settled = await asyncio.to_thread(
+                    self.queue_nack,
+                    topic,
+                    group,
+                    delivery["id"],
+                    delivery["receipt"],
+                    retry_delay_ms,
+                    "queue handler failed",
+                )
+                key = "deadLettered" if settled.get("deadLettered") else "retried"
+                result[key] += 1
+        return result
 
     # --- Documents ---
     def put_data(self, collection, data):

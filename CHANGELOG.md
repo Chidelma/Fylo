@@ -1,5 +1,41 @@
 # Changelog
 
+## 26.33.01 - 2026-08-10
+
+### Added
+
+- An embedded, brokerless queue now persists topics, independent consumer
+  groups, visibility leases, delayed retries, bounded attempts, idempotent
+  publication, and group-specific dead letters under `.fylo-queue/v1`. Seven
+  versioned machine operations expose the queue, and every native language shim
+  includes both the operation methods and a bounded one-batch consumer adapter.
+
+### Changed
+
+- The marketing and documentation site now builds with the checksum-pinned
+  Tachyon 26.33.01 `ty` release binary. Its templates use the released loop,
+  page-island, companion, and event contracts, and the build applies a
+  fail-closed nested-island ownership patch until that fix lands upstream.
+  Explorer stays on its frozen compatibility compiler because its dynamic
+  structural UI and component pub/sub are not part of Tachyon 26.33.01.
+- The website now documents the embedded serverless queue, including all seven
+  machine operations, retry fencing, resource bounds, and the one-batch
+  consumer decorators provided by the nine native SDK shims.
+- Automatic queue consumers now persist the stable reason
+  `queue handler failed` instead of copying exception text into retry or dead
+  letter state. Trusted callers can still opt in to a sanitized reason through
+  the direct negative-acknowledgement API.
+- CI now follows TACHYON's reusable qualification structure while retaining
+  FYLO's native crash/soak matrix, real-browser OPFS coverage, compiled
+  language-shim interop, and Miri gate. Locked all-target/all-feature checks,
+  warning-free Rustdoc, isolated dependency policy, measured coverage floors,
+  CycloneDX/auditable-build evidence, and scheduled address/leak/thread
+  sanitizers are now enforced and documented in the CI qualification runbook.
+- Release asset builds now require the repository default branch before their
+  job receives OIDC or attestation permissions. Manual dispatches from feature
+  branches or tags cannot execute or attest privileged release work; final
+  publication still repeats its default-branch and source-commit checks.
+
 ## 26.32.07 - 2026-08-09
 
 ### Changed

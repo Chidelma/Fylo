@@ -1,62 +1,205 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Reference</span>
-    <h1>Error codes</h1>
-    <p class="doc-lede">
-      Every failed machine response carries a non-empty <code>error.code</code>. The set
-      is additive — new codes may appear in later releases, and an existing code keeps
-      its meaning forever. Branch on the code, never on the message text.
-    </p>
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Reference</span>
+        <h1>Error codes</h1>
+        <p class="doc-lede">
+            Every failed machine response carries a non-empty <code>error.code</code>. The set is
+            additive — new codes may appear in later releases, and an existing code keeps its
+            meaning forever. Branch on the code, never on the message text.
+        </p>
 
-    <div class="doc-section doc-section--wide">
-      <div class="doc-table-wrap">
-        <table class="doc-table">
-          <thead>
-            <tr><th>Code</th><th>Meaning</th><th>Retry guidance</th></tr>
-          </thead>
-          <tbody>
-            <loop :for="let row of codes">
-              <tr>
-                <td><code>{row.code}</code></td>
-                <td>{row.meaning}</td>
-                <td>{row.retry}</td>
-              </tr>
-            </loop>
-          </tbody>
-        </table>
-      </div>
+        <div class="doc-section doc-section--wide">
+            <div class="doc-table-wrap">
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Code</th>
+                            <th>Meaning</th>
+                            <th>Retry guidance</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>EBADREQUEST</code></td>
+                            <td>
+                                The request shape, field types, access object, or page options are
+                                invalid.
+                            </td>
+                            <td>Do not retry; fix the request.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EUNSUPPORTEDOP</code></td>
+                            <td>The operation is unknown to this runtime.</td>
+                            <td>Do not retry; check the handshake capabilities.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EINVALIDDOCID</code></td>
+                            <td>The supplied document ID is not a valid TTID.</td>
+                            <td>Do not retry; fix the ID.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EARRAYOFOBJECTS</code></td>
+                            <td>
+                                The document contains an array of objects, which the data model
+                                rejects.
+                            </td>
+                            <td>Do not retry; restructure the document.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EACCES</code></td>
+                            <td>The access context is not permitted to perform the operation.</td>
+                            <td>Do not retry with the same identity.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EQUEUE_INVALID</code></td>
+                            <td>A queue identity, option, or idempotency-key reuse is invalid.</td>
+                            <td>Do not retry without correcting the request.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EQUEUE_RECEIPT</code></td>
+                            <td>A queue receipt is incorrect, expired, or superseded.</td>
+                            <td>Do not acknowledge as that worker.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EQUEUE_LIMIT</code></td>
+                            <td>
+                                A queue message, claim, delay, attempt, state, or read limit was
+                                exceeded.
+                            </td>
+                            <td>Reduce the requested resource.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EDECRYPTFAILED</code></td>
+                            <td>
+                                An $encrypted field could not be decrypted with the configured key.
+                            </td>
+                            <td>Do not retry; fix the key configuration.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EINVALIDCURSOR</code></td>
+                            <td>
+                                The pagination cursor is invalid, expired, or from another process.
+                            </td>
+                            <td>Restart the traversal from page one.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EROOTLOCKED</code></td>
+                            <td>
+                                Exclusive root ownership was unavailable — another process holds the
+                                lease.
+                            </td>
+                            <td>Fail over per your supervisor policy.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EROOTLEASELOST</code></td>
+                            <td>Exclusive root ownership was lost after it had been acquired.</td>
+                            <td>Fail over per your supervisor policy.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EFRAME_UTF8</code></td>
+                            <td>The request frame was not valid UTF-8.</td>
+                            <td>Fix the encoder; the loop resumes at the next frame.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EFRAME_JSON</code></td>
+                            <td>The request frame was not a well-formed JSON object.</td>
+                            <td>Fix the request; the loop resumes at the next frame.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EFRAME_DUPLICATE_KEY</code></td>
+                            <td>The request frame contained a duplicate object key.</td>
+                            <td>Fix the request; the loop resumes at the next frame.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EFRAME_REQUEST_TOO_LARGE</code></td>
+                            <td>The request exceeded the negotiated maximum request size.</td>
+                            <td>Split the work or raise the limit at startup.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EFRAME_RESPONSE_TOO_LARGE</code></td>
+                            <td>
+                                An unpaged response would exceed the negotiated maximum response
+                                size.
+                            </td>
+                            <td>Use a paged query on a persistent loop.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EFRAME_TRUNCATED</code></td>
+                            <td>The final frame was incomplete at EOF; the loop ends.</td>
+                            <td>Retry only after starting a new child process.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EQUERYLOOPREQUIRED</code></td>
+                            <td>The paged query contract requires a persistent loop.</td>
+                            <td>Reissue on a loop started with exec --loop.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EQUERYITEMTOOLARGE</code></td>
+                            <td>
+                                A single query result item cannot fit inside the response frame.
+                            </td>
+                            <td>Do not retry; the document exceeds the frame contract.</td>
+                        </tr>
+                        <tr>
+                            <td><code>EQUERYSNAPSHOTTOOLARGE</code></td>
+                            <td>The query snapshot exceeded its 1 GiB storage cap.</td>
+                            <td>Narrow the query.</td>
+                        </tr>
+                        <tr>
+                            <td><code>ENATIVE_IO</code></td>
+                            <td>
+                                Native filesystem I/O failed, including disk pressure or xattr
+                                operations.
+                            </td>
+                            <td>
+                                Treat a mutation as ambiguous; inspect the cause before retrying.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>EUNKNOWN</code></td>
+                            <td>An engine failure without a more specific classification.</td>
+                            <td>Treat conservatively; inspect error.message diagnostically.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="doc-section">
+            <h2>Storage-level codes</h2>
+            <p>
+                Failures raised below the protocol layer may carry additional stable codes — for
+                example <code>FYLO_COLLECTION_NOT_FOUND</code>. Those retain their meaning across
+                releases under the same additive policy, so they are equally safe to branch on.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>In-process errors</h2>
+            <p>
+                The Node and browser APIs throw typed errors rather than returning a response
+                envelope. A denied operation throws <code>FyloPermissionError</code> with
+                <code>code === 'EACCES'</code>; the code values are the same set documented above,
+                so error handling ports between the two surfaces without a translation table.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/protocol">← Machine protocol</a>
+            <a href="/docs/limitations">Limitations →</a>
+        </div>
     </div>
-
-    <div class="doc-section">
-      <h2>Storage-level codes</h2>
-      <p>
-        Failures raised below the protocol layer may carry additional stable codes — for
-        example <code>FYLO_COLLECTION_NOT_FOUND</code>. Those retain their meaning across
-        releases under the same additive policy, so they are equally safe to branch on.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>In-process errors</h2>
-      <p>
-        The Node and browser APIs throw typed errors rather than returning a response
-        envelope. A denied operation throws <code>FyloPermissionError</code> with
-        <code>code === 'EACCES'</code>; the code values are the same set documented above,
-        so error handling ports between the two surfaces without a translation table.
-      </p>
-    </div>
-
-    <div class="doc-pager">
-      <a href="/docs/protocol">← Machine protocol</a>
-      <a href="/docs/limitations">Limitations →</a>
-    </div>
-  </div>
 </div>

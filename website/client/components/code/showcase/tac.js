@@ -15,7 +15,7 @@ const LANGS = [
     { key: 'web', label: 'JS (Browser)', cmt: '//' }
 ]
 
-const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.32.07/fylo.js'
+const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.33.01/fylo.js'
 
 // Native object/array literal renderers, one per language.
 function pyLit(v) {
@@ -305,7 +305,15 @@ function scaffold(lang, bodyLines) {
     return [...s.open, '', ...body, ...s.close].join('\n')
 }
 
-export default class extends Tac {
+export default class {
+    constructor(props = {}) {
+        Object.assign(this, props)
+    }
+
+    hydrate(root) {
+        this.root = root
+        this.renderSelection()
+    }
     /** @type {string} */
     heading = 'From install to query in one minute' // populated from props.heading
 
@@ -328,12 +336,35 @@ export default class extends Tac {
         { key: 'sql', label: 'SQL', code: true }
     ]
 
-    show(key) {
+    show(_event, key) {
         this.$tab = key
+        this.renderSelection()
     }
 
-    showLang(key) {
+    showLang(_event, key) {
         this.$lang = key
+        this.renderSelection()
+    }
+
+    setCollection(_event, value) {
+        this.collection = value
+    }
+
+    renderSelection() {
+        for (const button of this.root?.querySelectorAll('[data-tab]') ?? []) {
+            const active = button.dataset.tab === this.$tab
+            button.className = active
+                ? 'w-btn w-btn-filled w-btn--sm'
+                : 'w-btn w-btn-text w-btn--sm'
+            button.setAttribute('aria-selected', String(active))
+        }
+        for (const button of this.root?.querySelectorAll('[data-lang]') ?? []) {
+            const active = button.dataset.lang === this.$lang
+            button.className = active
+                ? 'w-btn w-btn-tonal w-btn--sm'
+                : 'w-btn w-btn-ghost w-btn--sm'
+            button.setAttribute('aria-selected', String(active))
+        }
     }
 
     isCodeTab() {
@@ -490,14 +521,15 @@ export default class extends Tac {
                 return this.quickstartCode()
         }
     }
-
-    @publish('snippet-copied')
     async copyCurrent() {
+        const label = this.root?.querySelector('.showcase-copy-label')
         try {
             await navigator.clipboard.writeText(this.currentCode())
             this.copied = true
+            if (label) label.textContent = 'Copied ✓'
             setTimeout(() => {
                 this.copied = false
+                if (label) label.textContent = 'Copy'
             }, 2000)
         } catch (_) {
             /* clipboard unavailable */

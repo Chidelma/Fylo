@@ -79,6 +79,9 @@ exported/public methods must be capitalized):
 | findDocs     | `find_docs`          | `findDocs`               | `FindDocs`     |
 | findDocsPage | `find_docs_page`     | `findDocsPage`           | `FindDocsPage` |
 | executeSQL   | `execute_sql`        | `executeSQL`             | `ExecuteSQL`   |
+| queuePublish | `queue_publish`      | `queuePublish`           | `QueuePublish` |
+| queueClaim   | `queue_claim`        | `queueClaim`             | `QueueClaim`   |
+| queueAck     | `queue_ack`          | `queueAck`               | `QueueAck`     |
 
 The larger dynamic shims cover the full common machine-operation set, including
 batch, bulk, deleted-document, and join helpers. Compact compiled-language
@@ -92,6 +95,94 @@ validated raw response JSON string from their dedicated methods, so callers
 decode the envelope and read its `result` field. C# returns an unwrapped
 `JsonElement`. Every shim raises, throws, or returns an error for a failed
 machine response.
+
+### Durable serverless queue
+
+Every thin binary shim exposes publish, claim, acknowledge, negative
+acknowledge, lease extension, statistics, and dead-letter reads. The queue is
+embedded in the Rust engine and persists under `.fylo-queue/v1`; local-only
+clients continue to use their browser engine until the full Rust/Wasm engine
+becomes their default storage path.
+
+```js
+const sent = await db.queue.publish(
+    'jobs.resize',
+    { assetId },
+    {
+        idempotencyKey: `resize:${assetId}`
+    }
+)
+const [delivery] = await db.queue.claim('jobs.resize', 'image-workers', {
+    visibilityTimeoutMs: 30_000,
+    maxAttempts: 5
+})
+await db.queue.ack('jobs.resize', 'image-workers', delivery)
+```
+
+Other languages use the naming convention in the table. Delivery is at least
+once, so handlers must be idempotent. `queueClaim` returns opaque `receipt`
+values that fence stale workers. FYLO remains one-owner-per-root: concurrent
+tasks share one engine process; this is brokerless local execution, not a
+distributed cloud queue.
+
+Where a shim accepts an option map or array, it copies only the documented
+operation options. Unknown keys and protected request fields such as `op`,
+`topic`, `group`, `payload`, `id`, `receipt`, and `root` are ignored.
+
+#### Queue consumer decorators
+
+Every thin shim includes a one-batch consumer adapter. One invocation claims a
+bounded batch, calls the handler once per delivery, acknowledges successful
+handlers, and negative-acknowledges thrown or returned failures. The result
+reports `claimed`, `acknowledged`, `retried`, and `deadLettered` counts. Queue
+settlement errors are propagated and are never mistaken for handler failures.
+To avoid persisting credentials or payload data carried by exception messages,
+automatic consumers always use the generic reason `queue handler failed`.
+Trusted callers may provide an explicit diagnostic `reason` through the direct
+negative-acknowledgement method.
+
+```js
+const sendEmail = db.queue.consumer('orders', 'email-service', {
+    maxMessages: 10,
+    maxAttempts: 5,
+    retryDelayMs: 1_000
+})(async (delivery) => {
+    await email(delivery.payload)
+})
+
+// Invoke once from a serverless function, scheduled job, or worker loop.
+const outcome = await sendEmail()
+```
+
+JavaScript/TypeScript's factory is compatible with standard method-decorator
+semantics, and Python exposes a native decorator:
+
+```python
+@db.queue_consumer("orders", "email-service", max_messages=10, max_attempts=5)
+def send_email(delivery):
+    email(delivery["payload"])
+
+outcome = send_email()
+```
+
+| Language        | Consumer surface                                                              |
+| --------------- | ----------------------------------------------------------------------------- |
+| Node/TypeScript | `db.queue.consumer(...)` / `db.queueProcess(...)`                             |
+| Python          | `@db.queue_consumer(...)` / `db.queue_process(...)`; async handlers work      |
+| Ruby            | `db.queue_consumer(...) { ... }` returns a `Proc`                             |
+| PHP             | `#[FyloQueueConsumer(...)]` with `runQueueConsumer`, or `queueConsumer(...)`  |
+| Go              | `QueueConsumer(...)` returns a function using `QueueConsumerOptions`          |
+| Rust            | `queue_consumer(...)` returns a closure using `QueueConsumerOptions`          |
+| Java            | `@Fylo.QueueConsumer(...)` with `runQueueConsumer`, or `queueConsumer(...)`   |
+| C#              | `[FyloQueueConsumer(...)]` with `RunQueueConsumer`, or `QueueConsumer(...)`   |
+| Dart            | `@FyloQueueConsumer(...)` metadata explicitly bound with `queueConsumer(...)` |
+
+Go handlers receive `map[string]any`; C# and Dart receive native JSON objects.
+The dependency-free Rust and Java shims pass one validated raw delivery JSON
+object because those two single-file clients do not bundle a JSON decoder.
+Decorators process one batch rather than polling forever, keeping execution and
+scaling under the host platform's control. Long handlers can call the existing
+lease-extension method before the visibility deadline.
 
 Object arguments are always the language's **native container** — a `dict`
 (Python), `Hash` (Ruby), object (Node), associative array (PHP), `map[string]any`
@@ -338,7 +429,7 @@ directly — fully offline, no backend, no network.
 For a regular website, add a version-pinned loader to the document head:
 
 ```html
-<script src="https://d31ma.github.io/FYLO/version/26.32.07/fylo.js"></script>
+<script src="https://d31ma.github.io/FYLO/version/26.33.01/fylo.js"></script>
 ```
 
 Then open the browser-local database from your application code:
@@ -357,7 +448,7 @@ want the newest release. For direct ESM imports, the engine is published beside
 the loader:
 
 ```js
-import { createBrowserClient } from 'https://d31ma.github.io/FYLO/version/26.32.07/fylo-web.mjs'
+import { createBrowserClient } from 'https://d31ma.github.io/FYLO/version/26.33.01/fylo-web.mjs'
 
 const db = createBrowserClient()
 await db.ready()

@@ -21,7 +21,7 @@ const LANGS = [
     { key: 'web', label: 'JS (Browser)', dir: 'web', cmt: '//' }
 ]
 
-const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.32.07/fylo.js'
+const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.33.01/fylo.js'
 
 // Swift (iOS), Kotlin (Android), and Flutter are local-first mobile clients — they
 // embed the engine in a WebView, on-device only, like the browser client.
@@ -542,7 +542,14 @@ function renderStep(lang, step) {
     return step.assign ? applyBind(lang, step.assign, line) : line
 }
 
-export default class extends Tac {
+export default class {
+    constructor(props = {}) {
+        Object.assign(this, props)
+    }
+
+    hydrate(root) {
+        this.root = root
+    }
     /** @type {string} */
     topic = 'crud'
 
@@ -551,8 +558,15 @@ export default class extends Tac {
 
     langs = LANGS
 
-    showLang(key) {
+    showLang(_event, key) {
         this.$lang = key
+        for (const button of this.root?.querySelectorAll('[data-lang]') ?? []) {
+            const active = button.dataset.lang === key
+            button.className = active
+                ? 'w-btn w-btn-tonal w-btn--sm'
+                : 'w-btn w-btn-ghost w-btn--sm'
+            button.setAttribute('aria-selected', String(active))
+        }
     }
 
     activeLabel() {

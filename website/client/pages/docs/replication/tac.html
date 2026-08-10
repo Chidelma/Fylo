@@ -1,93 +1,116 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Guide</span>
-    <h1>Backup &amp; sync</h1>
-    <p class="doc-lede">
-      FYLO reads and writes one local filesystem root. It does not embed an object-storage
-      client. Mounting, snapshots, replication, and off-site backup therefore stay visible
-      infrastructure choices instead of becoming a second storage engine.
-    </p>
-
-    <div class="doc-section">
-      <h2>Post-write hooks</h2>
-      <p>
-        Source integrations can receive a notification after a local write or delete has
-        committed. A hook may enqueue work, invalidate application state, or notify an
-        infrastructure-owned replication service; it is not part of FYLO durability.
-      </p>
-      <div class="doc-note">
-        <p>
-          Hooks are configured by the process embedding FYLO. Shim clients drive the
-          filesystem-only binary and cannot pass functions across the machine protocol.
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Guide</span>
+        <h1>Backup &amp; sync</h1>
+        <p class="doc-lede">
+            FYLO reads and writes one local filesystem root. It does not embed an object-storage
+            client. Mounting, snapshots, replication, and off-site backup therefore stay visible
+            infrastructure choices instead of becoming a second storage engine.
         </p>
-      </div>
-      <pre class="code-block"><code>{hooksCode}</code></pre>
-      <div class="doc-table-wrap">
-        <table class="doc-table">
-          <thead><tr><th>Mode</th><th>Behaviour</th></tr></thead>
-          <tbody>
-            <tr><td><code>await-sync</code></td><td>Waits for the hook and reports its failure after the local commit.</td></tr>
-            <tr><td><code>fire-and-forget</code></td><td>Returns after the local commit and runs the hook in the background.</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
 
-    <div class="doc-section">
-      <h2>Back up the filesystem root</h2>
-      <p>
-        Stop the writer or use a filesystem snapshot that provides an atomic point-in-time
-        view, then copy the entire root. Do not independently copy collection directories
-        while writes continue: the catalog, transaction generation, indexes, metadata, and
-        version history must describe the same instant.
-      </p>
-      <pre class="code-block"><code>{snapshotCode}</code></pre>
-      <p>
-        Preserve extended attributes on POSIX and alternate data streams on NTFS. A copy
-        tool that preserves only file bytes can lose UID/GID/mode descriptors, custom
-        metadata, raw-file keys, and checksum stamps.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Post-write hooks</h2>
+            <p>
+                Source integrations can receive a notification after a local write or delete has
+                committed. A hook may enqueue work, invalidate application state, or notify an
+                infrastructure-owned replication service; it is not part of FYLO durability.
+            </p>
+            <div class="doc-note">
+                <p>
+                    Hooks are configured by the process embedding FYLO. Shim clients drive the
+                    filesystem-only binary and cannot pass functions across the machine protocol.
+                </p>
+            </div>
+            <pre class="code-block"><code>{hooksCode}</code></pre>
+            <div class="doc-table-wrap">
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Mode</th>
+                            <th>Behaviour</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>await-sync</code></td>
+                            <td>
+                                Waits for the hook and reports its failure after the local commit.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>fire-and-forget</code></td>
+                            <td>
+                                Returns after the local commit and runs the hook in the background.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
 
-    <div class="doc-section">
-      <h2>Restore and verify</h2>
-      <ol>
-        <li>Stop all writers and preserve the failed root without modifying it.</li>
-        <li>Restore the snapshot into a new, empty local directory.</li>
-        <li>Restore native metadata using a platform-capable copy tool.</li>
-        <li>Run <code>fylo verify &lt;collection&gt; --root &lt;restored-root&gt;</code> for every collection.</li>
-        <li>Open the restored root under one exclusive owner before switching traffic.</li>
-      </ol>
-      <div class="doc-note doc-note--warn">
-        <p>
-          Never merge a backup into a live root and never let the verification process race
-          a writer. Restore-to-new-root keeps rollback possible and makes incomplete copies
-          obvious.
-        </p>
-      </div>
-    </div>
+        <div class="doc-section">
+            <h2>Back up the filesystem root</h2>
+            <p>
+                Stop the writer or use a filesystem snapshot that provides an atomic point-in-time
+                view, then copy the entire root. Do not independently copy collection directories
+                while writes continue: the catalog, transaction generation, indexes, metadata, and
+                version history must describe the same instant.
+            </p>
+            <pre class="code-block"><code>{snapshotCode}</code></pre>
+            <p>
+                Preserve extended attributes on POSIX and alternate data streams on NTFS. A copy
+                tool that preserves only file bytes can lose UID/GID/mode descriptors, custom
+                metadata, raw-file keys, and checksum stamps.
+            </p>
+        </div>
 
-    <div class="doc-section">
-      <h2>Remote mounts</h2>
-      <p>
-        FYLO can use a mounted filesystem only when that mount preserves the locking,
-        atomic rename, durability, timestamp, and native metadata guarantees documented
-        for the local platform. Network shares and synchronized folders are unqualified
-        until tested against the full crash and ownership matrix.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Restore and verify</h2>
+            <ol>
+                <li>Stop all writers and preserve the failed root without modifying it.</li>
+                <li>Restore the snapshot into a new, empty local directory.</li>
+                <li>Restore native metadata using a platform-capable copy tool.</li>
+                <li>
+                    Run <code>fylo verify &lt;collection&gt; --root &lt;restored-root&gt;</code> for
+                    every collection.
+                </li>
+                <li>Open the restored root under one exclusive owner before switching traffic.</li>
+            </ol>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    Never merge a backup into a live root and never let the verification process
+                    race a writer. Restore-to-new-root keeps rollback possible and makes incomplete
+                    copies obvious.
+                </p>
+            </div>
+        </div>
 
-    <div class="doc-pager">
-      <a href="/docs/operations">← Configuration</a>
-      <a href="/docs/browser">Browser &amp; Explorer →</a>
+        <div class="doc-section">
+            <h2>Remote mounts</h2>
+            <p>
+                FYLO can use a mounted filesystem only when that mount preserves the locking, atomic
+                rename, durability, timestamp, and native metadata guarantees documented for the
+                local platform. Network shares and synchronized folders are unqualified until tested
+                against the full crash and ownership matrix.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/operations">← Configuration</a>
+            <a href="/docs/browser">Browser &amp; Explorer →</a>
+        </div>
     </div>
-  </div>
 </div>

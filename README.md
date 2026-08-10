@@ -5,7 +5,7 @@
 
 <p align="center">
   <a href="https://github.com/d31ma/Fylo/releases/latest"><img src="https://img.shields.io/github/v/release/d31ma/Fylo?label=latest&color=blue" alt="Latest Release"></a>
-  <a href="https://github.com/d31ma/Fylo/actions"><img src="https://img.shields.io/github/actions/workflow/status/d31ma/Fylo/publish.yml?label=build" alt="Build Status"></a>
+  <a href="https://github.com/d31ma/Fylo/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/d31ma/Fylo/ci.yml?branch=main&label=CI" alt="CI Status"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
   <a href="https://github.com/d31ma/Fylo/stargazers"><img src="https://img.shields.io/github/stars/d31ma/Fylo?style=flat" alt="GitHub Stars"></a>
 </p>
@@ -29,6 +29,7 @@
 - [Schema Versioning](#schema-versioning)
 - [Encryption](#encryption)
 - [POSTIX Access Control](#postix-access-control-uid-gid-and-mode)
+- [Serverless Queue](#serverless-queue)
 - [Remote Access](#remote-access)
 - [CLI & Machine Interface](#cli--machine-interface)
 - [Recovery & Rebuild](#recovery--rebuild)
@@ -48,6 +49,7 @@ FYLO trades complexity for clarity. Documents are plain JSON files on disk. Inde
 | **Rebuildable, not sacred**  | `fylo.<collection>.rebuild()` reconstructs indexes from data                         |
 | **Self-contained core**      | Rust storage, query, recovery, and machine protocol in one native executable         |
 | **Filesystem-only**          | One local engine; mount, snapshot, and back up the root with filesystem-native tools |
+| **Brokerless queues**        | Durable local topics, leases, retries, consumer groups, and dead letters             |
 | **Browser: local-only**      | OPFS engine in the browser — each device owns its own store, fully offline           |
 
 ---
@@ -70,6 +72,8 @@ Set `FYLO_VERIFY_PROVENANCE=1` before running the installer to require signed
 GitHub artifact provenance in addition to the release checksum. This opt-in
 requires an authenticated GitHub CLI and fails closed before installation; see
 the [release provenance runbook](docs/operations/release-provenance.md).
+Maintainers can reproduce the pull-request gates from the
+[CI qualification runbook](docs/operations/ci-qualification.md).
 
 Then drive it from your language through a thin, dependency-free
 [client shim](clients/). Node example:
@@ -1027,6 +1031,86 @@ supports fast-forward and three-way document-payload merges. If both sides
 changed the same TTID payload differently, FYLO reports conflicts and leaves
 the current branch untouched.
 
+## Serverless Queue
+
+FYLO includes a durable, brokerless queue in the Rust engine. It requires no
+Redis, SQS-compatible service, queue daemon, account, or network connection.
+Messages and consumer state live under the same filesystem root:
+
+```text
+<root>/.fylo-queue/v1/
+  manifest.json
+  receipt-key.json
+  topics/<encoded-topic>/Q00000000000000000001.json
+  consumers/<encoded-group>/<encoded-topic>.json
+  dedupe/<encoded-topic>/<sha256-key>.json
+  dead-letter/<encoded-group>/<encoded-topic>/<message-id>.json
+```
+
+The queue provides at-least-once delivery, publication-ordered scanning,
+independent consumer groups, visibility leases, lease extension, delayed
+publication and retries, bounded attempts, and group-specific dead letters.
+Messages are immutable. A claim is persisted before its receipt is returned;
+if the worker exits without acknowledging, the message becomes available after
+the visibility timeout.
+
+Every native SDK shim also provides an idiomatic consumer decorator, annotation,
+or callable wrapper. Each invocation processes one bounded batch and
+automatically acknowledges successes or negative-acknowledges handler failures,
+which makes the same queue suitable for serverless functions and scheduled
+workers without embedding an infinite polling loop. Automatic consumers store
+the generic reason `queue handler failed`; they never persist exception text.
+Trusted code that needs a diagnostic reason can pass one explicitly to
+`queueNack`.
+
+```js
+const published = await db.queue.publish(
+    'email.welcome',
+    { userId: 'u-7' },
+    { idempotencyKey: 'welcome:u-7' }
+)
+
+const deliveries = await db.queue.claim('email.welcome', 'email-service', {
+    maxMessages: 10,
+    visibilityTimeoutMs: 30_000,
+    maxAttempts: 5
+})
+
+for (const delivery of deliveries) {
+    try {
+        await sendWelcomeEmail(delivery.payload)
+        await db.queue.ack('email.welcome', 'email-service', delivery)
+    } catch {
+        await db.queue.nack('email.welcome', 'email-service', delivery, {
+            delayMs: 5_000,
+            reason: 'queue handler failed'
+        })
+    }
+}
+```
+
+Publication is safe to retry only with the same non-empty `idempotencyKey`,
+topic, and byte-equivalent JSON payload. A key reused with different content
+returns `EQUEUE_INVALID`. Claiming is intentionally not retry-safe: a lost
+claim response leaves leases that expire normally. Recent acknowledgement
+retries are idempotent only with the exact receipt that completed the delivery;
+each group retains the 1,000 most recently acknowledged ID/receipt pairs for
+that validation.
+“Serverless” means embedded and brokerless, not distributed multi-writer
+storage. FYLO still enforces one owning engine process per root. Concurrent
+worker tasks share that process and consumer group; another process can take
+over after the owner exits and the filesystem lease is released. There is no
+built-in forever-running worker—the application or its serverless invocation
+polls, handles, and acknowledges deliveries.
+
+Current limits are 127 UTF-8 bytes per topic or consumer-group name, 1 MiB per
+stored message, 1,000 deliveries per claim, an 8 MiB aggregate claim or
+dead-letter response budget, and a 64 MiB aggregate message scan budget per
+queue request,
+10,000 pending delivery states and 1,000 acknowledged ID/receipt pairs per
+consumer group, 100 attempts, a 24-hour
+visibility lease, a 30-day delay, and 1,000 dead letters returned per read.
+
 ### Machine Interface (cross-language)
 
 ```bash
@@ -1070,8 +1154,12 @@ query-omission denial semantics. `machineAccess` is present only in macOS and
 Linux builds; its absence means the runtime does not provide that authorization
 boundary. Consumers should reject a missing or unknown capability version
 before touching a production root.
+`serverlessQueue.version === 1` advertises the embedded filesystem queue,
+including its operation names, delivery model, message/claim limits, consumer
+groups, visibility leases, delayed delivery, idempotent publication, and
+group-specific dead letters.
 
-Supported operations: `handshake`, `executeSQL`, `createCollection`, `dropCollection`, `inspectCollection`, `rebuildCollection`, `reshardCollection`, `verifyCollection`, `getDoc`, `getFileData`, `getLatest`, `getMeta`, `setMeta`, `findDocs`, `findDeletedDocs`, `restoreDoc`, `joinDocs`, `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`, `delDocs`, `importBulkData`, `checkout`, `branch`, `commit`, `log`, `status`, `diff`, `restoreCommit`, `merge`, `schemaInspect`, `schemaCurrent`, `schemaHistory`, `schemaDoctor`, `schemaValidate`, `schemaMaterialize`.
+Supported operations: `handshake`, `executeSQL`, `createCollection`, `dropCollection`, `inspectCollection`, `rebuildCollection`, `reshardCollection`, `verifyCollection`, `getDoc`, `getFileData`, `getLatest`, `getMeta`, `setMeta`, `findDocs`, `findDeletedDocs`, `restoreDoc`, `joinDocs`, `putData`, `batchPutData`, `patchDoc`, `patchDocs`, `delDoc`, `delDocs`, `importBulkData`, `checkout`, `branch`, `commit`, `log`, `status`, `diff`, `restoreCommit`, `merge`, `schemaInspect`, `schemaCurrent`, `schemaHistory`, `schemaDoctor`, `schemaValidate`, `schemaMaterialize`, `queuePublish`, `queueClaim`, `queueAck`, `queueNack`, `queueExtend`, `queueStats`, `queueDeadLetters`.
 
 Document and raw-file CRUD/query operations accept an optional `access`
 object. Puts accept `{ uid?, gid?, mode? }`; reads, metadata, queries, updates,
@@ -1139,6 +1227,9 @@ text.
 | `EINVALIDDOCID`                                                        | The supplied document ID is not a valid TTID                               | Do not retry; fix the ID                                         |
 | `EARRAYOFOBJECTS`                                                      | The document contains an array of objects, which the data model rejects    | Do not retry; restructure per the document-model rule below      |
 | `EACCES`                                                               | The access context is not permitted to perform the operation               | Do not retry with the same identity                              |
+| `EQUEUE_INVALID`                                                       | A queue name, identity, option, or idempotency reuse is invalid            | Do not retry without correcting the request                      |
+| `EQUEUE_RECEIPT`                                                       | A queue receipt is incorrect, expired, or already superseded               | Do not acknowledge as that worker                                |
+| `EQUEUE_LIMIT`                                                         | A queue message, claim, delay, attempt, state, or read limit was exceeded  | Reduce the requested resource                                    |
 | `EDECRYPTFAILED`                                                       | An `$encrypted` field could not be decrypted with the configured key       | Do not retry; fix the key configuration                          |
 | `EINVALIDCURSOR`                                                       | The pagination cursor is invalid, expired, or from another process         | Restart the traversal from page one                              |
 | `EROOTLOCKED` / `EROOTLEASELOST`                                       | Exclusive root ownership was unavailable or lost                           | Fail over per your supervisor policy                             |

@@ -1,50 +1,80 @@
 <section class="arch section" aria-labelledby="arch-heading">
-  <div class="w-container w-container--xl">
-    <div class="section-head">
-      <span class="eyebrow">How it works</span>
-      <h2 id="arch-heading">Rebuildable, not sacred.</h2>
-      <p>
-        A collection is a directory. Index keys encode field path, kind, value, and document ID,
-        and carry no payload. If they ever drift, one rebuild reconstructs them from the
-        documents.
-      </p>
+    <div class="w-container w-container--xl">
+        <div class="section-head">
+            <span class="eyebrow">How it works</span>
+            <h2 id="arch-heading">Rebuildable, not sacred.</h2>
+            <p>
+                A collection is a directory. Index keys encode field path, kind, value, and document
+                ID, and carry no payload. If they ever drift, one rebuild reconstructs them from the
+                documents.
+            </p>
+        </div>
+
+        <div class="w-grid-row arch-row">
+            <div class="w-grid-col-12 w-grid-col-lg-6">
+                <h3 class="arch-sub">One collection on disk</h3>
+                <pre class="code-block arch-tree"><code>{treeText()}</code></pre>
+            </div>
+
+            <div class="w-grid-col-12 w-grid-col-lg-6">
+                <h3 class="arch-sub">Anatomy of an index key</h3>
+                <div class="key-anatomy" aria-label="Index key structure">
+                    <span class="key-part key-field">name</span><span class="key-sep">/</span
+                    ><span class="key-part key-kind">f</span><span class="key-sep">/</span
+                    ><span class="key-part key-value">alice</span><span class="key-sep">/</span
+                    ><span class="key-part key-id">4UUB32VGUDW</span>
+                </div>
+                <div class="key-legend">
+                    <span><i class="key-dot key-field"></i> field path</span>
+                    <span><i class="key-dot key-kind"></i> index kind</span>
+                    <span><i class="key-dot key-value"></i> encoded value</span>
+                    <span><i class="key-dot key-id"></i> document TTID</span>
+                </div>
+
+                <div class="w-table-wrap w-table-wrap--responsive-scroll arch-table">
+                    <table class="w-table w-table--striped">
+                        <thead>
+                            <tr>
+                                <th>Operator</th>
+                                <th>Index used</th>
+                                <th>Example</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td data-label="Operator"><code>$eq</code></td>
+                                <td data-label="Index used">Exact match key (eq)</td>
+                                <td data-label="Example"><code>role/eq.admin</code></td>
+                            </tr>
+                            <tr>
+                                <td data-label="Operator"><code>$gte / $lte</code></td>
+                                <td data-label="Index used">Sortable numeric key (n / nr)</td>
+                                <td data-label="Example"><code>age/n/c03e…</code></td>
+                            </tr>
+                            <tr>
+                                <td data-label="Operator"><code>$like 'ali%'</code></td>
+                                <td data-label="Index used">Forward prefix (f)</td>
+                                <td data-label="Example"><code>name/f/ali…</code></td>
+                            </tr>
+                            <tr>
+                                <td data-label="Operator"><code>$like '%ice'</code></td>
+                                <td data-label="Index used">Reversed prefix (r)</td>
+                                <td data-label="Example"><code>name/r/eci…</code></td>
+                            </tr>
+                            <tr>
+                                <td data-label="Operator"><code>$like '%lic%'</code></td>
+                                <td data-label="Index used">Trigram (g3) → hydrate → verify</td>
+                                <td data-label="Example"><code>name/g3/lic…</code></td>
+                            </tr>
+                            <tr>
+                                <td data-label="Operator"><code>$contains</code></td>
+                                <td data-label="Index used">Exact match on array members</td>
+                                <td data-label="Example"><code>tags/eq/platform</code></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
-
-    <div class="w-grid-row arch-row">
-      <div class="w-grid-col-12 w-grid-col-lg-6">
-        <h3 class="arch-sub">One collection on disk</h3>
-        <pre class="code-block arch-tree"><code>{treeText()}</code></pre>
-      </div>
-
-      <div class="w-grid-col-12 w-grid-col-lg-6">
-        <h3 class="arch-sub">Anatomy of an index key</h3>
-        <div class="key-anatomy" aria-label="Index key structure">
-          <span class="key-part key-field">name</span><span class="key-sep">/</span><span class="key-part key-kind">f</span><span class="key-sep">/</span><span class="key-part key-value">alice</span><span class="key-sep">/</span><span class="key-part key-id">4UUB32VGUDW</span>
-        </div>
-        <div class="key-legend">
-          <span><i class="key-dot key-field"></i> field path</span>
-          <span><i class="key-dot key-kind"></i> index kind</span>
-          <span><i class="key-dot key-value"></i> encoded value</span>
-          <span><i class="key-dot key-id"></i> document TTID</span>
-        </div>
-
-        <div class="w-table-wrap w-table-wrap--responsive-scroll arch-table">
-          <table class="w-table w-table--striped">
-            <thead>
-              <tr><th>Operator</th><th>Index used</th><th>Example</th></tr>
-            </thead>
-            <tbody>
-              <loop :for="let row of strategies">
-                <tr>
-                  <td data-label="Operator"><code>{row.op}</code></td>
-                  <td data-label="Index used">{row.index}</td>
-                  <td data-label="Example"><code>{row.example}</code></td>
-                </tr>
-              </loop>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </div>
 </section>

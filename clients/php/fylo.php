@@ -21,6 +21,19 @@
 
 class FyloError extends Exception {}
 
+#[Attribute(Attribute::TARGET_METHOD)]
+class FyloQueueConsumer
+{
+    public function __construct(
+        public string $topic,
+        public string $group,
+        public int $maxMessages = 1,
+        public int $visibilityTimeoutMs = 30000,
+        public int $maxAttempts = 3,
+        public int $retryDelayMs = 0,
+    ) {}
+}
+
 class Fylo
 {
     private const MAX_REQUEST_BYTES = 1048576;
@@ -92,6 +105,120 @@ class Fylo
     public function rebuildCollection(string $collection)
     {
         return $this->op('rebuildCollection', ['collection' => $collection]);
+    }
+
+    // --- Durable serverless queue ---
+    public function queuePublish(string $topic, mixed $payload, array $options = [])
+    {
+        return $this->op(
+            'queuePublish',
+            ['topic' => $topic, 'payload' => $payload] +
+                $this->queueOptions($options, ['delayMs', 'idempotencyKey']),
+        );
+    }
+    public function queueClaim(string $topic, string $group, array $options = [])
+    {
+        return $this->op(
+            'queueClaim',
+            ['topic' => $topic, 'group' => $group] +
+                $this->queueOptions($options, ['maxMessages', 'visibilityTimeoutMs', 'maxAttempts']),
+        );
+    }
+    public function queueAck(string $topic, string $group, string $id, string $receipt)
+    {
+        return $this->op('queueAck', compact('topic', 'group', 'id', 'receipt'));
+    }
+    public function queueNack(string $topic, string $group, string $id, string $receipt, array $options = [])
+    {
+        return $this->op(
+            'queueNack',
+            compact('topic', 'group', 'id', 'receipt') +
+                $this->queueOptions($options, ['delayMs', 'reason']),
+        );
+    }
+    public function queueExtend(string $topic, string $group, string $id, string $receipt, int $visibilityTimeoutMs = 30000)
+    {
+        return $this->op('queueExtend', compact('topic', 'group', 'id', 'receipt', 'visibilityTimeoutMs'));
+    }
+    public function queueStats(string $topic, string $group)
+    {
+        return $this->op('queueStats', compact('topic', 'group'));
+    }
+    public function queueDeadLetters(string $topic, string $group, int $limit = 100)
+    {
+        return $this->op('queueDeadLetters', compact('topic', 'group', 'limit'));
+    }
+    /** Process and settle one bounded queue batch. */
+    public function queueProcess(string $topic, string $group, callable $handler, array $options = []): array
+    {
+        $claimOptions = [
+            'maxMessages' => $options['maxMessages'] ?? 1,
+            'visibilityTimeoutMs' => $options['visibilityTimeoutMs'] ?? 30000,
+            'maxAttempts' => $options['maxAttempts'] ?? 3,
+        ];
+        $deliveries = $this->queueClaim($topic, $group, $claimOptions);
+        $result = [
+            'claimed' => count($deliveries),
+            'acknowledged' => 0,
+            'retried' => 0,
+            'deadLettered' => 0,
+        ];
+        foreach ($deliveries as $delivery) {
+            $failed = false;
+            try {
+                $handler($delivery);
+            } catch (Throwable) {
+                $failed = true;
+            }
+            if (!$failed) {
+                $this->queueAck($topic, $group, $delivery['id'], $delivery['receipt']);
+                $result['acknowledged']++;
+            } else {
+                $settled = $this->queueNack(
+                    $topic,
+                    $group,
+                    $delivery['id'],
+                    $delivery['receipt'],
+                    [
+                        'delayMs' => $options['retryDelayMs'] ?? 0,
+                        'reason' => 'queue handler failed',
+                    ],
+                );
+                $result[!empty($settled['deadLettered']) ? 'deadLettered' : 'retried']++;
+            }
+        }
+        return $result;
+    }
+    /** Return a callable decorator equivalent for languages without @ syntax. */
+    public function queueConsumer(string $topic, string $group, callable $handler, array $options = []): Closure
+    {
+        return fn (...$args) => $this->queueProcess(
+            $topic,
+            $group,
+            fn ($delivery) => $handler($delivery, ...$args),
+            $options,
+        );
+    }
+    /** Run a method configured with #[FyloQueueConsumer(...)]. */
+    public function runQueueConsumer(object $target, string $method): array
+    {
+        $reflection = new ReflectionMethod($target, $method);
+        $attributes = $reflection->getAttributes(FyloQueueConsumer::class);
+        if (count($attributes) !== 1) {
+            throw new FyloError('queue consumer method must have exactly one FyloQueueConsumer attribute');
+        }
+        $consumer = $attributes[0]->newInstance();
+        return $this->queueProcess(
+            $consumer->topic,
+            $consumer->group,
+            fn ($delivery) => $reflection->invoke($target, $delivery),
+            [
+                'maxMessages' => $consumer->maxMessages,
+                'visibilityTimeoutMs' => $consumer->visibilityTimeoutMs,
+                'maxAttempts' => $consumer->maxAttempts,
+                'retryDelayMs' => $consumer->retryDelayMs,
+            ],
+        );
     }
 
     // --- Documents ---
@@ -210,6 +337,12 @@ class Fylo
             throw new FyloError($resp['error']['message'] ?? 'fylo error');
         }
         return $resp['result'] ?? null;
+    }
+
+    /** Copy documented queue options only; unknown and protected fields are ignored. */
+    private function queueOptions(array $options, array $allowed): array
+    {
+        return array_intersect_key($options, array_fill_keys($allowed, true));
     }
 }
 

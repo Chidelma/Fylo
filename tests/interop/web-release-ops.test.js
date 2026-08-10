@@ -42,6 +42,22 @@ describe('web release operations', () => {
         }
     })
 
+    test('refuses Dropbox conflict files in deployment artifacts', async () => {
+        const temporary = await mkdtemp(path.join(os.tmpdir(), 'fylo-artifact-conflict-test-'))
+        try {
+            await writeFile(path.join(temporary, 'index.html'), 'Fylo')
+            await writeFile(
+                path.join(temporary, "index (Iyor Ezenma's conflicted copy 2026-08-09).html"),
+                'stale Fylo'
+            )
+            await expect(createWebArtifact(temporary, path.join(temporary, 'out'))).rejects.toThrow(
+                'Refusing sync-conflict file'
+            )
+        } finally {
+            await rm(temporary, { recursive: true, force: true })
+        }
+    })
+
     test('web artifacts place the hostable site at the ZIP root', async () => {
         const temporary = await mkdtemp(path.join(os.tmpdir(), 'fylo-artifact-root-test-'))
         try {
@@ -242,6 +258,12 @@ describe('web release operations', () => {
         await execFileAsync('bun', ['run', 'bundle'], { cwd: path.join(root, 'explorer') })
 
         const homepage = await Bun.file(path.join(root, 'website/dist/web/index.html')).text()
+        const islands = await Bun.file(
+            path.join(root, 'website/dist/web/.tachyon/islands.js')
+        ).text()
+        const ownershipGuard = "marker.closest('tachyon-island') !== root"
+        expect(islands.split(ownershipGuard)).toHaveLength(2)
+        expect(homepage.split('/shared/scripts/imports.js')).toHaveLength(2)
         const mime = new Map([
             ['.css', 'text/css'],
             ['.html', 'text/html'],
@@ -316,13 +338,15 @@ describe('web release operations', () => {
         }
     })
 
-    test('uses one pinned Bun and Rust toolchain for every browser release path', async () => {
+    test('uses pinned Bun, Rust, and TACHYON toolchains for every browser release path', async () => {
         const bunVersion = (await Bun.file('.bun-version').text()).trim()
         const rustToolchain = await Bun.file('rust-toolchain.toml').text()
         const build = await Bun.file('scripts/build-browser.mjs').text()
         const rootPackage = await Bun.file('package.json').json()
         const websitePackage = await Bun.file('website/package.json').json()
         const explorerPackage = await Bun.file('explorer/package.json').json()
+        const vendorInstaller = await Bun.file('scripts/install-vendor-bins.sh').text()
+        const tachyonPatch = await Bun.file('scripts/patch-tachyon-runtime.mjs').text()
 
         expect(bunVersion).toBe('1.3.11')
         expect(rustToolchain).toContain('channel = "1.97.1"')
@@ -330,6 +354,17 @@ describe('web release operations', () => {
         expect(build).toContain("readFile(new URL('../.bun-version'")
         expect(build).toContain("readFile(new URL('../rust-toolchain.toml'")
         expect(build).toContain("'--locked'")
+        expect(vendorInstaller).toContain("TACHYON_VERSION='v26.33.01'")
+        expect(websitePackage.scripts.bundle).toContain('ty bundle')
+        expect(websitePackage.scripts.bundle).toContain('patch-tachyon-runtime.mjs')
+        expect(tachyonPatch).toContain("marker.closest('tachyon-island') !== root")
+        expect(tachyonPatch).toContain('refusing to apply the 26.33.01 nested-island patch')
+        expect(tachyonPatch).toContain('/shared/scripts/imports.js')
+        expect(explorerPackage.scripts.bundle).toContain('@d31ma/tachyon/src/cli/index.js bundle')
+        expect(websitePackage.devDependencies?.['@d31ma/tachyon']).toBeUndefined()
+        expect(explorerPackage.devDependencies?.['@d31ma/tachyon']).toContain(
+            'github:d31ma/Tachyon#'
+        )
         for (const packageJson of [rootPackage, websitePackage, explorerPackage]) {
             expect(packageJson.packageManager).toBe(`bun@${bunVersion}`)
         }

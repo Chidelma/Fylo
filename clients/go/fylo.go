@@ -40,6 +40,25 @@ type Fylo struct {
 	mu   sync.Mutex
 }
 
+// QueueConsumerOptions configures one bounded decorated invocation.
+type QueueConsumerOptions struct {
+	MaxMessages         int
+	VisibilityTimeoutMs int
+	MaxAttempts         int
+	RetryDelayMs        int
+}
+
+// QueueProcessResult summarizes how a decorated batch was settled.
+type QueueProcessResult struct {
+	Claimed      int
+	Acknowledged int
+	Retried      int
+	DeadLettered int
+}
+
+// QueueHandler processes one native delivery object.
+type QueueHandler func(delivery map[string]any) error
+
 // Open starts a warm fylo process rooted at root. binary defaults to "fylo".
 func Open(root, binary string) (*Fylo, error) {
 	if binary == "" {
@@ -108,6 +127,112 @@ func (f *Fylo) InspectCollection(collection string) (any, error) {
 }
 func (f *Fylo) RebuildCollection(collection string) (any, error) {
 	return f.op("rebuildCollection", map[string]any{"collection": collection})
+}
+
+// Durable serverless queue.
+func (f *Fylo) QueuePublish(topic string, payload any, options map[string]any) (any, error) {
+	fields := map[string]any{"topic": topic, "payload": payload}
+	copyQueueOptions(fields, options, "delayMs", "idempotencyKey")
+	return f.op("queuePublish", fields)
+}
+func (f *Fylo) QueueClaim(topic, group string, options map[string]any) (any, error) {
+	fields := map[string]any{"topic": topic, "group": group}
+	copyQueueOptions(fields, options, "maxMessages", "visibilityTimeoutMs", "maxAttempts")
+	return f.op("queueClaim", fields)
+}
+func (f *Fylo) QueueAck(topic, group, id, receipt string) (any, error) {
+	return f.op("queueAck", map[string]any{"topic": topic, "group": group, "id": id, "receipt": receipt})
+}
+func (f *Fylo) QueueNack(topic, group, id, receipt string, options map[string]any) (any, error) {
+	fields := map[string]any{"topic": topic, "group": group, "id": id, "receipt": receipt}
+	copyQueueOptions(fields, options, "delayMs", "reason")
+	return f.op("queueNack", fields)
+}
+func (f *Fylo) QueueExtend(topic, group, id, receipt string, visibilityTimeoutMs int) (any, error) {
+	return f.op("queueExtend", map[string]any{"topic": topic, "group": group, "id": id, "receipt": receipt, "visibilityTimeoutMs": visibilityTimeoutMs})
+}
+func (f *Fylo) QueueStats(topic, group string) (any, error) {
+	return f.op("queueStats", map[string]any{"topic": topic, "group": group})
+}
+func (f *Fylo) QueueDeadLetters(topic, group string, limit int) (any, error) {
+	return f.op("queueDeadLetters", map[string]any{"topic": topic, "group": group, "limit": limit})
+}
+
+// copyQueueOptions ignores unknown and protected request fields by construction.
+func copyQueueOptions(fields, options map[string]any, allowed ...string) {
+	for _, key := range allowed {
+		if value, ok := options[key]; ok {
+			fields[key] = value
+		}
+	}
+}
+
+// QueueProcess claims and settles one bounded batch. Handler errors are nacked.
+func (f *Fylo) QueueProcess(topic, group string, handler QueueHandler, options QueueConsumerOptions) (QueueProcessResult, error) {
+	if handler == nil {
+		return QueueProcessResult{}, fmt.Errorf("queue handler is required")
+	}
+	if options.MaxMessages == 0 {
+		options.MaxMessages = 1
+	}
+	if options.VisibilityTimeoutMs == 0 {
+		options.VisibilityTimeoutMs = 30000
+	}
+	if options.MaxAttempts == 0 {
+		options.MaxAttempts = 3
+	}
+	claimed, err := f.QueueClaim(topic, group, map[string]any{
+		"maxMessages":         options.MaxMessages,
+		"visibilityTimeoutMs": options.VisibilityTimeoutMs,
+		"maxAttempts":         options.MaxAttempts,
+	})
+	if err != nil {
+		return QueueProcessResult{}, err
+	}
+	deliveries, ok := claimed.([]any)
+	if !ok {
+		return QueueProcessResult{}, fmt.Errorf("fylo queue claim returned an invalid delivery list")
+	}
+	result := QueueProcessResult{Claimed: len(deliveries)}
+	for _, item := range deliveries {
+		delivery, ok := item.(map[string]any)
+		if !ok {
+			return result, fmt.Errorf("fylo queue claim returned an invalid delivery")
+		}
+		id, idOK := delivery["id"].(string)
+		receipt, receiptOK := delivery["receipt"].(string)
+		if !idOK || !receiptOK {
+			return result, fmt.Errorf("fylo queue delivery lacks an id or receipt")
+		}
+		if handler(delivery) == nil {
+			if _, err := f.QueueAck(topic, group, id, receipt); err != nil {
+				return result, err
+			}
+			result.Acknowledged++
+		} else {
+			settled, err := f.QueueNack(topic, group, id, receipt, map[string]any{
+				"delayMs": options.RetryDelayMs,
+				"reason":  "queue handler failed",
+			})
+			if err != nil {
+				return result, err
+			}
+			outcome, _ := settled.(map[string]any)
+			if dead, _ := outcome["deadLettered"].(bool); dead {
+				result.DeadLettered++
+			} else {
+				result.Retried++
+			}
+		}
+	}
+	return result, nil
+}
+
+// QueueConsumer returns Go's decorator-equivalent one-batch handler wrapper.
+func (f *Fylo) QueueConsumer(topic, group string, handler QueueHandler, options QueueConsumerOptions) func() (QueueProcessResult, error) {
+	return func() (QueueProcessResult, error) {
+		return f.QueueProcess(topic, group, handler, options)
+	}
 }
 
 // --- Documents ---

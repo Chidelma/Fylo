@@ -12,6 +12,8 @@ base64.workspace = true
 fylo-format = { version = "0.1.0", path = "../fylo-format" }
 fylo-query = { version = "0.1.0", path = "../fylo-query" }
 fylo-vfs = { version = "0.1.0", path = "../fylo-vfs" }
+getrandom.workspace = true
+hmac.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

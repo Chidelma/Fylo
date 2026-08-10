@@ -1,20 +1,137 @@
 <section class="faq section" aria-labelledby="faq-heading">
-  <div class="w-container w-container--md">
-    <div class="section-head">
-      <span class="eyebrow">Questions</span>
-      <h2 id="faq-heading">Frequently asked.</h2>
-    </div>
-
-    <div class="w-accordion w-accordion--variant-default">
-      <loop :for="let faq of faqs">
-        <div :class="openKey === faq.key ? 'w-expand open' : 'w-expand'">
-          <button type="button" class="w-expand-header" on:click="toggle(faq.key)" :aria-expanded="openKey === faq.key ? 'true' : 'false'">
-            <span class="w-expand-title">{faq.q}</span>
-            <span class="w-expand-chevron" aria-hidden="true">⌄</span>
-          </button>
-          <div class="w-expand-body">{faq.a}</div>
+    <div class="w-container w-container--md">
+        <div class="section-head">
+            <span class="eyebrow">Questions</span>
+            <h2 id="faq-heading">Frequently asked.</h2>
         </div>
-      </loop>
+
+        <div class="w-accordion w-accordion--variant-default">
+            <div class="w-expand open" data-faq="rebuild">
+                <button
+                    type="button"
+                    class="w-expand-header"
+                    on:click="toggle('rebuild')"
+                    aria-expanded="true"
+                >
+                    <span class="w-expand-title">What happens if an index gets corrupted?</span
+                    ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div class="w-expand-body">
+                    Nothing is lost. Documents are the source of truth and indexes are derived
+                    accelerators — the rebuild operation reconstructs every index entry by scanning
+                    the canonical document files.
+                </div>
+            </div>
+            <div class="w-expand" data-faq="languages">
+                <button
+                    type="button"
+                    class="w-expand-header"
+                    on:click="toggle('languages')"
+                    aria-expanded="false"
+                >
+                    <span class="w-expand-title">Which languages can I use FYLO from?</span
+                    ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div class="w-expand-body">
+                    Any language that can spawn a process. FYLO ships as a single binary that speaks
+                    a JSON machine protocol over stdin/stdout; drop-in shims are provided for
+                    Python, Ruby, Node/TypeScript, PHP, Go, Rust, C#, Java, and Dart, and the
+                    protocol is tested in CI against even more. For platforms that can't spawn the
+                    binary there are local-only clients that embed the engine on-device — the
+                    browser bundle, native iOS (Swift) and Android (Kotlin) clients, and a Flutter
+                    client.
+                </div>
+            </div>
+            <div class="w-expand" data-faq="explorer">
+                <button
+                    type="button"
+                    class="w-expand-header"
+                    on:click="toggle('explorer')"
+                    aria-expanded="false"
+                >
+                    <span class="w-expand-title">Can I browse a FYLO database visually?</span
+                    ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div class="w-expand-body">
+                    Yes — Fylo Explorer is a browser UI over a real FYLO root on your disk, opened
+                    through the File System Access API. Pick the folder once and browse collections,
+                    inspect documents, and filter with SQL WHERE expressions (role = 'admin' AND age
+                    &gt;= 30). It is read-only by default — the engine rebuilds indexes into a
+                    copy-on-write overlay, never touching the folder — with opt-in writes that go
+                    through the engine. Document queries run in a worker with Wasm acceleration and
+                    automatic JavaScript fallback. Chromium-only, since Firefox and Safari do not
+                    implement real-folder access.
+                </div>
+            </div>
+            <div class="w-expand" data-faq="replication">
+                <button
+                    type="button"
+                    class="w-expand-header"
+                    on:click="toggle('replication')"
+                    aria-expanded="false"
+                >
+                    <span class="w-expand-title">How do I back up or replicate a root?</span
+                    ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div class="w-expand-body">
+                    FYLO is filesystem-only. Quiesce the writer, take a byte- and
+                    metadata-preserving snapshot of the complete root, and verify a restore into a
+                    new empty path. You can copy that snapshot with the storage or synchronization
+                    tool of your choice, but remote transport is deliberately outside the FYLO
+                    engine.
+                </div>
+            </div>
+            <div class="w-expand" data-faq="transactions">
+                <button
+                    type="button"
+                    class="w-expand-header"
+                    on:click="toggle('transactions')"
+                    aria-expanded="false"
+                >
+                    <span class="w-expand-title">Are there transactions?</span
+                    ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div class="w-expand-body">
+                    Writes are serialized per collection with advisory file locks. There are no
+                    cross-collection atomic commits — declare related objects as their own
+                    collections and join them at query time with joinDocs.
+                </div>
+            </div>
+            <div class="w-expand" data-faq="encryption">
+                <button
+                    type="button"
+                    class="w-expand-header"
+                    on:click="toggle('encryption')"
+                    aria-expanded="false"
+                >
+                    <span class="w-expand-title">Is my data encrypted at rest?</span
+                    ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div class="w-expand-body">
+                    Fields listed in a schema’s $encrypted array are stored with AES-GCM. Equality
+                    lookups use HMAC blind indexes, so queries work without decrypting — with the
+                    documented trade-off that value repetition counts are observable.
+                </div>
+            </div>
+            <div class="w-expand" data-faq="groups">
+                <button
+                    type="button"
+                    class="w-expand-header"
+                    on:click="toggle('groups')"
+                    aria-expanded="false"
+                >
+                    <span class="w-expand-title">Can multiple users share a document or file?</span
+                    ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div class="w-expand-body">
+                    Yes. Write it with .as(&#123; gid: editorsGid, mode: 0o660 &#125;), then
+                    authenticated group members read, update, or delete with .as(&#123; uid:
+                    memberUid &#125;). FYLO resolves membership from the host POSIX group database.
+                    Binary-backed applications can also supply request-scoped virtual groups from
+                    authenticated server state; never accept those claims from an end-user payload.
+                    Group write permission is required — 0o600 remains owner-only.
+                </div>
+            </div>
+        </div>
     </div>
-  </div>
 </section>

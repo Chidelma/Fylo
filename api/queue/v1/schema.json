@@ -1,0 +1,196 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://fylo.del.ma/api/queue/v1/schema.json",
+    "title": "FYLO embedded queue storage records v1",
+    "oneOf": [
+        { "$ref": "#/$defs/manifest" },
+        { "$ref": "#/$defs/receiptKey" },
+        { "$ref": "#/$defs/message" },
+        { "$ref": "#/$defs/consumer" },
+        { "$ref": "#/$defs/dedupe" },
+        { "$ref": "#/$defs/deadLetter" }
+    ],
+    "$defs": {
+        "messageId": {
+            "type": "string",
+            "pattern": "^Q[0-9]{20}$"
+        },
+        "manifest": {
+            "type": "object",
+            "required": ["format", "nextSequence"],
+            "properties": {
+                "format": { "const": "fylo.queue.v1" },
+                "nextSequence": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+        },
+        "receiptKey": {
+            "type": "object",
+            "required": ["format", "key"],
+            "properties": {
+                "format": { "const": "fylo.queue-receipt-key.v1" },
+                "key": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            },
+            "additionalProperties": false
+        },
+        "message": {
+            "type": "object",
+            "required": ["format", "id", "topic", "publishedAt", "availableAt", "payload"],
+            "properties": {
+                "format": { "const": "fylo.queue-message.v1" },
+                "id": { "$ref": "#/$defs/messageId" },
+                "topic": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 127,
+                    "pattern": "^[^/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$",
+                    "x-maxBytes": 127
+                },
+                "publishedAt": { "type": "integer", "minimum": 0 },
+                "availableAt": { "type": "integer", "minimum": 0 },
+                "payload": true
+            },
+            "additionalProperties": false
+        },
+        "available": {
+            "type": "object",
+            "required": ["state", "availableAt", "attempt"],
+            "properties": {
+                "state": { "const": "available" },
+                "availableAt": { "type": "integer", "minimum": 0 },
+                "attempt": { "type": "integer", "minimum": 0, "maximum": 100 }
+            },
+            "additionalProperties": false
+        },
+        "inFlight": {
+            "type": "object",
+            "required": ["state", "receipt", "leaseExpiresAt", "attempt", "maxAttempts"],
+            "properties": {
+                "state": { "const": "inFlight" },
+                "receipt": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "leaseExpiresAt": { "type": "integer", "minimum": 0 },
+                "attempt": { "type": "integer", "minimum": 1, "maximum": 100 },
+                "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 100 }
+            },
+            "additionalProperties": false
+        },
+        "completed": {
+            "type": "object",
+            "required": ["state"],
+            "properties": {
+                "state": { "const": "completed" }
+            },
+            "additionalProperties": false
+        },
+        "consumer": {
+            "type": "object",
+            "required": ["format", "topic", "group", "cursor", "scanCursor", "pending"],
+            "properties": {
+                "format": { "const": "fylo.queue-consumer.v1" },
+                "topic": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 127,
+                    "pattern": "^[^/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$",
+                    "x-maxBytes": 127
+                },
+                "group": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 127,
+                    "pattern": "^[^/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$",
+                    "x-maxBytes": 127
+                },
+                "cursor": {
+                    "oneOf": [{ "$ref": "#/$defs/messageId" }, { "type": "null" }]
+                },
+                "scanCursor": {
+                    "oneOf": [{ "$ref": "#/$defs/messageId" }, { "type": "null" }]
+                },
+                "pending": {
+                    "type": "object",
+                    "maxProperties": 10000,
+                    "propertyNames": { "$ref": "#/$defs/messageId" },
+                    "additionalProperties": {
+                        "oneOf": [
+                            { "$ref": "#/$defs/available" },
+                            { "$ref": "#/$defs/inFlight" },
+                            { "$ref": "#/$defs/completed" }
+                        ]
+                    }
+                },
+                "acknowledged": {
+                    "type": "object",
+                    "maxProperties": 1000,
+                    "propertyNames": { "$ref": "#/$defs/messageId" },
+                    "additionalProperties": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                    }
+                },
+                "acknowledgedOrder": {
+                    "type": "array",
+                    "maxItems": 1000,
+                    "uniqueItems": true,
+                    "items": { "$ref": "#/$defs/messageId" }
+                }
+            },
+            "additionalProperties": false
+        },
+        "dedupe": {
+            "type": "object",
+            "required": ["format", "topic", "payloadHash", "message"],
+            "properties": {
+                "format": { "const": "fylo.queue-dedupe.v1" },
+                "topic": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 127,
+                    "pattern": "^[^/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$",
+                    "x-maxBytes": 127
+                },
+                "payloadHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "message": { "$ref": "#/$defs/message" }
+            },
+            "additionalProperties": false
+        },
+        "deadLetter": {
+            "type": "object",
+            "required": [
+                "format",
+                "id",
+                "group",
+                "topic",
+                "attempts",
+                "reason",
+                "deadLetteredAt",
+                "publishedAt",
+                "payload"
+            ],
+            "properties": {
+                "format": { "const": "fylo.queue-dead-letter.v1" },
+                "id": { "$ref": "#/$defs/messageId" },
+                "group": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 127,
+                    "pattern": "^[^/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$",
+                    "x-maxBytes": 127
+                },
+                "topic": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 127,
+                    "pattern": "^[^/\\\\\\u0000-\\u001F\\u007F-\\u009F]+$",
+                    "x-maxBytes": 127
+                },
+                "attempts": { "type": "integer", "minimum": 1, "maximum": 100 },
+                "reason": { "type": "string", "maxLength": 4096 },
+                "deadLetteredAt": { "type": "integer", "minimum": 0 },
+                "publishedAt": { "type": "integer", "minimum": 0 },
+                "payload": true
+            },
+            "additionalProperties": false
+        }
+    }
+}

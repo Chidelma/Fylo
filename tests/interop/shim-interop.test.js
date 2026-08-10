@@ -93,15 +93,206 @@ describe('client shim interop via fylo exec --loop', () => {
         }
     })
 
+    test('every binary-backed language shim exposes the durable queue lifecycle', async () => {
+        const contracts = new Map([
+            [
+                'node/fylo.mjs',
+                [
+                    'queuePublish',
+                    'queueClaim',
+                    'queueAck',
+                    'queueNack',
+                    'queueExtend',
+                    'queueStats',
+                    'queueDeadLetters'
+                ]
+            ],
+            [
+                'python/fylo.py',
+                [
+                    'queue_publish',
+                    'queue_claim',
+                    'queue_ack',
+                    'queue_nack',
+                    'queue_extend',
+                    'queue_stats',
+                    'queue_dead_letters'
+                ]
+            ],
+            [
+                'ruby/fylo.rb',
+                [
+                    'queue_publish',
+                    'queue_claim',
+                    'queue_ack',
+                    'queue_nack',
+                    'queue_extend',
+                    'queue_stats',
+                    'queue_dead_letters'
+                ]
+            ],
+            [
+                'php/fylo.php',
+                [
+                    'queuePublish',
+                    'queueClaim',
+                    'queueAck',
+                    'queueNack',
+                    'queueExtend',
+                    'queueStats',
+                    'queueDeadLetters'
+                ]
+            ],
+            [
+                'go/fylo.go',
+                [
+                    'QueuePublish',
+                    'QueueClaim',
+                    'QueueAck',
+                    'QueueNack',
+                    'QueueExtend',
+                    'QueueStats',
+                    'QueueDeadLetters'
+                ]
+            ],
+            [
+                'rust/fylo.rs',
+                [
+                    'queue_publish',
+                    'queue_claim',
+                    'queue_ack',
+                    'queue_nack',
+                    'queue_extend',
+                    'queue_stats',
+                    'queue_dead_letters'
+                ]
+            ],
+            [
+                'java/Fylo.java',
+                [
+                    'queuePublish',
+                    'queueClaim',
+                    'queueAck',
+                    'queueNack',
+                    'queueExtend',
+                    'queueStats',
+                    'queueDeadLetters'
+                ]
+            ],
+            [
+                'csharp/Fylo.cs',
+                [
+                    'QueuePublish',
+                    'QueueClaim',
+                    'QueueAck',
+                    'QueueNack',
+                    'QueueExtend',
+                    'QueueStats',
+                    'QueueDeadLetters'
+                ]
+            ],
+            [
+                'dart/fylo.dart',
+                [
+                    'queuePublish',
+                    'queueClaim',
+                    'queueAck',
+                    'queueNack',
+                    'queueExtend',
+                    'queueStats',
+                    'queueDeadLetters'
+                ]
+            ]
+        ])
+        for (const [relative, methods] of contracts) {
+            const source = await readFile(path.join(shimRoot, relative), 'utf8')
+            for (const method of methods) expect(source, relative).toContain(method)
+        }
+    })
+
+    test('every binary-backed shim exposes an idiomatic queue consumer decorator', async () => {
+        const contracts = new Map([
+            ['node/fylo.mjs', ['queueProcess', 'queueConsumer', 'queue handler failed']],
+            ['python/fylo.py', ['queue_process', 'queue_consumer', 'queue handler failed']],
+            ['ruby/fylo.rb', ['queue_process', 'queue_consumer', 'queue handler failed']],
+            [
+                'php/fylo.php',
+                ['FyloQueueConsumer', 'queueProcess', 'runQueueConsumer', 'queue handler failed']
+            ],
+            [
+                'go/fylo.go',
+                ['QueueConsumerOptions', 'QueueProcess', 'QueueConsumer', 'queue handler failed']
+            ],
+            [
+                'rust/fylo.rs',
+                ['QueueConsumerOptions', 'queue_process', 'queue_consumer', 'queue handler failed']
+            ],
+            [
+                'java/Fylo.java',
+                [
+                    '@interface QueueConsumer',
+                    'queueProcess',
+                    'runQueueConsumer',
+                    'queue handler failed'
+                ]
+            ],
+            [
+                'csharp/Fylo.cs',
+                [
+                    'FyloQueueConsumerAttribute',
+                    'QueueProcess',
+                    'RunQueueConsumer',
+                    'queue handler failed'
+                ]
+            ],
+            [
+                'dart/fylo.dart',
+                ['FyloQueueConsumer', 'queueProcess', 'queueConsumer', 'queue handler failed']
+            ]
+        ])
+        for (const [relative, markers] of contracts) {
+            const source = await readFile(path.join(shimRoot, relative), 'utf8')
+            for (const marker of markers) expect(source, relative).toContain(marker)
+        }
+    })
+
     test('Python shim drives the persistent loop', async () => {
         await requireCommand('python3')
         const root = await tempRoot('fylo-python-shim-')
         const script = `
-import json, os, sys
+import asyncio, json, os, sys
 sys.path.insert(0, ${JSON.stringify(path.join(shimRoot, 'python'))})
 from fylo import Fylo
 
 with Fylo(${JSON.stringify(root)}, binary=${JSON.stringify(binaryPath)}) as db:
+    published = db.queue_publish('python.jobs', {'job': 1}, idempotency_key='python-1')
+    delivery = db.queue_claim('python.jobs', 'python-worker')[0]
+    assert delivery['id'] == published['id'], delivery
+    db.queue_ack('python.jobs', 'python-worker', delivery['id'], delivery['receipt'])
+    assert db.queue_stats('python.jobs', 'python-worker')['retired'] == 1
+    db.queue_publish('python.decorated', {'job': 2})
+    handled = []
+    @db.queue_consumer('python.decorated', 'decorated-worker')
+    def consume(delivery):
+        handled.append(delivery['payload']['job'])
+    summary = consume()
+    assert handled == [2] and summary['acknowledged'] == 1, summary
+    db.queue_publish('python.decorated.async', {'job': 3})
+    @db.queue_consumer('python.decorated.async', 'decorated-worker')
+    async def consume_async(delivery):
+        await asyncio.sleep(0)
+        handled.append(delivery['payload']['job'])
+    async_summary = asyncio.run(consume_async())
+    assert handled[-1] == 3 and async_summary['acknowledged'] == 1, async_summary
+    db.queue_publish('python.decorated.fail', {'job': 4})
+    @db.queue_consumer('python.decorated.fail', 'decorated-worker', max_attempts=1)
+    def consume_failure(delivery):
+        raise RuntimeError('FYLO_SENTINEL_SECRET_MUST_NOT_PERSIST')
+    failure_summary = consume_failure()
+    failure_letters = db.queue_dead_letters('python.decorated.fail', 'decorated-worker')
+    assert failure_summary['deadLettered'] == 1, failure_summary
+    assert failure_letters[0]['reason'] == 'queue handler failed', failure_letters
+    assert 'FYLO_SENTINEL_SECRET_MUST_NOT_PERSIST' not in json.dumps(failure_letters), failure_letters
     db.create_collection('users')
     doc_id = db.put_data('users', {'name': 'Ada', 'score': 90})
     doc = db.get_latest('users', doc_id)
@@ -149,6 +340,34 @@ try {
     bounded = error.code === 'EFRAME_REQUEST_TOO_LARGE'
   }
   if (!bounded) throw new Error('oversized Node request was not rejected')
+  const published = await db.queue.publish('node.jobs', { job: 1 }, { idempotencyKey: 'node-1' })
+  const retried = await db.queue.publish('node.jobs', { job: 1 }, { idempotencyKey: 'node-1' })
+  if (published.id !== retried.id || !retried.deduplicated) throw new Error('queue publish was not idempotent')
+  const [delivery] = await db.queue.claim('node.jobs', 'node-worker')
+  if (delivery.id !== published.id) throw new Error('queue claim returned the wrong message')
+  await db.queue.ack('node.jobs', 'node-worker', delivery)
+  const queueStats = await db.queue.stats('node.jobs', 'node-worker')
+  if (queueStats.retired !== 1 || queueStats.available !== 0) throw new Error('queue ack was not durable')
+  await db.queue.publish('node.decorated', { job: 2 })
+  const handled = []
+  const consume = db.queue.consumer('node.decorated', 'decorated-worker')(async (item) => {
+    handled.push(item.payload.job)
+  })
+  const consumed = await consume()
+  if (handled[0] !== 2 || consumed.acknowledged !== 1) throw new Error('queue decorator did not ack')
+  await db.queue.publish('node.decorated.fail', { job: 3 })
+  const fail = db.queue.consumer('node.decorated.fail', 'decorated-worker', { maxAttempts: 1 })(
+    async () => { throw new Error('FYLO_SENTINEL_SECRET_MUST_NOT_PERSIST') }
+  )
+  const failed = await fail()
+  if (failed.deadLettered !== 1) throw new Error('queue decorator did not dead-letter')
+  const failureLetters = await db.queue.deadLetters('node.decorated.fail', 'decorated-worker')
+  if (failureLetters[0]?.reason !== 'queue handler failed') {
+    throw new Error('queue decorator did not use the generic failure reason')
+  }
+  if (JSON.stringify(failureLetters).includes('FYLO_SENTINEL_SECRET_MUST_NOT_PERSIST')) {
+    throw new Error('queue decorator persisted handler exception text')
+  }
   await db.createCollection('users')
   const id = await db.putData('users', { name: 'Ada', score: 90 })
   await db.batchPutData('users', Array.from({ length: 12 }, (_, index) => ({
@@ -354,6 +573,13 @@ begin
   raise 'bad initial metadata' unless initial_meta['source'] == 'ruby' && initial_meta['reviewed'] == false
   raise 'missing canonical metadata' unless initial_meta['id'] == id && initial_meta['createdAt'] > 0
   raise 'bad updated metadata' unless !meta.key?('source') && meta['reviewed'] == false
+  db.queue_publish('ruby.decorated', { 'job' => 2 })
+  handled = []
+  consume = db.queue_consumer('ruby.decorated', 'decorated-worker') do |delivery|
+    handled << delivery.fetch('payload').fetch('job')
+  end
+  summary = consume.call
+  raise 'queue consumer wrapper did not ack' unless handled == [2] && summary['acknowledged'] == 1
   access = { 'uid' => Process.uid, 'mode' => 0o600 }
   sql_id = db.sql("INSERT INTO users (name, score, scope) VALUES ('SQL Ada', 91, 'private-sql')", access)
   raise 'anonymous SQL leaked protected row' unless db.sql("SELECT * FROM users WHERE scope = 'private-sql'").empty?

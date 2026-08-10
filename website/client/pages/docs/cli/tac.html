@@ -1,96 +1,101 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Reference</span>
-    <h1>CLI</h1>
-    <p class="doc-lede">
-      The same engine your application drives, with a human at the keyboard. Every
-      command takes <code>--root</code> (or reads <code>FYLO_ROOT</code>), and most take
-      <code>--json</code> for machine-readable output and scriptable exit codes.
-    </p>
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Reference</span>
+        <h1>CLI</h1>
+        <p class="doc-lede">
+            The same engine your application drives, with a human at the keyboard. Every command
+            takes <code>--root</code> (or reads <code>FYLO_ROOT</code>), and most take
+            <code>--json</code> for machine-readable output and scriptable exit codes.
+        </p>
 
-    <div class="doc-section">
-      <h2>Query</h2>
-      <p>
-        A bare argument is treated as SQL, so the shortest useful invocation is the
-        statement itself.
-      </p>
-      <pre class="code-block"><code>{queryCode}</code></pre>
+        <div class="doc-section">
+            <h2>Query</h2>
+            <p>
+                A bare argument is treated as SQL, so the shortest useful invocation is the
+                statement itself.
+            </p>
+            <pre class="code-block"><code>{queryCode}</code></pre>
+        </div>
+
+        <div class="doc-section">
+            <h2>Collections</h2>
+            <pre class="code-block"><code>{adminCode}</code></pre>
+            <p>
+                <code>verify</code> exits non-zero when it finds corruption, which makes it a
+                complete cron job on its own — see
+                <a href="/docs/buckets">Buckets &amp; raw files</a>.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Version control</h2>
+            <pre class="code-block"><code>{vcsCode}</code></pre>
+            <p>
+                <code>status</code> and <code>diff</code> compare document payloads only, so rebuilt
+                indexes and mtime-only changes never show up as noise.
+                <code>restore-commit</code> refuses to overwrite uncommitted changes without
+                <code>--force</code>.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Schemas</h2>
+            <pre class="code-block"><code>{schemaCode}</code></pre>
+        </div>
+
+        <div class="doc-section">
+            <h2>Filesystem snapshot and restore</h2>
+            <pre class="code-block"><code>{recoveryCode}</code></pre>
+            <p>
+                FYLO has no built-in object-storage client. Snapshot tooling must preserve native
+                metadata, and restore always targets a new directory rather than merging into a live
+                root. The full runbook is on
+                <a href="/docs/replication">Backup &amp; sync</a>.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Machine mode</h2>
+            <p>
+                <code>fylo exec</code> is the interface every non-JavaScript client uses. It reads
+                one JSON request and writes one JSON response, or holds a persistent NDJSON loop.
+            </p>
+            <pre class="code-block"><code>{execCode}</code></pre>
+            <p>
+                The framing contract, cursor rules, and the exclusive root lease are documented on
+                <a href="/docs/protocol">Machine protocol</a>.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Identity</h2>
+            <pre class="code-block"><code>{versionCode}</code></pre>
+            <p>
+                <code>version --output json</code> and the <code>handshake</code> operation share
+                one stable identity payload: FYLO runtime and protocol versions, the immutable
+                release commit and build target, required CHEX and TTID versions plus their current
+                availability, effective frame limits, and supported capabilities. Source and locally
+                compiled builds report an unknown commit; release builds embed the exact source
+                revision.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/browser">← Browser &amp; Explorer</a>
+            <a href="/docs/protocol">Machine protocol →</a>
+        </div>
     </div>
-
-    <div class="doc-section">
-      <h2>Collections</h2>
-      <pre class="code-block"><code>{adminCode}</code></pre>
-      <p>
-        <code>verify</code> exits non-zero when it finds corruption, which makes it a
-        complete cron job on its own — see
-        <a href="/docs/buckets">Buckets &amp; raw files</a>.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Version control</h2>
-      <pre class="code-block"><code>{vcsCode}</code></pre>
-      <p>
-        <code>status</code> and <code>diff</code> compare document payloads only, so
-        rebuilt indexes and mtime-only changes never show up as noise.
-        <code>restore-commit</code> refuses to overwrite uncommitted changes without
-        <code>--force</code>.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Schemas</h2>
-      <pre class="code-block"><code>{schemaCode}</code></pre>
-    </div>
-
-    <div class="doc-section">
-      <h2>Filesystem snapshot and restore</h2>
-      <pre class="code-block"><code>{recoveryCode}</code></pre>
-      <p>
-        FYLO has no built-in object-storage client. Snapshot tooling must preserve native
-        metadata, and restore always targets a new directory rather than merging into a
-        live root. The full runbook is on
-        <a href="/docs/replication">Backup &amp; sync</a>.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Machine mode</h2>
-      <p>
-        <code>fylo exec</code> is the interface every non-JavaScript client uses. It reads
-        one JSON request and writes one JSON response, or holds a persistent NDJSON loop.
-      </p>
-      <pre class="code-block"><code>{execCode}</code></pre>
-      <p>
-        The framing contract, cursor rules, and the exclusive root lease are documented on
-        <a href="/docs/protocol">Machine protocol</a>.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Identity</h2>
-      <pre class="code-block"><code>{versionCode}</code></pre>
-      <p>
-        <code>version --output json</code> and the <code>handshake</code> operation share
-        one stable identity payload: FYLO runtime and protocol versions, the immutable
-        release commit and build target, required CHEX and TTID versions plus their
-        current availability, effective frame limits, and supported capabilities. Source
-        and locally compiled builds report an unknown commit; release builds embed the
-        exact source revision.
-      </p>
-    </div>
-
-    <div class="doc-pager">
-      <a href="/docs/browser">← Browser &amp; Explorer</a>
-      <a href="/docs/protocol">Machine protocol →</a>
-    </div>
-  </div>
 </div>

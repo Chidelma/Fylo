@@ -368,11 +368,118 @@ try {
         missing.length === 0,
         `no scenario reaches these declared failpoints: ${missing.join(', ')}`
     )
+    const queueInterruptions = await verifyQueueCrashScenarios(machineBinary, template, workspace)
     console.log(
-        `Recovered ${interrupted} interrupted native mutations across ${failpoints.length} failpoints`
+        `Recovered ${interrupted} interrupted native mutations across ${failpoints.length} failpoints ` +
+            `and validated ${queueInterruptions} interrupted queue operations`
     )
 } finally {
     await rm(workspace, { recursive: true, force: true })
+}
+
+async function verifyQueueCrashScenarios(binary, source, workspace) {
+    const failpoints = ['before-file-write', 'after-file-sync', 'after-file-rename']
+    const actions = ['abort', 'enospc', 'edquot']
+    const scenarios = [
+        {
+            name: 'queue-publish',
+            prepare: async () => ({
+                op: 'queuePublish',
+                topic: 'crash-publish',
+                payload: { value: 1 }
+            }),
+            inspect: { topic: 'crash-publish', group: 'workers' }
+        },
+        {
+            name: 'queue-claim',
+            prepare: async (database) => {
+                await database.queuePublish('crash-claim', { value: 1 })
+                return {
+                    op: 'queueClaim',
+                    topic: 'crash-claim',
+                    group: 'workers',
+                    visibilityTimeoutMs: 100
+                }
+            },
+            inspect: { topic: 'crash-claim', group: 'workers' }
+        },
+        {
+            name: 'queue-ack',
+            prepare: async (database) => {
+                await database.queuePublish('crash-ack', { value: 1 })
+                const [delivery] = await database.queueClaim('crash-ack', 'workers')
+                return {
+                    op: 'queueAck',
+                    topic: 'crash-ack',
+                    group: 'workers',
+                    id: delivery.id,
+                    receipt: delivery.receipt
+                }
+            },
+            inspect: { topic: 'crash-ack', group: 'workers' }
+        },
+        {
+            name: 'queue-dead-letter',
+            prepare: async (database) => {
+                await database.queuePublish('crash-dlq', { value: 1 })
+                const [delivery] = await database.queueClaim('crash-dlq', 'workers', {
+                    maxAttempts: 1
+                })
+                return {
+                    op: 'queueNack',
+                    topic: 'crash-dlq',
+                    group: 'workers',
+                    id: delivery.id,
+                    receipt: delivery.receipt,
+                    reason: 'crash matrix'
+                }
+            },
+            inspect: { topic: 'crash-dlq', group: 'workers' }
+        }
+    ]
+    let interrupted = 0
+    for (const failpoint of failpoints) {
+        for (const scenario of scenarios) {
+            for (const action of actions) {
+                const root = join(workspace, `${failpoint}--${scenario.name}--${action}`)
+                await cloneRoot(source, root)
+                const database = new Fylo(root, { binary, exclusiveRoot: true })
+                await database.ready
+                const request = await scenario.prepare(database)
+                await database.close()
+                const failed = await run(
+                    binary,
+                    ['exec', '--request', JSON.stringify(request), '--root', root],
+                    {
+                        FYLO_RUST_FAILPOINT: failpoint,
+                        FYLO_RUST_FAILPOINT_ACTION: action
+                    }
+                )
+                assert(
+                    failed.exitCode !== 0,
+                    `${failpoint}/${scenario.name}/${action}: queue operation was not interrupted`
+                )
+                const reopened = new Fylo(root, { binary, exclusiveRoot: true })
+                await reopened.ready
+                try {
+                    await requestRequired(reopened, {
+                        op: 'queueStats',
+                        ...scenario.inspect
+                    })
+                    await requestRequired(reopened, {
+                        op: 'queueDeadLetters',
+                        ...scenario.inspect,
+                        limit: 10
+                    })
+                } finally {
+                    await reopened.close()
+                }
+                interrupted++
+                await rm(root, { recursive: true, force: true })
+            }
+        }
+    }
+    return interrupted
 }
 
 /**

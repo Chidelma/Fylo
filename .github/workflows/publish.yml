@@ -461,6 +461,7 @@ jobs:
         needs: [test, binary-interop, windows-storage, macos-storage, linux-storage, version]
         if: >-
             ${{
+              github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
               needs.test.result == 'success' &&
               needs.binary-interop.result == 'success' &&
               needs.windows-storage.result == 'success' &&
@@ -483,6 +484,8 @@ jobs:
               run: |
                   bun install --frozen-lockfile
                   (cd explorer && bun install --frozen-lockfile)
+                  sh ./scripts/install-vendor-bins.sh
+                  echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
             - name: Download native-tested Windows release executable
               uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5

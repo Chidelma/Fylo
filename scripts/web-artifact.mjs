@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 const EPOCH = new Date('2000-01-01T00:00:00.000Z')
+const SYNC_CONFLICT = /conflicted copy/i
 
 async function filesBelow(root, directory = root) {
     const files = []
@@ -13,6 +14,8 @@ async function filesBelow(root, directory = root) {
         a.name < b.name ? -1 : a.name > b.name ? 1 : 0
     )) {
         const target = path.join(directory, entry.name)
+        if (SYNC_CONFLICT.test(entry.name))
+            throw new Error(`Refusing sync-conflict file in web artifact: ${target}`)
         if (entry.isSymbolicLink()) throw new Error(`Refusing symlink in web artifact: ${target}`)
         if (entry.isDirectory()) files.push(...(await filesBelow(root, target)))
         else if (entry.isFile()) files.push(path.relative(root, target))

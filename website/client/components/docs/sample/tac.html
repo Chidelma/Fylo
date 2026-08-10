@@ -1,17 +1,136 @@
 <div class="doc-sample">
-  <div class="doc-sample-langs" role="tablist" aria-label="Language">
-    <loop :for="let lang of langs">
-      <button
-        type="button"
-        role="tab"
-        :class="$lang === lang.key ? 'w-btn w-btn-tonal w-btn--sm' : 'w-btn w-btn-ghost w-btn--sm'"
-        :aria-selected="$lang === lang.key ? 'true' : 'false'"
-        on:click="showLang(lang.key)"
-      >
-        {lang.label}
-      </button>
-    </loop>
-  </div>
+    <div class="doc-sample-langs" role="tablist" aria-label="Language">
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-tonal w-btn--sm"
+            aria-selected="true"
+            data-lang="python"
+            on:click="showLang('python')"
+        >
+            Python
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="ruby"
+            on:click="showLang('ruby')"
+        >
+            Ruby
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="node"
+            on:click="showLang('node')"
+        >
+            Node.js
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="php"
+            on:click="showLang('php')"
+        >
+            PHP
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="go"
+            on:click="showLang('go')"
+        >
+            Go
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="rust"
+            on:click="showLang('rust')"
+        >
+            Rust
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="csharp"
+            on:click="showLang('csharp')"
+        >
+            C#
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="java"
+            on:click="showLang('java')"
+        >
+            Java
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="swift"
+            on:click="showLang('swift')"
+        >
+            Swift (iOS)
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="kotlin"
+            on:click="showLang('kotlin')"
+        >
+            Kotlin (Android)
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="dart"
+            on:click="showLang('dart')"
+        >
+            Dart
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="flutter"
+            on:click="showLang('flutter')"
+        >
+            Flutter
+        </button>
+        <button
+            type="button"
+            role="tab"
+            class="w-btn w-btn-ghost w-btn--sm"
+            aria-selected="false"
+            data-lang="web"
+            on:click="showLang('web')"
+        >
+            JS (Browser)
+        </button>
+    </div>
 
-  <pre class="code-block"><code>{code()}</code></pre>
+    <pre class="code-block"><code>{code()}</code></pre>
 </div>

@@ -13,6 +13,7 @@ use fylo_vfs::{File, OpenOptions};
 use std::fs::TryLockError;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +37,13 @@ struct LeaseMetadata {
 /// A held exclusive lease on one canonical FYLO root.
 ///
 /// Dropping the value releases the kernel lock.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RootLease {
+    inner: Arc<RootLeaseInner>,
+}
+
+#[derive(Debug)]
+struct RootLeaseInner {
     root: PathBuf,
     owner: String,
     sentinel: File,
@@ -108,18 +114,20 @@ impl RootLease {
         file.write_all(&encoded).map_err(NativeStorageError::io)?;
         crate::sync_handle(&file).map_err(NativeStorageError::io)?;
         Ok(Self {
-            root: canonical,
-            owner,
-            sentinel,
-            metadata_path,
-            kernel_enforced,
+            inner: Arc::new(RootLeaseInner {
+                root: canonical,
+                owner,
+                sentinel,
+                metadata_path,
+                kernel_enforced,
+            }),
         })
     }
 
     /// Canonical root this lease covers.
     #[must_use]
     pub fn root(&self) -> &Path {
-        &self.root
+        &self.inner.root
     }
 
     /// Whether the kernel refuses a second writer, or only this record claims
@@ -129,7 +137,7 @@ impl RootLease {
     /// assume a failed second open protects it.
     #[must_use]
     pub fn kernel_enforced(&self) -> bool {
-        self.kernel_enforced
+        self.inner.kernel_enforced
     }
 
     /// Whether this build can have the kernel refuse a second writer at all.
@@ -154,8 +162,8 @@ impl RootLease {
     /// Returns `ENATIVE_ROOT_LEASE_LOST` when the recorded owner is not this
     /// lease.
     pub fn assert_owned(&self) -> Result<(), NativeStorageError> {
-        let recorded = read_metadata(&self.metadata_path)
-            .filter(|metadata| metadata.version == 1 && metadata.owner == self.owner);
+        let recorded = read_metadata(&self.inner.metadata_path)
+            .filter(|metadata| metadata.version == 1 && metadata.owner == self.inner.owner);
         if recorded.is_some() {
             return Ok(());
         }
@@ -166,7 +174,7 @@ impl RootLease {
     }
 }
 
-impl Drop for RootLease {
+impl Drop for RootLeaseInner {
     fn drop(&mut self) {
         let _ = self.sentinel.unlock();
     }

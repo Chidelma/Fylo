@@ -1,106 +1,115 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Guide</span>
-    <h1>Schemas &amp; migrations</h1>
-    <p class="doc-lede">
-      Schemas are optional, versioned, and enforced by the <code>chex</code> binary.
-      Old documents are not rewritten when the schema moves forward — they are
-      materialized to the head shape in memory as they are read, by upgrader functions
-      you write.
-    </p>
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Guide</span>
+        <h1>Schemas &amp; migrations</h1>
+        <p class="doc-lede">
+            Schemas are optional, versioned, and enforced by the <code>chex</code> binary. Old
+            documents are not rewritten when the schema moves forward — they are materialized to the
+            head shape in memory as they are read, by upgrader functions you write.
+        </p>
 
-    <div class="doc-section">
-      <h2>Layout</h2>
-      <p>
-        Schemas live under <code>FYLO_SCHEMA</code>, one directory per collection. Any
-        directory there containing a <code>manifest.json</code> is auto-created as a
-        collection when the database opens.
-      </p>
-      <pre class="code-block"><code>{layoutCode}</code></pre>
-      <pre class="code-block"><code>{manifestCode}</code></pre>
-      <p>
-        Schemas are chex regex schemas — a field name mapped to a pattern the value must
-        match. A trailing <code>?</code> on a field name makes it optional.
-      </p>
-      <pre class="code-block"><code>{schemaCode}</code></pre>
+        <div class="doc-section">
+            <h2>Layout</h2>
+            <p>
+                Schemas live under <code>FYLO_SCHEMA</code>, one directory per collection. Any
+                directory there containing a <code>manifest.json</code> is auto-created as a
+                collection when the database opens.
+            </p>
+            <pre class="code-block"><code>{layoutCode}</code></pre>
+            <pre class="code-block"><code>{manifestCode}</code></pre>
+            <p>
+                Schemas are chex regex schemas — a field name mapped to a pattern the value must
+                match. A trailing <code>?</code> on a field name makes it optional.
+            </p>
+            <pre class="code-block"><code>{schemaCode}</code></pre>
+        </div>
+
+        <div class="doc-section">
+            <h2>Upgraders</h2>
+            <p>
+                An upgrader is a pure function from one version's document shape to the next. FYLO
+                chains them on read, so a v1 document written two years ago is returned in v3 shape
+                without ever being rewritten on disk.
+            </p>
+            <pre class="code-block"><code>{upgraderCode}</code></pre>
+        </div>
+
+        <div class="doc-section">
+            <h2>Behaviour</h2>
+            <ul>
+                <li>Documents carry <code>_v</code>, their version label.</li>
+                <li>Reads materialize old documents to head shape in memory.</li>
+                <li>
+                    Strict writes validate against the head schema via the <code>chex</code> binary.
+                </li>
+                <li>
+                    A document missing <code>_v</code> is treated as the oldest version and upgraded
+                    on read.
+                </li>
+                <li>
+                    Mutation and query methods await schema bootstrap internally. If you need it
+                    settled before a synchronous probe, await <code>fylo.ready()</code>.
+                </li>
+            </ul>
+        </div>
+
+        <div class="doc-section">
+            <h2>No arrays of objects</h2>
+            <p>
+                FYLO schemas do not support arrays of objects — declare each nested object as its
+                own collection. A schema that would accept <code>items</code> as a list of records
+                throws on first read, naming the offending path. Arrays of scalars and nested
+                objects used as fields are fine.
+            </p>
+            <p>
+                This is the same rule the storage layer enforces at write time with
+                <code>EARRAYOFOBJECTS</code>; the schema layer simply refuses to promise something
+                the data model will reject. See
+                <a href="/docs/documents">Documents &amp; metadata</a>.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Strict mode</h2>
+            <p>
+                Set <code>FYLO_STRICT</code> to validate every document against the head schema
+                before it is written. Without it, schemas still drive read-time upgrades and
+                encryption registration but do not gate writes.
+            </p>
+            <pre class="code-block"><code>{cliCode}</code></pre>
+            <p>
+                <code>schema doctor</code> is the readiness check: it reports a manifest that
+                disagrees with the files on disk, a missing upgrader in the chain, or a schema that
+                the data model cannot accept.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Schemas drive encryption</h2>
+            <p>
+                The <code>$encrypted</code> array in a schema is what tells FYLO which fields to
+                encrypt and, just as importantly, which fields must be decryptable on read. That
+                registration is loaded on first read, so a read-only replica decrypts correctly
+                without ever writing. See <a href="/docs/security">Encryption &amp; access</a>.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/queue">← Serverless queue</a>
+            <a href="/docs/security">Encryption &amp; access →</a>
+        </div>
     </div>
-
-    <div class="doc-section">
-      <h2>Upgraders</h2>
-      <p>
-        An upgrader is a pure function from one version's document shape to the next.
-        FYLO chains them on read, so a v1 document written two years ago is returned in
-        v3 shape without ever being rewritten on disk.
-      </p>
-      <pre class="code-block"><code>{upgraderCode}</code></pre>
-    </div>
-
-    <div class="doc-section">
-      <h2>Behaviour</h2>
-      <ul>
-        <li>Documents carry <code>_v</code>, their version label.</li>
-        <li>Reads materialize old documents to head shape in memory.</li>
-        <li>Strict writes validate against the head schema via the <code>chex</code> binary.</li>
-        <li>A document missing <code>_v</code> is treated as the oldest version and upgraded on read.</li>
-        <li>
-          Mutation and query methods await schema bootstrap internally. If you need it
-          settled before a synchronous probe, await <code>fylo.ready()</code>.
-        </li>
-      </ul>
-    </div>
-
-    <div class="doc-section">
-      <h2>No arrays of objects</h2>
-      <p>
-        FYLO schemas do not support arrays of objects — declare each nested object as its
-        own collection. A schema that would accept <code>items</code> as a list of
-        records throws on first read, naming the offending path. Arrays of scalars and
-        nested objects used as fields are fine.
-      </p>
-      <p>
-        This is the same rule the storage layer enforces at write time with
-        <code>EARRAYOFOBJECTS</code>; the schema layer simply refuses to promise
-        something the data model will reject. See
-        <a href="/docs/documents">Documents &amp; metadata</a>.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Strict mode</h2>
-      <p>
-        Set <code>FYLO_STRICT</code> to validate every document against the head schema
-        before it is written. Without it, schemas still drive read-time upgrades and
-        encryption registration but do not gate writes.
-      </p>
-      <pre class="code-block"><code>{cliCode}</code></pre>
-      <p>
-        <code>schema doctor</code> is the readiness check: it reports a manifest that
-        disagrees with the files on disk, a missing upgrader in the chain, or a schema
-        that the data model cannot accept.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Schemas drive encryption</h2>
-      <p>
-        The <code>$encrypted</code> array in a schema is what tells FYLO which fields to
-        encrypt and, just as importantly, which fields must be decryptable on read. That
-        registration is loaded on first read, so a read-only replica decrypts correctly
-        without ever writing. See <a href="/docs/security">Encryption &amp; access</a>.
-      </p>
-    </div>
-
-    <div class="doc-pager">
-      <a href="/docs/querying">← Querying &amp; SQL</a>
-      <a href="/docs/security">Encryption &amp; access →</a>
-    </div>
-  </div>
 </div>

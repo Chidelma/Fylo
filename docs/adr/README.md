@@ -25,6 +25,10 @@ ADR.
 | [0003](0003-native-and-browser-storage-boundaries.md)       | Accepted | Native and browser storage boundaries       |
 | [0004](0004-unsafe-and-dependency-policy.md)                | Accepted | Unsafe-code and dependency policy           |
 | [0005](0005-narrow-wasm-linear-memory-boundary.md)          | Accepted | Narrow Wasm linear-memory boundary          |
+| [0006](0006-shard-records-by-the-trailing-creation-characters.md) | Accepted | Trailing-creation-character sharding   |
+| [0007](0007-filesystem-only-native-storage.md)              | Accepted | Filesystem-only native storage              |
+| [0008](0008-fylo-wasm-browser-and-mobile-engine.md)         | Accepted | Portable full-engine Wasm artifact          |
+| [0009](0009-embedded-serverless-queue.md)                   | Accepted | Embedded durable serverless queue           |
 
 ## When another ADR is required
 

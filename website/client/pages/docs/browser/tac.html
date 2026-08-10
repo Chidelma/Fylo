@@ -1,175 +1,179 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Guide</span>
-    <h1>Browser &amp; Explorer</h1>
-    <p class="doc-lede">
-      The browser client is local-only. Its JavaScript storage host follows FYLO's
-      logical model and uses a Rust/Wasm kernel for portable index work. It reads and
-      writes a store owned by that browser; there is no backend or network protocol.
-    </p>
-
-    <div class="doc-section">
-      <h2>Loading the engine</h2>
-      <p>Add the version-pinned loader to the document head:</p>
-      <pre class="code-block"><code>{loaderCode}</code></pre>
-      <pre class="code-block"><code>{useCode}</code></pre>
-      <p>
-        Use the <code>version/latest/</code> path to track the newest successful release.
-        Direct ESM consumers can import <code>fylo-web.mjs</code> from the same pinned
-        directory instead.
-      </p>
-      <div class="doc-note">
-        <p>
-          Mobile clients — iOS/Swift, Android/Kotlin, and Flutter — host this same engine
-          in a WebView, so everything on this page applies to them too.
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Guide</span>
+        <h1>Browser &amp; Explorer</h1>
+        <p class="doc-lede">
+            The browser client is local-only. Its JavaScript storage host follows FYLO's logical
+            model and uses a Rust/Wasm kernel for portable index work. It reads and writes a store
+            owned by that browser; there is no backend or network protocol.
         </p>
-      </div>
-    </div>
 
-    <div class="doc-section">
-      <h2>The engine itself in the browser</h2>
-      <p>
-        The JavaScript host below reimplements FYLO's logical model, which is why the
-        browser has lagged the native engine on version control, schema, and
-        encryption. <code>fylo-browser.wasm</code> replaces it with the engine itself:
-        the same Rust that runs natively, owning browser storage through a table of
-        plain C functions the embedder fills — filesystem, entropy, clock, and a
-        diagnostic channel. It imports no binding-generator glue, so a Swift, Kotlin,
-        or Dart embedder fills the same slots.
-      </p>
-      <p>
-        OPFS is only half synchronous: file reads and writes are, but every directory
-        operation returns a promise, and the engine calls its host synchronously. So a
-        bridge worker owns every OPFS handle and the engine worker blocks on it through
-        a <code>SharedArrayBuffer</code> — the design <code>sqlite-wasm</code> uses.
-        That needs the page to be cross-origin isolated
-        (<code>Cross-Origin-Opener-Policy: same-origin</code> and
-        <code>Cross-Origin-Embedder-Policy: require-corp</code>), or
-        <code>SharedArrayBuffer</code> does not exist and the worker says so rather
-        than failing as a disk error.
-      </p>
-      <p>
-        A root's single writer is a Web Lock held for the session, which is what the
-        handshake leaves to the host by reporting
-        <code>exclusiveRoot: false</code>. Verified storing and querying documents over
-        real OPFS in Chromium and Firefox; the JavaScript host below remains the
-        shipped default until it clears the same recovery and soak gates.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Loading the engine</h2>
+            <p>Add the version-pinned loader to the document head:</p>
+            <pre class="code-block"><code>{loaderCode}</code></pre>
+            <pre class="code-block"><code>{useCode}</code></pre>
+            <p>
+                Use the <code>version/latest/</code> path to track the newest successful release.
+                Direct ESM consumers can import <code>fylo-web.mjs</code> from the same pinned
+                directory instead.
+            </p>
+            <div class="doc-note">
+                <p>
+                    Mobile clients — iOS/Swift, Android/Kotlin, and Flutter — host this same engine
+                    in a WebView, so everything on this page applies to them too.
+                </p>
+            </div>
+        </div>
 
-    <div class="doc-section">
-      <h2>Wasm index scanning</h2>
-      <p>
-        The browser index scanner has an opt-in Wasm prototype. It keeps the existing
-        OPFS snapshot and WAL format: Wasm scans the immutable snapshot inside the worker
-        while JavaScript applies live WAL additions and removals, falling back
-        automatically if the module cannot load.
-      </p>
-      <pre class="code-block"><code>{wasmCode}</code></pre>
-      <p>
-        Build the adjacent assets with <code>bun run build:web:wasm</code>. Pass
-        <code>wasm</code> an object with a <code>url</code> to override the module
-        location. <code>collection.inspect()</code> reports
-        <code>indexAcceleration</code> as <code>active</code>, <code>fallback</code>, or
-        <code>off</code>. The feature stays opt-in while the integration is benchmarked
-        on representative stores.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>The engine itself in the browser</h2>
+            <p>
+                The JavaScript host below reimplements FYLO's logical model, which is why the
+                browser has lagged the native engine on version control, schema, and encryption.
+                <code>fylo-browser.wasm</code> replaces it with the engine itself: the same Rust
+                that runs natively, owning browser storage through a table of plain C functions the
+                embedder fills — filesystem, entropy, clock, and a diagnostic channel. It imports no
+                binding-generator glue, so a Swift, Kotlin, or Dart embedder fills the same slots.
+            </p>
+            <p>
+                OPFS is only half synchronous: file reads and writes are, but every directory
+                operation returns a promise, and the engine calls its host synchronously. So a
+                bridge worker owns every OPFS handle and the engine worker blocks on it through a
+                <code>SharedArrayBuffer</code> — the design <code>sqlite-wasm</code> uses. That
+                needs the page to be cross-origin isolated (<code
+                    >Cross-Origin-Opener-Policy: same-origin</code
+                >
+                and <code>Cross-Origin-Embedder-Policy: require-corp</code>), or
+                <code>SharedArrayBuffer</code> does not exist and the worker says so rather than
+                failing as a disk error.
+            </p>
+            <p>
+                A root's single writer is a Web Lock held for the session, which is what the
+                handshake leaves to the host by reporting
+                <code>exclusiveRoot: false</code>. Verified storing and querying documents over real
+                OPFS in Chromium and Firefox; the JavaScript host below remains the shipped default
+                until it clears the same recovery and soak gates.
+            </p>
+        </div>
 
-    <div class="doc-section">
-      <h2>Mounting a real folder</h2>
-      <p>
-        Chromium can mount a user-selected FYLO root directly through the File System
-        Access API, so the browser reads the same directory the CLI writes.
-      </p>
-      <pre class="code-block"><code>{fsaCode}</code></pre>
-      <p>
-        Set <code>access: 'overlay'</code> for read-only exploration: reads fall through
-        to the selected directory while generated indexes, journals, and other writes stay
-        in memory. Firefox and Safari do not implement real-folder access.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Wasm index scanning</h2>
+            <p>
+                The browser index scanner has an opt-in Wasm prototype. It keeps the existing OPFS
+                snapshot and WAL format: Wasm scans the immutable snapshot inside the worker while
+                JavaScript applies live WAL additions and removals, falling back automatically if
+                the module cannot load.
+            </p>
+            <pre class="code-block"><code>{wasmCode}</code></pre>
+            <p>
+                Build the adjacent assets with <code>bun run build:web:wasm</code>. Pass
+                <code>wasm</code> an object with a <code>url</code> to override the module location.
+                <code>collection.inspect()</code> reports <code>indexAcceleration</code> as
+                <code>active</code>, <code>fallback</code>, or <code>off</code>. The feature stays
+                opt-in while the integration is benchmarked on representative stores.
+            </p>
+        </div>
 
-    <div class="doc-section">
-      <h2>Fylo Explorer</h2>
-      <p>
-        Explorer is a browser UI over a real FYLO root on your disk — no server, no
-        protocol. Pick the root once in the OS dialog and later visits reopen it
-        automatically.
-      </p>
-      <pre class="code-block"><code>{explorerCode}</code></pre>
-      <ul>
-        <li>
-          <strong>Read-only by default.</strong> Reads go straight to the folder; the
-          engine's own writes land in an in-memory overlay, so the root is never modified.
-        </li>
-        <li>
-          <strong>Browse and query.</strong> A sidebar split into Collections and Buckets,
-          a document list, a JSON viewer, and a filter bar that accepts SQL
-          <code>WHERE</code> expressions. Buckets browse as Finder-style Miller columns
-          built from the key index, with image preview and byte download. A SQL console
-          runs <code>SELECT</code> statements read-only.
-        </li>
-        <li>
-          <strong>Writes are opt-in.</strong> "Enable writes" re-arms the folder as
-          readwrite and drops the overlay. Bucket uploads write bytes and a key index
-          entry immediately, but a browser cannot set the key and checksum xattrs — a
-          desktop <code>rebuild</code> or <code>verify</code> re-derives them.
-        </li>
-      </ul>
-      <div class="doc-note doc-note--warn">
-        <p>
-          There is no cross-process locking from a browser. A banner warns when the root
-          has live lock files, but concurrent writes are last-writer-wins.
-        </p>
-      </div>
-      <p>
-        Explorer rejects oversized work before reading it into memory: previews are capped
-        at 32 MiB, imports at 16 MiB and 10,000 records, exports at 64 MiB and 10,000
-        records, and bucket uploads at 64 MiB. Use the CLI for anything larger.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Mounting a real folder</h2>
+            <p>
+                Chromium can mount a user-selected FYLO root directly through the File System Access
+                API, so the browser reads the same directory the CLI writes.
+            </p>
+            <pre class="code-block"><code>{fsaCode}</code></pre>
+            <p>
+                Set <code>access: 'overlay'</code> for read-only exploration: reads fall through to
+                the selected directory while generated indexes, journals, and other writes stay in
+                memory. Firefox and Safari do not implement real-folder access.
+            </p>
+        </div>
 
-    <div class="doc-section">
-      <h2>Self-hosting Explorer</h2>
-      <p>
-        Every release includes a versioned, checksum-covered
-        <code>fylo-explorer-&lt;CalVer&gt;.zip</code>. Extract it into the root of a
-        static host — <code>index.html</code> is at the ZIP root.
-      </p>
-      <pre class="code-block"><code>{zipCode}</code></pre>
-      <p>
-        Production hosts should use a dedicated HTTPS origin, serve the extracted tree at
-        <code>/</code>, and preserve the generated MIME types — especially
-        <code>application/wasm</code>.
-      </p>
-      <div class="doc-note doc-note--warn">
-        <p>
-          Serve Explorer from an origin that hosts no unrelated application code. A CSP
-          limits what a compromised page can load, but browser directory-handle grants and
-          origin storage are shared by every script on the same origin, and the
-          application cannot enforce that separation in code.
-        </p>
-        <p>
-          Tachyon's generated component runtime currently uses <code>eval</code> for
-          bindings and event dispatch, so the deployment CSP must retain
-          <code>unsafe-eval</code> until Tachyon offers a CSP-safe compiler mode. FYLO's
-          own runtime import uses neither <code>eval</code> nor <code>new Function</code>.
-        </p>
-      </div>
-    </div>
+        <div class="doc-section">
+            <h2>Fylo Explorer</h2>
+            <p>
+                Explorer is a browser UI over a real FYLO root on your disk — no server, no
+                protocol. Pick the root once in the OS dialog and later visits reopen it
+                automatically.
+            </p>
+            <pre class="code-block"><code>{explorerCode}</code></pre>
+            <ul>
+                <li>
+                    <strong>Read-only by default.</strong> Reads go straight to the folder; the
+                    engine's own writes land in an in-memory overlay, so the root is never modified.
+                </li>
+                <li>
+                    <strong>Browse and query.</strong> A sidebar split into Collections and Buckets,
+                    a document list, a JSON viewer, and a filter bar that accepts SQL
+                    <code>WHERE</code> expressions. Buckets browse as Finder-style Miller columns
+                    built from the key index, with image preview and byte download. A SQL console
+                    runs <code>SELECT</code> statements read-only.
+                </li>
+                <li>
+                    <strong>Writes are opt-in.</strong> "Enable writes" re-arms the folder as
+                    readwrite and drops the overlay. Bucket uploads write bytes and a key index
+                    entry immediately, but a browser cannot set the key and checksum xattrs — a
+                    desktop <code>rebuild</code> or <code>verify</code> re-derives them.
+                </li>
+            </ul>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    There is no cross-process locking from a browser. A banner warns when the root
+                    has live lock files, but concurrent writes are last-writer-wins.
+                </p>
+            </div>
+            <p>
+                Explorer rejects oversized work before reading it into memory: previews are capped
+                at 32 MiB, imports at 16 MiB and 10,000 records, exports at 64 MiB and 10,000
+                records, and bucket uploads at 64 MiB. Use the CLI for anything larger.
+            </p>
+        </div>
 
-    <div class="doc-pager">
-      <a href="/docs/replication">← Backup &amp; sync</a>
-      <a href="/docs/cli">CLI →</a>
+        <div class="doc-section">
+            <h2>Self-hosting Explorer</h2>
+            <p>
+                Every release includes a versioned, checksum-covered
+                <code>fylo-explorer-&lt;CalVer&gt;.zip</code>. Extract it into the root of a static
+                host — <code>index.html</code> is at the ZIP root.
+            </p>
+            <pre class="code-block"><code>{zipCode}</code></pre>
+            <p>
+                Production hosts should use a dedicated HTTPS origin, serve the extracted tree at
+                <code>/</code>, and preserve the generated MIME types — especially
+                <code>application/wasm</code>.
+            </p>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    Serve Explorer from an origin that hosts no unrelated application code. A CSP
+                    limits what a compromised page can load, but browser directory-handle grants and
+                    origin storage are shared by every script on the same origin, and the
+                    application cannot enforce that separation in code.
+                </p>
+                <p>
+                    Tachyon's generated component runtime currently uses <code>eval</code> for
+                    bindings and event dispatch, so the deployment CSP must retain
+                    <code>unsafe-eval</code> until Tachyon offers a CSP-safe compiler mode. FYLO's
+                    own runtime import uses neither <code>eval</code> nor <code>new Function</code>.
+                </p>
+            </div>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/replication">← Backup &amp; sync</a>
+            <a href="/docs/cli">CLI →</a>
+        </div>
     </div>
-  </div>
 </div>
