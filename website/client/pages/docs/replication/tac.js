@@ -1,13 +1,8 @@
 const TITLE = 'Backup & sync — FYLO'
 document.title = TITLE
 
-export default class extends Tac {
-  constructor(props = {}, tac = undefined) {
-    super(props, tac)
-    if (this.isBrowser) document.title = TITLE
-  }
-
-  hooksCode = `const fylo = new Fylo('/mnt/fylo', {
+export default class {
+    hooksCode = `const fylo = new Fylo('/mnt/fylo', {
     syncMode: 'fire-and-forget',
     sync: {
         async onWrite(event) {
@@ -30,7 +25,7 @@ export default class extends Tac {
     }
 })`
 
-  snapshotCode = `# Example only: choose the snapshot/copy tool qualified for your filesystem.
+    snapshotCode = `# Example only: choose the snapshot/copy tool qualified for your filesystem.
 # Stop the FYLO writer first when the source is not an atomic snapshot.
 
 # macOS / POSIX metadata-preserving copy

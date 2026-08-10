@@ -1,41 +1,205 @@
 <section class="showcase" aria-labelledby="showcase-heading">
-  <div class="w-container w-container--lg">
-    <div class="section-head">
-      <span class="eyebrow">Show me the code</span>
-      <h2 id="showcase-heading">{heading}</h2>
-      <p>
-        One binary, one JSON protocol, your language. The same engine speaks NoSQL collections
-        and plain SQL. Pick a language, rename the collection — every sample follows.
-      </p>
+    <div class="w-container w-container--lg">
+        <div class="section-head">
+            <span class="eyebrow">Show me the code</span>
+            <h2 id="showcase-heading">{heading}</h2>
+            <p>
+                One binary, one JSON protocol, your language. The same engine speaks NoSQL
+                collections and plain SQL. Pick a language, rename the collection — every sample
+                follows.
+            </p>
+        </div>
+
+        <div class="showcase-toolbar">
+            <div class="showcase-tabs" role="tablist" aria-label="Code samples">
+                <button
+                    type="button"
+                    class="w-btn w-btn-filled w-btn--sm"
+                    aria-selected="true"
+                    data-tab="start"
+                    role="tab"
+                    on:click="show('start')"
+                >
+                    Quick start
+                </button>
+                <button
+                    type="button"
+                    class="w-btn w-btn-text w-btn--sm"
+                    aria-selected="false"
+                    data-tab="query"
+                    role="tab"
+                    on:click="show('query')"
+                >
+                    Query
+                </button>
+                <button
+                    type="button"
+                    class="w-btn w-btn-text w-btn--sm"
+                    aria-selected="false"
+                    data-tab="sql"
+                    role="tab"
+                    on:click="show('sql')"
+                >
+                    SQL
+                </button>
+            </div>
+
+            <label class="collection-field">
+                <span>collection</span>
+                <input
+                    value="users"
+                    on:input="setCollection($event.target.value)"
+                    spellcheck="false"
+                    autocomplete="off"
+                    aria-label="Collection name used in the code samples"
+                />
+            </label>
+        </div>
+
+        <div class="showcase-langs" role="tablist" aria-label="Language">
+            <button
+                type="button"
+                class="w-btn w-btn-tonal w-btn--sm"
+                aria-selected="true"
+                data-lang="python"
+                role="tab"
+                on:click="showLang('python')"
+            >
+                Python
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="ruby"
+                role="tab"
+                on:click="showLang('ruby')"
+            >
+                Ruby
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="node"
+                role="tab"
+                on:click="showLang('node')"
+            >
+                Node.js
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="php"
+                role="tab"
+                on:click="showLang('php')"
+            >
+                PHP
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="go"
+                role="tab"
+                on:click="showLang('go')"
+            >
+                Go
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="rust"
+                role="tab"
+                on:click="showLang('rust')"
+            >
+                Rust
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="csharp"
+                role="tab"
+                on:click="showLang('csharp')"
+            >
+                C#
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="java"
+                role="tab"
+                on:click="showLang('java')"
+            >
+                Java
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="swift"
+                role="tab"
+                on:click="showLang('swift')"
+            >
+                Swift (iOS)
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="kotlin"
+                role="tab"
+                on:click="showLang('kotlin')"
+            >
+                Kotlin (Android)
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="dart"
+                role="tab"
+                on:click="showLang('dart')"
+            >
+                Dart
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="flutter"
+                role="tab"
+                on:click="showLang('flutter')"
+            >
+                Flutter
+            </button>
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm"
+                aria-selected="false"
+                data-lang="web"
+                role="tab"
+                on:click="showLang('web')"
+            >
+                JS (Browser)
+            </button>
+        </div>
+
+        <div class="showcase-panel">
+            <pre class="code-block"><code>{currentCode()}</code></pre>
+
+            <button
+                type="button"
+                class="w-btn w-btn-ghost w-btn--sm showcase-copy"
+                on:click="copyCurrent()"
+                aria-label="Copy code sample"
+            >
+                <span class="showcase-copy-label">Copy</span>
+            </button>
+        </div>
     </div>
-
-    <div class="showcase-toolbar">
-      <div class="showcase-tabs" role="tablist" aria-label="Code samples">
-        <loop :for="let tabDef of tabs">
-          <button type="button" :class="$tab === tabDef.key ? 'w-btn w-btn-filled w-btn--sm' : 'w-btn w-btn-text w-btn--sm'" :aria-selected="$tab === tabDef.key ? 'true' : 'false'" role="tab" on:click="show(tabDef.key)">{tabDef.label}</button>
-        </loop>
-      </div>
-
-      <label class="collection-field">
-        <span>collection</span>
-        <input :value="collection" spellcheck="false" autocomplete="off" aria-label="Collection name used in the code samples" />
-      </label>
-    </div>
-
-    <logic :if="isCodeTab()">
-      <div class="showcase-langs" role="tablist" aria-label="Language">
-        <loop :for="let lang of langs">
-          <button type="button" :class="$lang === lang.key ? 'w-btn w-btn-tonal w-btn--sm' : 'w-btn w-btn-ghost w-btn--sm'" :aria-selected="$lang === lang.key ? 'true' : 'false'" role="tab" on:click="showLang(lang.key)">{lang.label}</button>
-        </loop>
-      </div>
-    </logic>
-
-    <div class="showcase-panel">
-      <pre class="code-block"><code>{currentCode()}</code></pre>
-
-      <button type="button" class="w-btn w-btn-ghost w-btn--sm showcase-copy" on:click="copyCurrent()" aria-label="Copy code sample">
-        <logic :if="copied">Copied ✓</logic><logic else="">Copy</logic>
-      </button>
-    </div>
-  </div>
 </section>

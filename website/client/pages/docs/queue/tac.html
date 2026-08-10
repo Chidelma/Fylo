@@ -1,0 +1,277 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
+<style>
+    #home-content {
+        display: none;
+    }
+</style>
+
+<div class="doc-shell">
+    <docs-nav />
+
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Guide</span>
+        <h1>Serverless queue</h1>
+        <p class="doc-lede">
+            Durable topics, consumer groups, visibility leases, retries, and dead letters live
+            inside the Rust engine. There is no queue daemon, cloud account, network dependency, or
+            broker to operate.
+        </p>
+
+        <div class="doc-section">
+            <h2>Embedded and brokerless</h2>
+            <p>
+                Queue state lives beside the collections under the same FYLO root. Messages are
+                immutable, claims are durable before their receipts are returned, and each consumer
+                group advances independently.
+            </p>
+            <pre class="code-block"><code>{layoutCode}</code></pre>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    Serverless does not mean distributed multi-writer storage. FYLO still permits
+                    one owning engine process per root. Concurrent tasks share that process, and
+                    another process takes over only after the filesystem lease is released.
+                </p>
+            </div>
+        </div>
+
+        <div class="doc-section doc-section--wide">
+            <h2>Seven machine operations</h2>
+            <div class="doc-table-wrap">
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Operation</th>
+                            <th>Purpose</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>queuePublish</code></td>
+                            <td>
+                                Persist an immutable message, optionally with delayed availability
+                                and an idempotency key.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>queueClaim</code></td>
+                            <td>
+                                Lease a bounded publication-ordered batch for one consumer group.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>queueAck</code></td>
+                            <td>Complete one delivery using its opaque receipt.</td>
+                        </tr>
+                        <tr>
+                            <td><code>queueNack</code></td>
+                            <td>
+                                Retry after a delay or move an exhausted delivery to that group's
+                                dead letters.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><code>queueExtend</code></td>
+                            <td>Extend a live visibility lease for a long-running handler.</td>
+                        </tr>
+                        <tr>
+                            <td><code>queueStats</code></td>
+                            <td>Read bounded topic and consumer-group counts.</td>
+                        </tr>
+                        <tr>
+                            <td><code>queueDeadLetters</code></td>
+                            <td>Read the bounded dead-letter history for one group and topic.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p>
+                The handshake advertises this contract as
+                <code>serverlessQueue.version === 1</code>. A supervisor should reject a missing or
+                unknown capability version before sending queue operations.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Direct control</h2>
+            <p>
+                Use the direct methods when the application needs custom settlement, lease
+                extension, or a trusted diagnostic reason. Delivery is at least once, so every
+                handler must be idempotent.
+            </p>
+            <pre class="code-block"><code>{directCode}</code></pre>
+            <p>
+                Automatic consumers and general application code should persist a generic failure
+                reason. Exception text can contain credentials or payload data and must not be
+                copied into durable dead-letter state.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>One-batch consumer decorators</h2>
+            <p>
+                Every native binary shim provides an idiomatic decorator, annotation, or callable
+                wrapper. One invocation claims a bounded batch, calls the handler once per delivery,
+                acknowledges successes, and negative-acknowledges failures. It returns
+                <code>claimed</code>, <code>acknowledged</code>, <code>retried</code>, and
+                <code>deadLettered</code> counts instead of hiding an infinite poll loop.
+            </p>
+            <pre class="code-block"><code>{decoratorCode}</code></pre>
+            <p>Python exposes the same lifecycle as a native decorator:</p>
+            <pre class="code-block"><code>{pythonCode}</code></pre>
+            <div class="doc-table-wrap">
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Shim</th>
+                            <th>Consumer surface</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Node / TypeScript</td>
+                            <td>
+                                <code>db.queue.consumer(...)</code> or
+                                <code>db.queueProcess(...)</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Python</td>
+                            <td>
+                                <code>@db.queue_consumer(...)</code> or
+                                <code>db.queue_process(...)</code>; async handlers work
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Ruby</td>
+                            <td>
+                                <code>db.queue_consumer(...) &#123; ... &#125;</code> returns a
+                                <code>Proc</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>PHP</td>
+                            <td>
+                                <code>#[FyloQueueConsumer(...)]</code> with
+                                <code>runQueueConsumer</code>, or <code>queueConsumer(...)</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Go</td>
+                            <td>
+                                <code>QueueConsumer(...)</code> with
+                                <code>QueueConsumerOptions</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Rust</td>
+                            <td>
+                                <code>queue_consumer(...)</code> with
+                                <code>QueueConsumerOptions</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Java</td>
+                            <td>
+                                <code>@Fylo.QueueConsumer(...)</code> with
+                                <code>runQueueConsumer</code>, or <code>queueConsumer(...)</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>C#</td>
+                            <td>
+                                <code>[FyloQueueConsumer(...)]</code> with
+                                <code>RunQueueConsumer</code>, or <code>QueueConsumer(...)</code>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Dart</td>
+                            <td>
+                                <code>@FyloQueueConsumer(...)</code> metadata bound explicitly with
+                                <code>queueConsumer(...)</code>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p>
+                These adapters are available in the nine native-binary shims. Browser and mobile
+                clients keep their current local engine surface and do not advertise the native
+                queue capability.
+            </p>
+        </div>
+
+        <div class="doc-section doc-section--wide">
+            <h2>Retry and fencing rules</h2>
+            <div class="doc-table-wrap">
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Event</th>
+                            <th>Rule</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Publish response is lost</td>
+                            <td>
+                                Retry only with the same non-empty idempotency key, topic, and
+                                byte-equivalent JSON payload.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Claim response is lost</td>
+                            <td>
+                                Do not retry as if nothing happened. The persisted leases become
+                                visible after their timeout.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Worker becomes stale</td>
+                            <td>
+                                An expired or superseded opaque receipt cannot acknowledge, retry,
+                                or extend the delivery.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Handler fails</td>
+                            <td>
+                                Negative-acknowledge with a delay; exceeding
+                                <code>maxAttempts</code> dead-letters only that consumer group.
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Worker exits</td>
+                            <td>
+                                Unacknowledged deliveries return automatically after the visibility
+                                timeout.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="doc-section">
+            <h2>Resource limits</h2>
+            <p>
+                Topics and consumer groups are limited to 127 UTF-8 bytes. A stored message is at
+                most 1 MiB; one claim returns at most 1,000 deliveries and 8 MiB. Each group retains
+                at most 10,000 pending states and the 1,000 most recently acknowledged ID/receipt
+                pairs. Claim and stats requests stop after 64 MiB of aggregate message-file scan
+                work. Attempts cap at 100, visibility at 24 hours, delay at 30 days, and one
+                dead-letter read at 1,000 entries. Exceeding a bound returns
+                <code>EQUEUE_LIMIT</code>; invalid options or incompatible idempotency reuse return
+                <code>EQUEUE_INVALID</code>; stale receipts return <code>EQUEUE_RECEIPT</code>.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/querying">← Querying &amp; SQL</a>
+            <a href="/docs/schemas">Schemas &amp; migrations →</a>
+        </div>
+    </div>
+</div>

@@ -180,6 +180,30 @@ describe('compiled binary language interop', () => {
             getOutputs: ['base64', 'path'],
             integrity: 'sha256-full-content'
         })
+        expect(cliIdentity.capabilities.serverlessQueue).toEqual({
+            version: 1,
+            operations: [
+                'queuePublish',
+                'queueClaim',
+                'queueAck',
+                'queueNack',
+                'queueExtend',
+                'queueStats',
+                'queueDeadLetters'
+            ],
+            storage: 'filesystem',
+            broker: 'embedded',
+            delivery: 'at-least-once',
+            ordering: 'publication-order-claims',
+            consumerGroups: true,
+            visibilityLeases: true,
+            delayedDelivery: true,
+            idempotentPublish: true,
+            deadLetters: 'per-group',
+            maxMessageBytes: 1024 * 1024,
+            maxClaimMessages: 1000,
+            maxPendingPerGroup: 10000
+        })
         if (!['darwin', 'linux'].includes(process.platform)) {
             expect(cliIdentity.capabilities.machineAccess).toBeUndefined()
         } else {
@@ -1021,6 +1045,55 @@ $binary = $argv[1];
 $root = $argv[2];
 $uid = (int) $argv[3];
 $db = new Fylo($root, $binary);
+$protected = $db->queuePublish(
+    'php.protected',
+    ['job' => 7],
+    [
+        'delayMs' => 0,
+        'idempotencyKey' => 'php-protected-1',
+        'op' => 'handshake',
+        'topic' => 'php.overridden',
+        'payload' => ['job' => 99],
+        'root' => '/tmp/fylo-queue-option-injection',
+    ],
+);
+$protectedDeliveries = $db->queueClaim(
+    'php.protected',
+    'php-protected-worker',
+    [
+        'maxMessages' => 1,
+        'visibilityTimeoutMs' => 30000,
+        'maxAttempts' => 1,
+        'op' => 'handshake',
+        'topic' => 'php.overridden',
+        'group' => 'php-overridden-worker',
+    ],
+);
+$protectedDelivery = $protectedDeliveries[0] ?? null;
+if (
+    ($protected['id'] ?? null) !== ($protectedDelivery['id'] ?? null) ||
+    ($protectedDelivery['payload']['job'] ?? null) !== 7
+) {
+    throw new Exception('PHP queue options altered protected request fields');
+}
+$protectedNack = $db->queueNack(
+    'php.protected',
+    'php-protected-worker',
+    $protectedDelivery['id'],
+    $protectedDelivery['receipt'],
+    [
+        'delayMs' => 0,
+        'reason' => 'expected protected-option regression',
+        'op' => 'handshake',
+        'topic' => 'php.overridden',
+        'group' => 'php-overridden-worker',
+        'id' => 'overridden-id',
+        'receipt' => 'overridden-receipt',
+    ],
+);
+if (empty($protectedNack['deadLettered'])) {
+    throw new Exception('PHP queue nack options altered protected request fields');
+}
 $db->createCollection("users");
 $id = $db->putData("users", ["name" => "Ada", "role" => "admin", "age" => 30]);
 $doc = $db->getLatest("users", $id);
@@ -1032,6 +1105,19 @@ $sqlId = $db->sql("INSERT INTO users (name, scope) VALUES ('SQL Ada', 'private-s
 $private = $db->sql("SELECT * FROM users WHERE scope = 'private-sql'", ['uid' => $uid]);
 if (($private[$sqlId]['name'] ?? null) !== 'SQL Ada') {
     throw new Exception("bad protected SQL result");
+}
+$db->queuePublish('php.decorated', ['job' => 1]);
+$worker = new class {
+    public bool $handled = false;
+    #[FyloQueueConsumer('php.decorated', 'php-worker')]
+    public function handle(array $delivery): void
+    {
+        $this->handled = ($delivery['payload']['job'] ?? null) === 1;
+    }
+};
+$outcome = $db->runQueueConsumer($worker, 'handle');
+if (!$worker->handled || $outcome['acknowledged'] !== 1) {
+    throw new Exception('PHP queue attribute did not acknowledge');
 }
 $db->close();
 echo '{"ok":true}' . "\n";
@@ -1072,6 +1158,43 @@ func main() {
 		panic(err)
 	}
 	defer db.Close()
+	protected, err := db.QueuePublish("go.protected", map[string]any{"job": 7}, map[string]any{
+		"delayMs": 0, "idempotencyKey": "go-protected-1", "op": "handshake",
+		"topic": "go.overridden", "payload": map[string]any{"job": 99},
+		"root": "/tmp/fylo-queue-option-injection",
+	})
+	if err != nil {
+		panic(err)
+	}
+	claimed, err := db.QueueClaim("go.protected", "go-protected-worker", map[string]any{
+		"maxMessages": 1, "visibilityTimeoutMs": 30000, "maxAttempts": 1,
+		"op": "handshake", "topic": "go.overridden", "group": "go-overridden-worker",
+	})
+	if err != nil {
+		panic(err)
+	}
+	protectedResult, ok := protected.(map[string]any)
+	deliveries, deliveriesOK := claimed.([]any)
+	if !ok || !deliveriesOK || len(deliveries) != 1 {
+		panic("Go queue options altered protected request fields")
+	}
+	delivery, ok := deliveries[0].(map[string]any)
+	payload, payloadOK := delivery["payload"].(map[string]any)
+	if !ok || !payloadOK || delivery["id"] != protectedResult["id"] || payload["job"] != float64(7) {
+		panic("Go queue options altered protected request values")
+	}
+	settled, err := db.QueueNack(
+		"go.protected", "go-protected-worker", delivery["id"].(string), delivery["receipt"].(string),
+		map[string]any{
+			"delayMs": 0, "reason": "expected protected-option regression", "op": "handshake",
+			"topic": "go.overridden", "group": "go-overridden-worker",
+			"id": "overridden-id", "receipt": "overridden-receipt",
+		},
+	)
+	settlement, settlementOK := settled.(map[string]any)
+	if err != nil || !settlementOK || settlement["deadLettered"] != true {
+		panic("Go queue nack options altered protected request fields")
+	}
 	db.CreateCollection("users", "document")
 	id, err := db.PutData("users", map[string]any{"name": "Ada", "role": "admin", "age": 30})
 	if err != nil {
@@ -1095,6 +1218,19 @@ func main() {
 	if err != nil || sqlID == nil || private == nil {
 		panic("bad protected SQL result")
 	}
+	if _, err := db.QueuePublish("go.decorated", map[string]any{"job": 1}, nil); err != nil {
+		panic(err)
+	}
+	handled := false
+	consume := db.QueueConsumer("go.decorated", "go-worker", func(delivery map[string]any) error {
+		payload, _ := delivery["payload"].(map[string]any)
+		handled = payload["job"] == float64(1)
+		return nil
+	}, fylo.QueueConsumerOptions{})
+	outcome, err := consume()
+	if err != nil || !handled || outcome.Acknowledged != 1 {
+		panic("Go queue consumer did not acknowledge")
+	}
 	fmt.Println(` +
                 '`{"ok":true}`' +
                 `)
@@ -1117,7 +1253,7 @@ func main() {
             path.join(ws, 'main.rs'),
             String.raw`#[path = "fylo.rs"]
 mod fylo;
-use fylo::{Fylo, Json};
+use fylo::{Fylo, Json, QueueConsumerOptions};
 
 fn main() {
     let binary = std::env::args().nth(1).unwrap();
@@ -1186,6 +1322,26 @@ fn main() {
         )
         .unwrap();
     assert!(group_sql_put.contains("\"ok\":true"), "{group_sql_put}");
+    db.queue_publish(
+        "rust.decorated",
+        Json::obj(vec![("job", 1.into())]),
+        0,
+        None,
+    )
+    .unwrap();
+    {
+        let mut consume = db.queue_consumer(
+            "rust.decorated",
+            "rust-worker",
+            QueueConsumerOptions::default(),
+            |delivery| {
+                assert!(delivery.contains("\"job\":1"), "{delivery}");
+                Ok(())
+            },
+        );
+        let outcome = consume().unwrap();
+        assert_eq!(outcome.acknowledged, 1);
+    }
     println!("{{\"ok\":true}}");
 }
 `
@@ -1215,6 +1371,15 @@ fn main() {
 import java.util.Map;
 
 public class Interop {
+    static final class Workers {
+        boolean handled;
+
+        @Fylo.QueueConsumer(topic = "java.decorated", group = "java-worker")
+        void handle(String delivery) {
+            handled = delivery.contains("\"job\":1");
+        }
+    }
+
     public static void main(String[] a) throws Exception {
         try (Fylo db = new Fylo(a[1], a[0])) {
             int uid = Integer.parseInt(a[2]);
@@ -1233,6 +1398,12 @@ public class Interop {
                 Map.of("uid", uid));
             if (!sqlPut.contains("\"result\"") || !privateRows.contains("SQL Ada")) {
                 throw new Exception("bad protected SQL result");
+            }
+            db.queuePublish("java.decorated", Map.of("job", 1));
+            Workers workers = new Workers();
+            Fylo.QueueProcessResult outcome = db.runQueueConsumer(workers, "handle");
+            if (!workers.handled || outcome.acknowledged != 1) {
+                throw new Exception("Java queue annotation did not acknowledge");
             }
             System.out.println("{\"ok\":true}");
         }
@@ -1296,8 +1467,24 @@ var privateRows = db.ExecuteSQL(
     new { uid });
 if (sqlId.GetString() is null || !privateRows.ToString().Contains("SQL Ada"))
     throw new System.Exception("bad protected SQL result");
+db.QueuePublish("csharp.decorated", new { job = 1 });
+var worker = new Worker();
+var outcome = db.RunQueueConsumer(worker, nameof(Worker.Handle));
+if (!worker.Handled || outcome.Acknowledged != 1)
+    throw new System.Exception("C# queue attribute did not acknowledge");
 System.Console.WriteLine("{\"ok\":true}");
 db.Dispose();
+
+sealed class Worker
+{
+    public bool Handled { get; private set; }
+
+    [Fylo.FyloQueueConsumer("csharp.decorated", "csharp-worker")]
+    public void Handle(System.Text.Json.JsonElement delivery)
+    {
+        Handled = delivery.GetProperty("payload").GetProperty("job").GetInt32() == 1;
+    }
+}
 `
         )
         const result = await run(
@@ -1316,8 +1503,60 @@ db.Dispose();
             path.join(ws, 'driver.dart'),
             String.raw`import './fylo.dart';
 
+class Workers {
+  bool handled = false;
+
+  @FyloQueueConsumer('dart.decorated', 'dart-worker')
+  Future<void> handle(Map<String, dynamic> delivery) async {
+    handled = (delivery['payload'] as Map)['job'] == 1;
+  }
+}
+
 Future<void> main(List<String> args) async {
   final db = await Fylo.open(args[1], binary: args[0]);
+  final protected = await db.queuePublish('dart.protected', {'job': 7}, {
+    'delayMs': 0,
+    'idempotencyKey': 'dart-protected-1',
+    'op': 'handshake',
+    'topic': 'dart.overridden',
+    'payload': {'job': 99},
+    'root': '/tmp/fylo-queue-option-injection',
+  }) as Map;
+  final protectedDeliveries = await db.queueClaim(
+    'dart.protected',
+    'dart-protected-worker',
+    {
+      'maxMessages': 1,
+      'visibilityTimeoutMs': 30000,
+      'maxAttempts': 1,
+      'op': 'handshake',
+      'topic': 'dart.overridden',
+      'group': 'dart-overridden-worker',
+    },
+  ) as List;
+  final protectedDelivery = protectedDeliveries.single as Map;
+  if (protectedDelivery['id'] != protected['id'] ||
+      (protectedDelivery['payload'] as Map)['job'] != 7) {
+    throw StateError('Dart queue options altered protected request fields');
+  }
+  final protectedNack = await db.queueNack(
+    'dart.protected',
+    'dart-protected-worker',
+    protectedDelivery['id'] as String,
+    protectedDelivery['receipt'] as String,
+    {
+      'delayMs': 0,
+      'reason': 'expected protected-option regression',
+      'op': 'handshake',
+      'topic': 'dart.overridden',
+      'group': 'dart-overridden-worker',
+      'id': 'overridden-id',
+      'receipt': 'overridden-receipt',
+    },
+  ) as Map;
+  if (protectedNack['deadLettered'] != true) {
+    throw StateError('Dart queue nack options altered protected request fields');
+  }
   final uid = int.parse(args[2]);
   final gid = int.parse(args[3]);
   await db.createCollection('users');
@@ -1343,6 +1582,16 @@ Future<void> main(List<String> args) async {
     mode: 432,
   ) as String;
   if (groupSqlId.isEmpty) throw StateError('bad group SQL result');
+  await db.queuePublish('dart.decorated', {'job': 1});
+  final worker = Workers();
+  final consume = db.queueConsumer(
+    const FyloQueueConsumer('dart.decorated', 'dart-worker'),
+    worker.handle,
+  );
+  final outcome = await consume();
+  if (!worker.handled || outcome.acknowledged != 1) {
+    throw StateError('Dart queue annotation adapter did not acknowledge');
+  }
   await db.close();
   print('{"ok":true}');
 }

@@ -1,154 +1,153 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Guide</span>
-    <h1>Buckets &amp; raw files</h1>
-    <p class="doc-lede">
-      A bucket stores bytes instead of records. It is the same engine, the same index,
-      and the same API as a document collection — only the value type differs. What you
-      gain is a queryable, checksummed object store that lives in a plain directory.
-    </p>
-
-    <div class="doc-section">
-      <h2>Creating and reading</h2>
-      <p>
-        Create the collection with <code>kind: 'file'</code>, then pass a
-        <code>Blob</code>, <code>File</code>, or <code>URL</code> to the ordinary
-        <code>put()</code>.
-      </p>
-      <docs-sample topic="bucket" />
-      <p>
-        The fluent byte accessors below belong to the browser facade. Binary-backed
-        shims read the same bytes through the machine
-        protocol — see <a href="/docs/clients">Language clients</a>.
-      </p>
-      <pre class="code-block"><code>{basicCode}</code></pre>
-      <p>
-        <code>getDoc</code> answers a bucket with the manifest and no bytes.
-        <code>getFileData</code> returns the content — base64 inline, or written to an
-        absolute <code>path</code> when it exceeds one response frame. The layout below
-        is internal and versioned: read through the operation, not the path.
-      </p>
-      <p>
-        FYLO stores the bytes unchanged and retains no source path or URL:
-      </p>
-      <pre class="code-block"><code>{pathCode}</code></pre>
-      <p>
-        The metadata it derives — <code>name</code>, <code>key</code>,
-        <code>extension</code>, <code>contentType</code>, <code>contentLength</code>,
-        <code>etag</code>, <code>checksumSHA256</code>, <code>createdAt</code>, and
-        <code>lastModified</code> — goes through the normal prefix index, so all of it
-        is queryable with <code>find()</code>.
-      </p>
-      <div class="doc-note">
-        <p>
-          Databases written by older FYLO versions, where file collections lived under
-          <code>.collections/</code>, migrate to <code>.buckets/</code> automatically the
-          first time the engine opens them.
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Guide</span>
+        <h1>Buckets &amp; raw files</h1>
+        <p class="doc-lede">
+            A bucket stores bytes instead of records. It is the same engine, the same index, and the
+            same API as a document collection — only the value type differs. What you gain is a
+            queryable, checksummed object store that lives in a plain directory.
         </p>
-      </div>
-    </div>
 
-    <div class="doc-section">
-      <h2>Logical keys</h2>
-      <p>
-        A key is object-style logical metadata, not a filesystem path — the bytes still live
-        under the TTID filename. Keys are unique among active files in a collection,
-        always begin with <code>/</code>, may be at most 1024 UTF-8 bytes, and cannot
-        contain backslashes, control characters, or <code>.</code> / <code>..</code>
-        segments.
-      </p>
-      <pre class="code-block"><code>{keysCode}</code></pre>
-      <p>
-        The default key is <code>/</code>. Root and trailing-slash keys append the
-        generated TTID filename; an exact key is preserved as supplied. The key is
-        stored as a <code>user.fylo.key</code> extended attribute on the file, so it
-        moves with the bytes.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Creating and reading</h2>
+            <p>
+                Create the collection with <code>kind: 'file'</code>, then pass a <code>Blob</code>,
+                <code>File</code>, or <code>URL</code> to the ordinary <code>put()</code>.
+            </p>
+            <docs-sample topic="bucket" hydrate="load" />
+            <p>
+                The fluent byte accessors below belong to the browser facade. Binary-backed shims
+                read the same bytes through the machine protocol — see
+                <a href="/docs/clients">Language clients</a>.
+            </p>
+            <pre class="code-block"><code>{basicCode}</code></pre>
+            <p>
+                <code>getDoc</code> answers a bucket with the manifest and no bytes.
+                <code>getFileData</code> returns the content — base64 inline, or written to an
+                absolute <code>path</code> when it exceeds one response frame. The layout below is
+                internal and versioned: read through the operation, not the path.
+            </p>
+            <p>FYLO stores the bytes unchanged and retains no source path or URL:</p>
+            <pre class="code-block"><code>{pathCode}</code></pre>
+            <p>
+                The metadata it derives — <code>name</code>, <code>key</code>,
+                <code>extension</code>, <code>contentType</code>, <code>contentLength</code>,
+                <code>etag</code>, <code>checksumSHA256</code>, <code>createdAt</code>, and
+                <code>lastModified</code> — goes through the normal prefix index, so all of it is
+                queryable with <code>find()</code>.
+            </p>
+            <div class="doc-note">
+                <p>
+                    Databases written by older FYLO versions, where file collections lived under
+                    <code>.collections/</code>, migrate to <code>.buckets/</code> automatically the
+                    first time the engine opens them.
+                </p>
+            </div>
+        </div>
 
-    <div class="doc-section">
-      <h2>Folders</h2>
-      <p>
-        Keys can be reassigned in place — no byte rewrite — and the folder tree they
-        imply can be browsed one level at a time.
-      </p>
-      <pre class="code-block"><code>{folderCode}</code></pre>
-      <p>
-        <code>folder()</code> reads only key metadata for deeper descendants (one xattr
-        each), so browsing stays cheap in large trees.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Logical keys</h2>
+            <p>
+                A key is object-style logical metadata, not a filesystem path — the bytes still live
+                under the TTID filename. Keys are unique among active files in a collection, always
+                begin with <code>/</code>, may be at most 1024 UTF-8 bytes, and cannot contain
+                backslashes, control characters, or <code>.</code> / <code>..</code>
+                segments.
+            </p>
+            <pre class="code-block"><code>{keysCode}</code></pre>
+            <p>
+                The default key is <code>/</code>. Root and trailing-slash keys append the generated
+                TTID filename; an exact key is preserved as supplied. The key is stored as a
+                <code>user.fylo.key</code> extended attribute on the file, so it moves with the
+                bytes.
+            </p>
+        </div>
 
-    <div class="doc-section">
-      <h2>Checksums and the integrity audit</h2>
-      <p>
-        Checksums are cached in a <code>user.fylo.checksum</code> xattr stamped with the
-        file's size and mtime, so listings and reads never re-hash contents. The hash is
-        recomputed automatically whenever the stamp stops matching.
-      </p>
-      <p>
-        The cache trusts its stamp — which means silent corruption that preserves both
-        size and mtime is invisible to the fast path. <code>verify()</code> is the
-        stamp-ignoring audit that closes the gap. It re-hashes the full contents of every
-        file, active and soft-deleted, freshens matching stamps, and reports mismatches
-        without touching the corrupt file's original claim.
-      </p>
-      <pre class="code-block"><code>{verifyCode}</code></pre>
-      <p>
-        Each mismatch also emits a <code>file.checksum-mismatch</code> event through
-        <code>onEvent</code>. The audit reads every byte, so it is slow by design — run
-        it as a scheduled job, never per request. The CLI equivalent exits non-zero when
-        corruption is found, so a cron line is a complete weekly audit:
-      </p>
-      <pre class="code-block"><code>{cronCode}</code></pre>
-      <p>
-        Machine-protocol callers use
-        <code>&#123;"op": "verifyCollection", "collection": "assets"&#125;</code>.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Folders</h2>
+            <p>
+                Keys can be reassigned in place — no byte rewrite — and the folder tree they imply
+                can be browsed one level at a time.
+            </p>
+            <pre class="code-block"><code>{folderCode}</code></pre>
+            <p>
+                <code>folder()</code> reads only key metadata for deeper descendants (one xattr
+                each), so browsing stays cheap in large trees.
+            </p>
+        </div>
 
-    <div class="doc-section">
-      <h2>Developer metadata is indexed</h2>
-      <p>
-        On buckets, metadata is returned inside each manifest
-        (<code>manifest.meta</code>) and is indexed, so it can be queried — including
-        numerically.
-      </p>
-      <pre class="code-block"><code>{metaQueryCode}</code></pre>
-      <p>
-        Metadata survives soft delete, restore, and version-control restore. If a store
-        is ever copied by an
-        xattr-dropping tool, <code>rebuild()</code> repairs each stripped file to its
-        default <code>/&lt;filename&gt;</code> key and emits a
-        <code>file.key-repaired</code> event — custom keys are not recoverable from bytes
-        alone, so use a version-control restore when you need full fidelity.
-      </p>
-    </div>
+        <div class="doc-section">
+            <h2>Checksums and the integrity audit</h2>
+            <p>
+                Checksums are cached in a <code>user.fylo.checksum</code> xattr stamped with the
+                file's size and mtime, so listings and reads never re-hash contents. The hash is
+                recomputed automatically whenever the stamp stops matching.
+            </p>
+            <p>
+                The cache trusts its stamp — which means silent corruption that preserves both size
+                and mtime is invisible to the fast path. <code>verify()</code> is the stamp-ignoring
+                audit that closes the gap. It re-hashes the full contents of every file, active and
+                soft-deleted, freshens matching stamps, and reports mismatches without touching the
+                corrupt file's original claim.
+            </p>
+            <pre class="code-block"><code>{verifyCode}</code></pre>
+            <p>
+                Each mismatch also emits a <code>file.checksum-mismatch</code> event through
+                <code>onEvent</code>. The audit reads every byte, so it is slow by design — run it
+                as a scheduled job, never per request. The CLI equivalent exits non-zero when
+                corruption is found, so a cron line is a complete weekly audit:
+            </p>
+            <pre class="code-block"><code>{cronCode}</code></pre>
+            <p>
+                Machine-protocol callers use
+                <code>&#123;"op": "verifyCollection", "collection": "assets"&#125;</code>.
+            </p>
+        </div>
 
-    <div class="doc-section">
-      <h2>Ingestion limits</h2>
-      <p>
-        <code>URL</code> ingestion snapshots the content at write time.
-        <code>file:</code> URLs work server-side; browser runtimes accept
-        <code>Blob</code>, <code>File</code>, and network URLs. The default limit is
-        50 MiB and can be raised per write with
-        <code>&#123; maxBytes: 250 * 1024 * 1024 &#125;</code>.
-      </p>
-      <p>Compiled-executable callers pass a tagged absolute path:</p>
-      <pre class="code-block"><code>{machineCode}</code></pre>
-    </div>
+        <div class="doc-section">
+            <h2>Developer metadata is indexed</h2>
+            <p>
+                On buckets, metadata is returned inside each manifest (<code>manifest.meta</code>)
+                and is indexed, so it can be queried — including numerically.
+            </p>
+            <pre class="code-block"><code>{metaQueryCode}</code></pre>
+            <p>
+                Metadata survives soft delete, restore, and version-control restore. If a store is
+                ever copied by an xattr-dropping tool, <code>rebuild()</code> repairs each stripped
+                file to its default <code>/&lt;filename&gt;</code> key and emits a
+                <code>file.key-repaired</code> event — custom keys are not recoverable from bytes
+                alone, so use a version-control restore when you need full fidelity.
+            </p>
+        </div>
 
-    <div class="doc-pager">
-      <a href="/docs/documents">← Documents &amp; metadata</a>
-      <a href="/docs/querying">Querying &amp; SQL →</a>
+        <div class="doc-section">
+            <h2>Ingestion limits</h2>
+            <p>
+                <code>URL</code> ingestion snapshots the content at write time.
+                <code>file:</code> URLs work server-side; browser runtimes accept <code>Blob</code>,
+                <code>File</code>, and network URLs. The default limit is 50 MiB and can be raised
+                per write with <code>&#123; maxBytes: 250 * 1024 * 1024 &#125;</code>.
+            </p>
+            <p>Compiled-executable callers pass a tagged absolute path:</p>
+            <pre class="code-block"><code>{machineCode}</code></pre>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/documents">← Documents &amp; metadata</a>
+            <a href="/docs/querying">Querying &amp; SQL →</a>
+        </div>
     </div>
-  </div>
 </div>

@@ -1,52 +1,89 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Reference</span>
-    <h1>Native configuration</h1>
-    <p class="doc-lede">
-      Environment variables consumed by the native Rust engine and its release tooling.
-    </p>
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Reference</span>
+        <h1>Native configuration</h1>
+        <p class="doc-lede">
+            Environment variables consumed by the native Rust engine and its release tooling.
+        </p>
 
-    <div class="doc-section doc-section--wide">
-      <h2>Environment</h2>
-      <div class="doc-table-wrap">
-        <table class="doc-table">
-          <thead>
-            <tr><th>Variable</th><th>Purpose</th><th>Default</th></tr>
-          </thead>
-          <tbody>
-            <tr><td><code>FYLO_ROOT</code></td><td>Filesystem root for collections</td><td><code>./.fylo-data</code></td></tr>
-            <tr><td><code>FYLO_SCHEMA</code></td><td>Directory containing JSON validation schemas</td><td>—</td></tr>
-            <tr><td><code>FYLO_STRICT</code></td><td>Validate documents with chex before writes</td><td>—</td></tr>
-            <tr><td><code>FYLO_ENCRYPTION_KEY</code></td><td>AES-GCM key for <code>$encrypted</code> fields (≥32 chars)</td><td>—</td></tr>
-            <tr><td><code>FYLO_CIPHER_SALT</code></td><td>Salt for blind index derivation</td><td>—</td></tr>
-            <tr><td><code>FYLO_LOGGING</code></td><td>Enable logging (<code>"1"</code>)</td><td>—</td></tr>
-            <tr><td><code>FYLO_VERIFY_PROVENANCE</code></td><td>Require signed artifact provenance during install</td><td>—</td></tr>
-          </tbody>
-        </table>
-      </div>
+        <div class="doc-section doc-section--wide">
+            <h2>Environment</h2>
+            <div class="doc-table-wrap">
+                <table class="doc-table">
+                    <thead>
+                        <tr>
+                            <th>Variable</th>
+                            <th>Purpose</th>
+                            <th>Default</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>FYLO_ROOT</code></td>
+                            <td>Filesystem root for collections</td>
+                            <td><code>./.fylo-data</code></td>
+                        </tr>
+                        <tr>
+                            <td><code>FYLO_SCHEMA</code></td>
+                            <td>Directory containing JSON validation schemas</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td><code>FYLO_STRICT</code></td>
+                            <td>Validate documents with chex before writes</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td><code>FYLO_ENCRYPTION_KEY</code></td>
+                            <td>AES-GCM key for <code>$encrypted</code> fields (≥32 chars)</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td><code>FYLO_CIPHER_SALT</code></td>
+                            <td>Salt for blind index derivation</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td><code>FYLO_LOGGING</code></td>
+                            <td>Enable logging (<code>"1"</code>)</td>
+                            <td>—</td>
+                        </tr>
+                        <tr>
+                            <td><code>FYLO_VERIFY_PROVENANCE</code></td>
+                            <td>Require signed artifact provenance during install</td>
+                            <td>—</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="doc-section">
+            <h2>Process model</h2>
+            <p>
+                The <code>fylo</code> executable is the only native engine. JavaScript and the other
+                language packages are thin NDJSON clients and never open a root directly. Use
+                <code>--exclusive-root</code> for long-lived processes that require one
+                authoritative owner.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/recovery">← Recovery &amp; rebuild</a>
+            <a href="/docs/replication">Backup &amp; sync →</a>
+        </div>
     </div>
-
-    <div class="doc-section">
-      <h2>Process model</h2>
-      <p>
-        The <code>fylo</code> executable is the only native engine. JavaScript and the
-        other language packages are thin NDJSON clients and never open a root directly.
-        Use <code>--exclusive-root</code> for long-lived processes that require one
-        authoritative owner.
-      </p>
-    </div>
-
-    <div class="doc-pager">
-      <a href="/docs/recovery">← Recovery &amp; rebuild</a>
-      <a href="/docs/replication">Backup &amp; sync →</a>
-    </div>
-  </div>
 </div>

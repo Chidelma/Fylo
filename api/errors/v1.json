@@ -78,6 +78,18 @@
             "retryable": false
         },
         {
+            "code": "EQUEUE_INVALID",
+            "retryable": false
+        },
+        {
+            "code": "EQUEUE_RECEIPT",
+            "retryable": false
+        },
+        {
+            "code": "EQUEUE_LIMIT",
+            "retryable": false
+        },
+        {
             "code": "EQUERY_INPUT_SIZE",
             "retryable": false
         },

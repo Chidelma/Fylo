@@ -7,6 +7,13 @@ uploads the asset bundle used to create the draft release. Release publication
 still rechecks every local checksum, every uploaded GitHub digest, the immutable
 source commit, and the final tag target.
 
+The privileged asset job is eligible only when the workflow ref is the
+repository's default branch. This gate is evaluated before the runner receives
+OIDC or attestation permissions and before repository build code runs. A manual
+dispatch against a feature branch or tag cannot build or attest release assets;
+the later publication gate independently rechecks the default branch and exact
+source commit before creating a release.
+
 The release is blocked by tests of the exact packaged Linux x64, macOS arm64,
 macOS x64, and Windows x64 executables. Each executable must report release
 build identity and pass the canonical-alias, simultaneous-owner, stale-metadata,

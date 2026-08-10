@@ -1,6 +1,6 @@
-export default class extends Tac {
+export default class {
+    hydrate() {}
     /** @type {string} */
-    @env('PUBLIC_SITE_URL', 'https://fylo.del.ma')
     siteUrl
 
     // `external` drives target/rel — without it every internal link opened a new tab.

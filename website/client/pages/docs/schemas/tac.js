@@ -1,13 +1,8 @@
 const TITLE = 'Schemas & migrations — FYLO'
 document.title = TITLE
 
-export default class extends Tac {
-  constructor(props = {}, tac = undefined) {
-    super(props, tac)
-    if (this.isBrowser) document.title = TITLE
-  }
-
-  layoutCode = `<FYLO_SCHEMA>/
+export default class {
+    layoutCode = `<FYLO_SCHEMA>/
   <collection>/
     manifest.json          # { current, versions: [{ v, sha256?, addedAt? }] }
     history/
@@ -16,7 +11,7 @@ export default class extends Tac {
     upgraders/
       v1-to-v2.js          # export default async (doc) => upgradedDoc`
 
-  manifestCode = `{
+    manifestCode = `{
     "current": "v2",
     "versions": [
         { "v": "v1", "addedAt": "2026-04-01T00:00:00Z" },
@@ -24,14 +19,14 @@ export default class extends Tac {
     ]
 }`
 
-  schemaCode = `{
+    schemaCode = `{
     "id": "^[0-9]+$",
     "title": "^.+$",
     "body": "^.+$",
     "slug": "^[a-z0-9-]+$"
 }`
 
-  upgraderCode = `export default function upgrade(doc) {
+    upgraderCode = `export default function upgrade(doc) {
     return {
         ...doc,
         slug:
@@ -42,7 +37,7 @@ export default class extends Tac {
     }
 }`
 
-  cliCode = `fylo schema inspect article --schema-dir ./schemas --json
+    cliCode = `fylo schema inspect article --schema-dir ./schemas --json
 fylo schema doctor  article --schema-dir ./schemas
 fylo schema validate article @article.json --schema-dir ./schemas --json`
 }

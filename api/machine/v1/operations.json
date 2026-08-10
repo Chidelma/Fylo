@@ -190,6 +190,41 @@
             "name": "schemaMaterialize",
             "class": "read",
             "retry": "safe"
+        },
+        {
+            "name": "queuePublish",
+            "class": "queue-write",
+            "retry": "conditional-idempotency-key"
+        },
+        {
+            "name": "queueClaim",
+            "class": "queue-lease",
+            "retry": "unsafe"
+        },
+        {
+            "name": "queueAck",
+            "class": "queue-write",
+            "retry": "safe-with-same-receipt"
+        },
+        {
+            "name": "queueNack",
+            "class": "queue-write",
+            "retry": "conditional"
+        },
+        {
+            "name": "queueExtend",
+            "class": "queue-write",
+            "retry": "safe-with-same-receipt"
+        },
+        {
+            "name": "queueStats",
+            "class": "queue-read",
+            "retry": "safe"
+        },
+        {
+            "name": "queueDeadLetters",
+            "class": "queue-read",
+            "retry": "safe"
         }
     ]
 }

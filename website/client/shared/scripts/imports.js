@@ -89,6 +89,7 @@ if (typeof document !== 'undefined') {
         '/docs/documents': 'Documents & metadata — FYLO',
         '/docs/buckets': 'Buckets & raw files — FYLO',
         '/docs/querying': 'Querying & SQL — FYLO',
+        '/docs/queue': 'Serverless queue — FYLO',
         '/docs/schemas': 'Schemas & migrations — FYLO',
         '/docs/security': 'Encryption & access — FYLO',
         '/docs/versioning': 'Version control — FYLO',
@@ -123,7 +124,10 @@ if (typeof document !== 'undefined') {
     // On narrow screens the docs sidebar collapses to a horizontal strip, where
     // the current page can sit off-screen with nothing to suggest it exists.
     const revealActive = () => {
-        for (const selector of ['.doc-nav-list a.active', '.doc-sample-langs [aria-selected="true"]']) {
+        for (const selector of [
+            '.doc-nav-list a.active',
+            '.doc-sample-langs [aria-selected="true"]'
+        ]) {
             const active = document.querySelector(selector)
             const scroller = active?.closest('.doc-nav-inner, .doc-sample-langs')
             if (!active || !scroller || scroller.scrollWidth <= scroller.clientWidth) continue

@@ -53,6 +53,51 @@ describe('website Explorer release download', () => {
     })
 })
 
+describe('website serverless queue guidance', () => {
+    test('documents bounded decorator invocations without implying a hidden poll loop', async () => {
+        const [protocolHtml, protocolJs, queueHtml, queueJs, nav, imports, features] =
+            await Promise.all([
+                Bun.file(path.join(root, 'website/client/pages/docs/protocol/tac.html')).text(),
+                Bun.file(path.join(root, 'website/client/pages/docs/protocol/tac.js')).text(),
+                Bun.file(path.join(root, 'website/client/pages/docs/queue/tac.html')).text(),
+                Bun.file(path.join(root, 'website/client/pages/docs/queue/tac.js')).text(),
+                Bun.file(path.join(root, 'website/client/components/docs/nav/tac.html')).text(),
+                Bun.file(path.join(root, 'website/client/shared/scripts/imports.js')).text(),
+                Bun.file(path.join(root, 'website/client/components/features/grid/tac.js')).text()
+            ])
+
+        expect(protocolHtml).toContain('consumer decorator, annotation, or callable')
+        expect(protocolHtml).toContain('one bounded batch')
+        expect(protocolJs).toContain("db.queue.consumer('email.welcome', 'email-service'")
+        expect(queueHtml).toContain('Serverless does not mean distributed multi-writer storage')
+        expect(queueHtml).toContain('Seven machine operations')
+        expect(queueHtml).toContain('One-batch consumer decorators')
+        expect(queueHtml).toContain('Browser and')
+        expect(queueHtml).toContain('do not advertise the')
+        expect(queueHtml).toMatch(/1,000 most recently acknowledged\s+ID\/receipt\s+pairs/)
+        expect(queueHtml).toMatch(/64 MiB of aggregate\s+message-file scan\s+work/)
+        expect(queueJs).toContain('@db.queue_consumer(')
+        expect(queueJs).toContain('One bounded serverless invocation')
+        expect(nav).toContain('<a href="/docs/queue">Serverless queue</a>')
+        expect(imports).toContain("'/docs/queue': 'Serverless queue — FYLO'")
+        expect(features).toContain('Serverless without a broker')
+    })
+
+    test('canonical queue examples never persist raw exception text', async () => {
+        const readme = await Bun.file(path.join(root, 'README.md')).text()
+        const queueGuide = readme.match(/## Serverless Queue([\s\S]*?)### Machine Interface/)?.[1]
+
+        expect(queueGuide).toBeDefined()
+        expect(queueGuide?.match(/receipt-key\.json/g)).toHaveLength(1)
+        expect(queueGuide).toMatch(
+            /reason:\s*(?:['"]queue handler failed['"]|(?:sanitize|safe)\w*Reason\(error\))/i
+        )
+        expect(queueGuide).not.toMatch(
+            /reason:\s*(?:String\(error\)|error(?:\.message|\.toString\(\))?|`[^`]*\$\{error(?:\.message)?\}[^`]*`)/
+        )
+    })
+})
+
 describe('website mobile touch targets', () => {
     test('keeps navigation and swipeable tabs at least 44px high', async () => {
         const [header, footer, showcase, site] = await Promise.all([

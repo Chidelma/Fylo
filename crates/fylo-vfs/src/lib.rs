@@ -16,7 +16,7 @@
 //! Only `wasm32-unknown-unknown` has no filesystem, and only there does the
 //! seam route to a host. WebAssembly is not a browser: `wasm32-wasip1` has
 //! real files and real stdio, so a server-side Wasm build takes the same
-//! `std::fs` path a native binary does. The host supplies a [`HostVfs`] table of plain
+//! `std::fs` path a native binary does. The host supplies a `HostVfs` table of plain
 //! `extern "C"` functions, so the embedder can be a JavaScript worker driving
 //! OPFS, or anything else that can fill a C function table.
 //!
@@ -24,7 +24,7 @@
 //!
 //! Swift, Kotlin, and Dart reach FYLO on a device where a real filesystem
 //! exists, so they link the native backend and need nothing from this module.
-//! They only supply a [`HostVfs`] when they *want* to intercept storage — a
+//! They only supply a `HostVfs` when they *want* to intercept storage — a
 //! Flutter web build, or an app that keeps its root inside a container the
 //! process cannot open by path.
 

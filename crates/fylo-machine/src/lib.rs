@@ -19,8 +19,9 @@ use base64::Engine as _;
 use fylo_engine::{AccessContext, EngineError, ReadOnlyEngine, WriteEngine};
 use fylo_query::{JoinSpec, QueryLimits, SqlOperation, StructuredQuery, prepare_sql};
 use fylo_storage_native::{
-    CollectionKind, NativeStorageError, NativeStorageErrorCode, NativeWriteRoot, PutRawFileOptions,
-    RootLease, SqlMutationResultKind, WriteAccess, WriteActor,
+    CollectionKind, NativeQueue, NativeStorageError, NativeStorageErrorCode, NativeWriteRoot,
+    PutRawFileOptions, QueueClaimOptions, QueuePublishOptions, RootLease, SqlMutationResultKind,
+    WriteAccess, WriteActor,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -96,6 +97,15 @@ const DOCUMENT_BUCKET_OPERATIONS: &[&str] = &[
     "patchDocs",
     "delDoc",
     "delDocs",
+];
+const SERVERLESS_QUEUE_OPERATIONS: &[&str] = &[
+    "queuePublish",
+    "queueClaim",
+    "queueAck",
+    "queueNack",
+    "queueExtend",
+    "queueStats",
+    "queueDeadLetters",
 ];
 
 /// Operations a published release answered and this one deliberately does not.
@@ -490,6 +500,13 @@ impl Session {
             "schemaValidate" => self.schema_validate(request),
             "schemaMaterialize" => self.schema_materialize(request),
             "importBulkData" => self.import_bulk_data(request),
+            "queuePublish" => self.queue_publish(request),
+            "queueClaim" => self.queue_claim(request),
+            "queueAck" => self.queue_ack(request),
+            "queueNack" => self.queue_nack(request),
+            "queueExtend" => self.queue_extend(request),
+            "queueStats" => self.queue_stats(request),
+            "queueDeadLetters" => self.queue_dead_letters(request),
             _ if RETIRED_OPERATIONS.contains(&operation) => Err(MachineError::new(
                 "EUNSUPPORTEDOP",
                 format!(
@@ -544,6 +561,7 @@ impl Session {
                     "integrity": "sha256-full-content"
                 }),
             ),
+            ("serverlessQueue".into(), serverless_queue_capability()),
         ]);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let capabilities = {
@@ -1458,6 +1476,161 @@ impl Session {
                 .map_err(|error| engine_error(&error))?;
         }
         Ok(Value::from(count))
+    }
+
+    fn queue(&self, request: &Value) -> Result<NativeQueue, MachineError> {
+        let root = self.root(request)?;
+        let lease = self
+            .leases
+            .borrow()
+            .get(&root)
+            .cloned()
+            .ok_or_else(|| MachineError::new("EUNKNOWN", "machine root lease vanished"))?;
+        NativeQueue::open_with_lease(lease).map_err(|error| storage_error(&error))
+    }
+
+    fn queue_publish(&self, request: &Value) -> Result<Value, MachineError> {
+        let topic = require_string(request, "topic")?;
+        let payload = request.get("payload").cloned().ok_or_else(|| {
+            MachineError::new("EBADREQUEST", "machine queuePublish requires payload")
+        })?;
+        let delay_ms = optional_u64(request, "delayMs")?.unwrap_or(0);
+        let idempotency_key = optional_typed_string(request, "idempotencyKey")?;
+        let result = self
+            .queue(request)?
+            .publish(
+                topic,
+                payload,
+                &QueuePublishOptions {
+                    delay_ms,
+                    idempotency_key,
+                },
+            )
+            .map_err(|error| storage_error(&error))?;
+        serde_json::to_value(result).map_err(|error| serialization_error(&error))
+    }
+
+    fn queue_claim(&self, request: &Value) -> Result<Value, MachineError> {
+        let topic = require_string(request, "topic")?;
+        let group = require_string(request, "group")?;
+        let max_messages = usize::try_from(optional_u64(request, "maxMessages")?.unwrap_or(1))
+            .map_err(|_| {
+                MachineError::new("EBADREQUEST", "machine queue maxMessages is out of range")
+            })?;
+        let visibility_timeout_ms = optional_u64(request, "visibilityTimeoutMs")?.unwrap_or(30_000);
+        let max_attempts = u32::try_from(optional_u64(request, "maxAttempts")?.unwrap_or(3))
+            .map_err(|_| {
+                MachineError::new("EBADREQUEST", "machine queue maxAttempts is out of range")
+            })?;
+        let deliveries = self
+            .queue(request)?
+            .claim(
+                topic,
+                group,
+                QueueClaimOptions {
+                    max_messages,
+                    visibility_timeout_ms,
+                    max_attempts,
+                    max_bytes: self.queue_response_budget(request),
+                },
+            )
+            .map_err(|error| storage_error(&error))?;
+        serde_json::to_value(deliveries).map_err(|error| serialization_error(&error))
+    }
+
+    fn queue_ack(&self, request: &Value) -> Result<Value, MachineError> {
+        let result = self
+            .queue(request)?
+            .ack(
+                require_string(request, "topic")?,
+                require_string(request, "group")?,
+                require_string(request, "id")?,
+                require_string(request, "receipt")?,
+            )
+            .map_err(|error| storage_error(&error))?;
+        serde_json::to_value(result).map_err(|error| serialization_error(&error))
+    }
+
+    fn queue_nack(&self, request: &Value) -> Result<Value, MachineError> {
+        let reason = optional_typed_string(request, "reason")?.unwrap_or_default();
+        let result = self
+            .queue(request)?
+            .nack(
+                require_string(request, "topic")?,
+                require_string(request, "group")?,
+                require_string(request, "id")?,
+                require_string(request, "receipt")?,
+                optional_u64(request, "delayMs")?.unwrap_or(0),
+                &reason,
+            )
+            .map_err(|error| storage_error(&error))?;
+        serde_json::to_value(result).map_err(|error| serialization_error(&error))
+    }
+
+    fn queue_extend(&self, request: &Value) -> Result<Value, MachineError> {
+        let expires = self
+            .queue(request)?
+            .extend(
+                require_string(request, "topic")?,
+                require_string(request, "group")?,
+                require_string(request, "id")?,
+                require_string(request, "receipt")?,
+                optional_u64(request, "visibilityTimeoutMs")?.unwrap_or(30_000),
+            )
+            .map_err(|error| storage_error(&error))?;
+        Ok(json!({ "leaseExpiresAt": expires }))
+    }
+
+    fn queue_stats(&self, request: &Value) -> Result<Value, MachineError> {
+        let stats = self
+            .queue(request)?
+            .stats(
+                require_string(request, "topic")?,
+                require_string(request, "group")?,
+            )
+            .map_err(|error| storage_error(&error))?;
+        serde_json::to_value(stats).map_err(|error| serialization_error(&error))
+    }
+
+    fn queue_dead_letters(&self, request: &Value) -> Result<Value, MachineError> {
+        let limit =
+            usize::try_from(optional_u64(request, "limit")?.unwrap_or(100)).map_err(|_| {
+                MachineError::new(
+                    "EBADREQUEST",
+                    "machine queue dead-letter limit is out of range",
+                )
+            })?;
+        let records = self
+            .queue(request)?
+            .dead_letters_bounded(
+                require_string(request, "topic")?,
+                require_string(request, "group")?,
+                limit,
+                self.queue_response_budget(request),
+            )
+            .map_err(|error| storage_error(&error))?;
+        serde_json::to_value(records).map_err(|error| serialization_error(&error))
+    }
+
+    fn queue_response_budget(&self, request: &Value) -> usize {
+        // Measure the actual echoed request id and operation before storage
+        // leases anything. A maximum-width duration and 1,000 separators keep
+        // the calculation conservative for every permitted queue batch.
+        let envelope = json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "ok": true,
+            "op": optional_string(request, "op"),
+            "requestId": optional_string(request, "requestId"),
+            "durationMs": u64::MAX,
+            "result": [],
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope).map_or(usize::MAX, |bytes| bytes.len());
+        self.limits
+            .max_response_bytes
+            .saturating_sub(envelope_bytes)
+            .saturating_sub(1_000)
+            .max(1)
+            .min(DEFAULT_MAX_RESPONSE_BYTES.saturating_sub(2_000))
     }
 
     fn patch_documents(&self, request: &Value) -> Result<Value, MachineError> {
@@ -2641,6 +2814,25 @@ fn unix_millis() -> u64 {
         })
 }
 
+fn serverless_queue_capability() -> Value {
+    json!({
+        "version": 1,
+        "operations": SERVERLESS_QUEUE_OPERATIONS,
+        "storage": "filesystem",
+        "broker": "embedded",
+        "delivery": "at-least-once",
+        "ordering": "publication-order-claims",
+        "consumerGroups": true,
+        "visibilityLeases": true,
+        "delayedDelivery": true,
+        "idempotentPublish": true,
+        "deadLetters": "per-group",
+        "maxMessageBytes": 1024 * 1024,
+        "maxClaimMessages": 1000,
+        "maxPendingPerGroup": 10000
+    })
+}
+
 fn structured_query(request: &Value) -> Result<StructuredQuery, MachineError> {
     let query = request.get("query").cloned().unwrap_or_else(|| json!({}));
     StructuredQuery::from_value(&query, QueryLimits::default())
@@ -2658,6 +2850,29 @@ fn require_string<'a>(request: &'a Value, field: &str) -> Result<&'a str, Machin
                 format!("machine request field \"{field}\" must be a non-empty string"),
             )
         })
+}
+
+fn optional_typed_string(request: &Value, field: &str) -> Result<Option<String>, MachineError> {
+    match request.get(field) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(MachineError::new(
+            "EBADREQUEST",
+            format!("machine request field \"{field}\" must be a string"),
+        )),
+    }
+}
+
+fn optional_u64(request: &Value, field: &str) -> Result<Option<u64>, MachineError> {
+    match request.get(field) {
+        None => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or_else(|| {
+            MachineError::new(
+                "EBADREQUEST",
+                format!("machine request field \"{field}\" must be a non-negative integer"),
+            )
+        }),
+    }
 }
 
 fn actor(request: &Value) -> Result<Option<AccessContext>, MachineError> {
@@ -2829,6 +3044,15 @@ mod tests {
             capabilities["documentBuckets"]["operations"],
             json!(DOCUMENT_BUCKET_OPERATIONS)
         );
+        assert_eq!(capabilities["serverlessQueue"]["version"], json!(1));
+        assert_eq!(
+            capabilities["serverlessQueue"]["operations"],
+            json!(SERVERLESS_QUEUE_OPERATIONS)
+        );
+        assert_eq!(
+            capabilities["serverlessQueue"]["delivery"],
+            json!("at-least-once")
+        );
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -2846,6 +3070,97 @@ mod tests {
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         assert!(capabilities.get("machineAccess").is_none());
+    }
+
+    #[test]
+    fn serverless_queue_protocol_publishes_claims_retries_and_acknowledges() {
+        let root = std::env::temp_dir().join(format!(
+            "fylo-machine-queue-{}-{}",
+            std::process::id(),
+            fylo_storage_native::wall_clock()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = [
+            json!({ "op": "queuePublish", "root": root, "topic": "mail", "payload": {"to": "ada"}, "idempotencyKey": "mail-1" }),
+            json!({ "op": "queuePublish", "root": root, "topic": "mail", "payload": {"to": "ada"}, "idempotencyKey": "mail-1" }),
+            json!({ "op": "queueClaim", "root": root, "topic": "mail", "group": "sender", "maxAttempts": 2 }),
+        ];
+        let frames = run(&format!(
+            "{}\n",
+            script
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+        assert_eq!(frames[0]["result"]["id"], frames[1]["result"]["id"]);
+        assert_eq!(frames[1]["result"]["deduplicated"], json!(true));
+        let delivery = &frames[2]["result"][0];
+        assert_eq!(delivery["attempt"], json!(1));
+
+        let frames = run(&format!(
+            "{}\n{}\n{}\n",
+            json!({ "op": "queueNack", "root": root, "topic": "mail", "group": "sender", "id": delivery["id"], "receipt": delivery["receipt"], "reason": "temporary" }),
+            json!({ "op": "queueClaim", "root": root, "topic": "mail", "group": "sender", "maxAttempts": 2 }),
+            json!({ "op": "queueStats", "root": root, "topic": "mail", "group": "sender" }),
+        ));
+        assert_eq!(frames[0]["result"]["deadLettered"], json!(false));
+        assert_eq!(frames[1]["result"][0]["attempt"], json!(2));
+        assert_eq!(frames[2]["result"]["inFlight"], json!(1));
+
+        let second = &frames[1]["result"][0];
+        let frames = run(&format!(
+            "{}\n{}\n",
+            json!({ "op": "queueAck", "root": root, "topic": "mail", "group": "sender", "id": second["id"], "receipt": second["receipt"] }),
+            json!({ "op": "queueClaim", "root": root, "topic": "mail", "group": "sender" }),
+        ));
+        assert_eq!(frames[0]["result"]["acknowledged"], json!(true));
+        assert_eq!(frames[1]["result"], json!([]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn queue_claim_honors_a_small_response_frame_before_leasing() {
+        let root = std::env::temp_dir().join(format!(
+            "fylo-machine-queue-budget-{}-{}",
+            std::process::id(),
+            fylo_storage_native::wall_clock()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let input = format!(
+            "{}\n{}\n{}\n",
+            json!({ "op": "queuePublish", "root": root, "topic": "jobs", "payload": "x".repeat(500) }),
+            json!({ "op": "queueClaim", "root": root, "requestId": "r".repeat(1500), "topic": "jobs", "group": "workers" }),
+            json!({ "op": "queueStats", "root": root, "topic": "jobs", "group": "workers" }),
+        );
+        let mut reader = Cursor::new(input.into_bytes());
+        let mut output = Vec::new();
+        serve(
+            &mut reader,
+            &mut output,
+            None,
+            FrameLimits {
+                max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+                max_response_bytes: 2_048,
+            },
+        )
+        .unwrap();
+        let frames: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames[0]["ok"], json!(true));
+        assert_eq!(frames[1]["error"]["code"], json!("EQUEUE_LIMIT"));
+        assert_eq!(frames[2]["result"]["available"], json!(1));
+        assert_eq!(frames[2]["result"]["inFlight"], json!(0));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

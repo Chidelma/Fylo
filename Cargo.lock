@@ -681,6 +681,8 @@ dependencies = [
  "fylo-format",
  "fylo-query",
  "fylo-vfs",
+ "getrandom 0.4.3",
+ "hmac",
  "rustix",
  "same-file",
  "serde",

@@ -20,11 +20,37 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 
 namespace Fylo
 {
+    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
+    public sealed class FyloQueueConsumerAttribute : Attribute
+    {
+        public string Topic { get; }
+        public string Group { get; }
+        public int MaxMessages { get; set; } = 1;
+        public int VisibilityTimeoutMs { get; set; } = 30000;
+        public int MaxAttempts { get; set; } = 3;
+        public int RetryDelayMs { get; set; } = 0;
+
+        public FyloQueueConsumerAttribute(string topic, string group)
+        {
+            Topic = topic;
+            Group = group;
+        }
+    }
+
+    public sealed class QueueProcessResult
+    {
+        public int Claimed { get; internal set; }
+        public int Acknowledged { get; internal set; }
+        public int Retried { get; internal set; }
+        public int DeadLettered { get; internal set; }
+    }
+
     public sealed class FyloException : Exception
     {
         public FyloException(string message) : base(message) { }
@@ -131,6 +157,115 @@ namespace Fylo
             Op($"{{\"op\":\"inspectCollection\",\"collection\":{J(collection)}}}");
         public JsonElement RebuildCollection(string collection) =>
             Op($"{{\"op\":\"rebuildCollection\",\"collection\":{J(collection)}}}");
+
+        // --- Durable serverless queue ---
+        public JsonElement QueuePublish(string topic, object payload, int delayMs = 0, string idempotencyKey = null) =>
+            Op(idempotencyKey == null
+                ? $"{{\"op\":\"queuePublish\",\"topic\":{J(topic)},\"payload\":{J(payload)},\"delayMs\":{delayMs}}}"
+                : $"{{\"op\":\"queuePublish\",\"topic\":{J(topic)},\"payload\":{J(payload)},\"delayMs\":{delayMs},\"idempotencyKey\":{J(idempotencyKey)}}}");
+        public JsonElement QueueClaim(string topic, string group, int maxMessages = 1, int visibilityTimeoutMs = 30000, int maxAttempts = 3) =>
+            Op($"{{\"op\":\"queueClaim\",\"topic\":{J(topic)},\"group\":{J(group)},\"maxMessages\":{maxMessages},\"visibilityTimeoutMs\":{visibilityTimeoutMs},\"maxAttempts\":{maxAttempts}}}");
+        public JsonElement QueueAck(string topic, string group, string id, string receipt) =>
+            Op($"{{\"op\":\"queueAck\",\"topic\":{J(topic)},\"group\":{J(group)},\"id\":{J(id)},\"receipt\":{J(receipt)}}}");
+        public JsonElement QueueNack(string topic, string group, string id, string receipt, int delayMs = 0, string reason = "") =>
+            Op($"{{\"op\":\"queueNack\",\"topic\":{J(topic)},\"group\":{J(group)},\"id\":{J(id)},\"receipt\":{J(receipt)},\"delayMs\":{delayMs},\"reason\":{J(reason)}}}");
+        public JsonElement QueueExtend(string topic, string group, string id, string receipt, int visibilityTimeoutMs = 30000) =>
+            Op($"{{\"op\":\"queueExtend\",\"topic\":{J(topic)},\"group\":{J(group)},\"id\":{J(id)},\"receipt\":{J(receipt)},\"visibilityTimeoutMs\":{visibilityTimeoutMs}}}");
+        public JsonElement QueueStats(string topic, string group) =>
+            Op($"{{\"op\":\"queueStats\",\"topic\":{J(topic)},\"group\":{J(group)}}}");
+        public JsonElement QueueDeadLetters(string topic, string group, int limit = 100) =>
+            Op($"{{\"op\":\"queueDeadLetters\",\"topic\":{J(topic)},\"group\":{J(group)},\"limit\":{limit}}}");
+
+        /// <summary>Process and settle one bounded queue batch.</summary>
+        public QueueProcessResult QueueProcess(
+            string topic,
+            string group,
+            Action<JsonElement> handler,
+            int maxMessages = 1,
+            int visibilityTimeoutMs = 30000,
+            int maxAttempts = 3,
+            int retryDelayMs = 0)
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            JsonElement deliveries = QueueClaim(topic, group, maxMessages, visibilityTimeoutMs, maxAttempts);
+            if (deliveries.ValueKind != JsonValueKind.Array)
+                throw new FyloException("fylo queue claim returned an invalid delivery list");
+            var result = new QueueProcessResult { Claimed = deliveries.GetArrayLength() };
+            foreach (JsonElement delivery in deliveries.EnumerateArray())
+            {
+                string id = delivery.GetProperty("id").GetString()
+                    ?? throw new FyloException("queue delivery lacks an id");
+                string receipt = delivery.GetProperty("receipt").GetString()
+                    ?? throw new FyloException("queue delivery lacks a receipt");
+                bool failed = false;
+                try
+                {
+                    handler(delivery.Clone());
+                }
+                catch (Exception)
+                {
+                    failed = true;
+                }
+                if (!failed)
+                {
+                    QueueAck(topic, group, id, receipt);
+                    result.Acknowledged++;
+                }
+                else
+                {
+                    JsonElement settled = QueueNack(
+                        topic, group, id, receipt, retryDelayMs,
+                        "queue handler failed");
+                    if (settled.TryGetProperty("deadLettered", out var dead) && dead.GetBoolean())
+                        result.DeadLettered++;
+                    else
+                        result.Retried++;
+                }
+            }
+            return result;
+        }
+
+        /// <summary>Return the .NET decorator-equivalent one-batch wrapper.</summary>
+        public Func<QueueProcessResult> QueueConsumer(
+            string topic,
+            string group,
+            Action<JsonElement> handler,
+            int maxMessages = 1,
+            int visibilityTimeoutMs = 30000,
+            int maxAttempts = 3,
+            int retryDelayMs = 0) =>
+            () => QueueProcess(topic, group, handler, maxMessages,
+                visibilityTimeoutMs, maxAttempts, retryDelayMs);
+
+        /// <summary>Run a method configured with FyloQueueConsumerAttribute.</summary>
+        public QueueProcessResult RunQueueConsumer(object target, string methodName)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            MethodInfo method = target.GetType().GetMethod(
+                methodName,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? throw new FyloException($"queue consumer method not found: {methodName}");
+            var consumer = method.GetCustomAttribute<FyloQueueConsumerAttribute>()
+                ?? throw new FyloException("queue consumer method lacks FyloQueueConsumerAttribute");
+            return QueueProcess(
+                consumer.Topic,
+                consumer.Group,
+                delivery =>
+                {
+                    try
+                    {
+                        method.Invoke(target, new object[] { delivery });
+                    }
+                    catch (TargetInvocationException error) when (error.InnerException != null)
+                    {
+                        throw error.InnerException;
+                    }
+                },
+                consumer.MaxMessages,
+                consumer.VisibilityTimeoutMs,
+                consumer.MaxAttempts,
+                consumer.RetryDelayMs);
+        }
 
         // --- Documents (object args are native objects: Dictionary, arrays) ---
         public JsonElement PutData(string collection, object data) =>

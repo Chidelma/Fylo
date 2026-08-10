@@ -1,19 +1,138 @@
 <div class="doc-section doc-section--wide">
-  <h2>Everything else</h2>
-  <p>
-    Each page below is the complete reference for its surface, not a summary that
-    sends you to a repository. Where behaviour differs between the native binary,
-    the browser engine, and the language shims, the page says so.
-  </p>
+    <h2>Everything else</h2>
+    <p>
+        Each page below is the complete reference for its surface, not a summary that sends you to a
+        repository. Where behaviour differs between the native binary, the browser engine, and the
+        language shims, the page says so.
+    </p>
 
-  <div class="w-grid-row guide-row">
-    <loop :for="let guide of guides">
-      <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
-        <a :href="guide.href" class="guide-card w-card w-card--variant-outlined">
-          <h3>{guide.title} <span class="guide-arrow" aria-hidden="true">→</span></h3>
-          <p>{guide.text}</p>
-        </a>
-      </div>
-    </loop>
-  </div>
+    <div class="w-grid-row guide-row">
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/concepts" class="guide-card w-card w-card--variant-outlined"
+                ><h3>Concepts <span class="guide-arrow" aria-hidden="true">→</span></h3>
+                <p>
+                    Root, collection, bucket, document, TTID, index key, generation, commit — the
+                    words that mean something specific here.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/documents" class="guide-card w-card w-card--variant-outlined"
+                ><h3>
+                    Documents &amp; metadata <span class="guide-arrow" aria-hidden="true">→</span>
+                </h3>
+                <p>
+                    Create, read, patch, delete, restore. Developer metadata that rides along with
+                    the bytes as extended attributes.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/buckets" class="guide-card w-card w-card--variant-outlined"
+                ><h3>
+                    Buckets &amp; raw files <span class="guide-arrow" aria-hidden="true">→</span>
+                </h3>
+                <p>
+                    Store bytes instead of records. Slash-delimited logical keys, folder browsing,
+                    checksums, and the integrity audit.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/querying" class="guide-card w-card w-card--variant-outlined"
+                ><h3>Querying &amp; SQL <span class="guide-arrow" aria-hidden="true">→</span></h3>
+                <p>
+                    Operators, which index each one uses, pagination cursors, joins, and the SQL
+                    surface.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/queue" class="guide-card w-card w-card--variant-outlined"
+                ><h3>Serverless queue <span class="guide-arrow" aria-hidden="true">→</span></h3>
+                <p>
+                    Brokerless topics, consumer groups, visibility leases, retry fencing, dead
+                    letters, and one-batch SDK decorators.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/schemas" class="guide-card w-card w-card--variant-outlined"
+                ><h3>
+                    Schemas &amp; migrations <span class="guide-arrow" aria-hidden="true">→</span>
+                </h3>
+                <p>
+                    Versioned chex schemas, upgraders that run on read, strict writes, and why
+                    arrays of objects are rejected.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/security" class="guide-card w-card w-card--variant-outlined"
+                ><h3>
+                    Encryption &amp; access <span class="guide-arrow" aria-hidden="true">→</span>
+                </h3>
+                <p>
+                    AES-GCM field encryption with blind indexes and POSTIX per-record UID/GID/mode.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/versioning" class="guide-card w-card w-card--variant-outlined"
+                ><h3>Version control <span class="guide-arrow" aria-hidden="true">→</span></h3>
+                <p>
+                    Auto-commit, branches, diff, three-way merge, and content-addressed snapshots
+                    that share unchanged bytes.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/replication" class="guide-card w-card w-card--variant-outlined"
+                ><h3>Backup &amp; sync <span class="guide-arrow" aria-hidden="true">→</span></h3>
+                <p>
+                    Post-write hooks plus safe filesystem snapshots, restore, and verification.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/recovery" class="guide-card w-card w-card--variant-outlined"
+                ><h3>
+                    Recovery &amp; rebuild <span class="guide-arrow" aria-hidden="true">→</span>
+                </h3>
+                <p>
+                    What happens when a process dies mid-write, how to read recovery status, and
+                    when to rebuild an index.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/browser" class="guide-card w-card w-card--variant-outlined"
+                ><h3>
+                    Browser &amp; Explorer <span class="guide-arrow" aria-hidden="true">→</span>
+                </h3>
+                <p>
+                    The local-only OPFS engine, direct folder access in Chromium, and the Explorer
+                    UI over a real root.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/protocol" class="guide-card w-card w-card--variant-outlined"
+                ><h3>Machine protocol <span class="guide-arrow" aria-hidden="true">→</span></h3>
+                <p>
+                    Every operation, the bounded NDJSON framing contract, pagination cursors, and
+                    the exclusive root lease.
+                </p></a
+            >
+        </div>
+        <div class="w-grid-col-12 w-grid-col-sm-6 w-grid-col-lg-4">
+            <a href="/docs/errors" class="guide-card w-card w-card--variant-outlined"
+                ><h3>Error codes <span class="guide-arrow" aria-hidden="true">→</span></h3>
+                <p>
+                    Every stable code FYLO can return, what it means, and whether retrying is the
+                    right response.
+                </p></a
+            >
+        </div>
+    </div>
 </div>

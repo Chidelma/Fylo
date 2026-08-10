@@ -153,12 +153,12 @@ describe('standalone Explorer app', () => {
         expect(renderer).not.toContain('"/explorer"')
     }, 300_000)
 
-    test('pins Tachyon and the generated browser engine for reproducible builds', async () => {
+    test('pins both Tachyon compiler tracks and the generated browser engine', async () => {
         await run(['bun', 'run', 'build:web'], root)
         const packageJson = await Bun.file(path.join(explorer, 'package.json')).json()
         const lock = await Bun.file(path.join(explorer, 'bun.lock')).text()
         const websitePackage = await Bun.file(path.join(website, 'package.json')).json()
-        const websiteLock = await Bun.file(path.join(website, 'bun.lock')).text()
+        const installer = await Bun.file(path.join(root, 'scripts/install-vendor-bins.sh')).text()
         const browserBundle = await Bun.file(path.join(root, 'dist-web/fylo.mjs')).text()
         const vendoredBundle = await Bun.file(
             path.join(explorer, 'client/shared/assets/fylo-web.mjs')
@@ -171,8 +171,13 @@ describe('standalone Explorer app', () => {
         const pinnedTachyon = `github:d31ma/Tachyon#${tachyonCommit}`
         expect(packageJson.devDependencies['@d31ma/tachyon']).toBe(pinnedTachyon)
         expect(lock).toContain(tachyonCommit.slice(0, 7))
-        expect(websitePackage.devDependencies['@d31ma/tachyon']).toBe(pinnedTachyon)
-        expect(websiteLock).toContain(tachyonCommit.slice(0, 7))
+        expect(websitePackage.scripts.bundle).toContain('ty bundle')
+        expect(websitePackage.devDependencies?.['@d31ma/tachyon']).toBeUndefined()
+        expect(await exists(path.join(website, 'bun.lock'))).toBe(false)
+        expect(installer).toContain("TACHYON_VERSION='v26.33.01'")
+        expect(installer).toContain(
+            "TACHYON_SHA256='0ecafafd0468b8e559e98f1192e88df2cc5c53fb195e8ff8305b4d2f3b2ee584'"
+        )
         expect(vendoredBundle).toBe(browserBundle)
         for (const asset of ['shared.js', 'dedicated.js', 'fylo-index.wasm']) {
             expect(await exists(path.join(explorer, 'client/shared/assets', asset))).toBe(true)

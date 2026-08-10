@@ -1,6 +1,7 @@
-import { CLIENT_COUNT } from '../../../shared/scripts/shims.js'
+import { CLIENT_COUNT } from '/shared/scripts/shims.js'
 
-export default class extends Tac {
+export default class {
+    hydrate() {}
     // Exposed for template interpolation ({clientCount} in tac.html).
     clientCount = CLIENT_COUNT
 
@@ -28,6 +29,12 @@ export default class extends Tac {
             color: 'success',
             title: 'Git-like version control',
             text: 'Branch, commit, diff, merge, and restore your document store. Auto-commit on writes with content-addressed, deduplicated snapshots.'
+        },
+        {
+            area: 'Queue',
+            color: 'warning',
+            title: 'Serverless without a broker',
+            text: 'Durable topics, independent consumer groups, visibility leases, delayed retries, dead letters, and one-batch decorators in every native SDK shim.'
         },
         {
             area: 'Distribution',

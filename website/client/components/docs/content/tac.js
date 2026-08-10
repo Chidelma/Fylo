@@ -16,7 +16,7 @@ const LANGS = [
     { key: 'web', label: 'JS (Browser)', dir: 'web', cmt: '//' }
 ]
 
-const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.32.07/fylo.js'
+const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.33.01/fylo.js'
 
 // Swift (iOS), Kotlin (Android), and Flutter are local-first mobile clients — they
 // embed the engine in a WebView, on-device only, like the browser client.
@@ -322,7 +322,8 @@ function scaffold(lang, bodyLines) {
     return [...s.open, '', ...body, ...s.close].join('\n')
 }
 
-export default class extends Tac {
+export default class {
+    hydrate() {}
     /** @type {string} */
     $section = 'install' // sessionStorage-persisted active section
 

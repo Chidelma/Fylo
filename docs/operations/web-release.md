@@ -24,10 +24,17 @@ the configured media type and content or binary marker, so an SPA fallback or st
 directory triggers automatic rollback instead of being promoted as current.
 
 Web builds are reproducible only with the repository-pinned toolchains: Bun is read from
-`.bun-version` (and mirrored by each `packageManager` field), while Rust and the Wasm target are
-read from `rust-toolchain.toml`. `build-browser.mjs` rejects a different Bun version, installs the
-exact Rust toolchain through rustup, and builds the locked Cargo dependency graph. CI, Release,
-Pages, and the Explorer Amplify bundle all use that same build entry point and toolchain pins.
+`.bun-version` (and mirrored by each `packageManager` field), Rust and the Wasm target are read from
+`rust-toolchain.toml`, and the Rust-native TACHYON `ty` binary is pinned to v26.33.01 with a
+repository-anchored SHA-256 digest in `scripts/install-vendor-bins.sh` and its PowerShell peer.
+`build-browser.mjs` rejects a different Bun version, installs the exact Rust toolchain through
+rustup, and builds the locked Cargo dependency graph. The marketing/docs site uses the verified
+`ty` asset. Its bundle step then applies the fail-closed, v26.33.01-specific
+`scripts/patch-tachyon-runtime.mjs` ownership guard to generated nested-island expressions and
+injects the shared browser entry once per HTML route. The patch refuses an unfamiliar runtime;
+remove it when the pinned compiler contains the upstream fix. Explorer remains on its
+commit-pinned compatibility compiler because its dynamic structural templates and component
+pub/sub are outside the 26.33.01 Rust compiler contract.
 
 ## One-time AWS setup
 
@@ -41,7 +48,9 @@ default encryption. Grant the release operator only these capabilities:
 Export the bucket name; AWS credentials and region continue to use the normal AWS CLI credential
 chain. Never place credentials in the repository or command history.
 
-The release host also needs rustup, Bun at the version in `.bun-version`, the AWS CLI, and `zip`. Authenticate the AWS
+The release host also needs rustup, Bun at the version in `.bun-version`, the verified `ty` binary,
+the AWS CLI, and `zip`. Install the repository-pinned web compiler with
+`sh ./scripts/install-vendor-bins.sh`, authenticate the AWS
 CLI before starting and confirm it is using the intended account and region.
 
 ```sh
@@ -54,9 +63,13 @@ request.
 
 ## Amplify deployment
 
-Install from the lockfiles, build, and validate both applications before deployment:
+Install the root and Explorer dependencies plus the verified toolchain, then build and validate
+both applications before deployment. The website has no npm dependency or lockfile; Explorer keeps
+its compatibility compiler in a frozen lockfile:
 
 ```sh
+sh ./scripts/install-vendor-bins.sh
+export PATH="$HOME/.local/bin:$PATH"
 (cd website && bun install --frozen-lockfile && bun run bundle)
 (cd explorer && bun install --frozen-lockfile && bun run bundle)
 bun test tests/interop/explorer-standalone-app.test.js tests/interop/web-release-ops.test.js \

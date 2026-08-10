@@ -1,134 +1,136 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
+    #home-content {
+        display: none;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <span class="eyebrow">Guide</span>
-    <h1>Documents &amp; metadata</h1>
-    <p class="doc-lede">
-      A document is one JSON file, named by its TTID. Writing one indexes every field;
-      deleting one moves it aside rather than destroying it. This page covers the full
-      lifecycle and the metadata that travels alongside the bytes.
-    </p>
-
-    <div class="doc-section">
-      <h2>The lifecycle</h2>
-      <p>
-        Collections are created explicitly. Everything else — reads, writes, queries,
-        rebuilds — refuses to operate on a collection that does not exist, so a typo
-        fails loudly instead of silently creating a second store.
-      </p>
-      <docs-sample topic="crud" />
-      <p>
-        <code>patch</code> preserves the TTID. That matters more than it sounds: the
-        TTID is the creation timestamp, the sort order, and the identity used by every
-        index entry, commit, and cursor. An update that changed it would be a delete and
-        an insert wearing a disguise.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Delete is soft</h2>
-      <p>
-        <code>delete</code> moves the payload from <code>docs/</code> into the hidden
-        sibling <code>.deleted/</code>, keeping the TTID filename. The file's
-        <code>mtime</code> becomes its <code>deletedAt</code>, and it is made read-only
-        (<code>0444</code>). Soft-deleted documents are excluded from ordinary queries.
-      </p>
-      <pre class="code-block"><code>{restoreCode}</code></pre>
-      <p>
-        <code>restore</code> preserves the TTID, moves the payload back, restores
-        writable permissions (<code>0644</code>), rebuilds its index entries, and
-        records the restoration as a live insert event. A tombstoned TTID cannot be
-        written to directly — it must be restored first.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>What a document may contain</h2>
-      <p>
-        Scalars, nested objects, and arrays of scalars. Not an array of objects, at any
-        depth.
-      </p>
-      <pre class="code-block"><code>{rejectCode}</code></pre>
-      <p>
-        The rejection is deterministic and happens before any disk work, so it leaves no
-        partial state, and it applies equally to <code>putData</code>,
-        <code>batchPutData</code>, patches, and the in-process API. To model a
-        collection of records, give them their own collection and reference them by key.
-        To keep an opaque payload you will never field-query, serialize it into a single
-        string field.
-      </p>
-    </div>
-
-    <div class="doc-section">
-      <h2>Metadata</h2>
-      <p>
-        Metadata is stored as extended attributes on the file itself
-        (<code>user.fylo.meta.*</code>), not as fields inside the payload — so it never
-        collides with your document shape and it travels with the bytes across moves.
-        Filesystem-backed stores use native xattrs on macOS and Linux and an NTFS
-        alternate data stream on Windows; browser document collections use a durable
-        OPFS sidecar with identical semantics.
-      </p>
-      <pre class="code-block"><code>{metaCode}</code></pre>
-      <p>
-        Every record includes <code>id</code>, <code>mtime</code>,
-        <code>updatedAt</code>, and <code>createdAt</code>; raw files also include their
-        stored file descriptor. Canonical fields take precedence if a custom key uses
-        the same name.
-      </p>
-      <p>
-        Keys are 1–64 characters of letters, digits, <code>.</code>, <code>_</code>, or
-        <code>-</code>, starting with a letter or digit. Each value must be
-        JSON-serializable and at most 60 KiB after UTF-8 JSON encoding. A top-level
-        <code>null</code> is a deletion marker, not a storable value. FYLO validates the
-        whole mutation before writing and rolls the xattr batch back if a later write
-        fails.
-      </p>
-      <div class="doc-note">
-        <p>
-          The fluent <code>put(id, doc).metadata(...)</code> form belongs to the native
-          JavaScript and browser facades. Binary-backed shims expose the same behaviour
-          as <code>getMeta</code> and <code>setMeta</code>, with language-appropriate
-          casing. All surfaces use the same machine operations — no shim invents a
-          second metadata store or merge policy.
+    <div class="doc-main doc-page">
+        <span class="eyebrow">Guide</span>
+        <h1>Documents &amp; metadata</h1>
+        <p class="doc-lede">
+            A document is one JSON file, named by its TTID. Writing one indexes every field;
+            deleting one moves it aside rather than destroying it. This page covers the full
+            lifecycle and the metadata that travels alongside the bytes.
         </p>
-      </div>
-      <pre class="code-block"><code>{metaMachineCode}</code></pre>
-      <p>
-        On filesystem-backed JSON documents metadata is per-version, because a
-        <code>patch</code> writes a new version file. The low-level helpers
-        <code>getXattr</code>, <code>setXattr</code>, <code>listXattr</code>, and
-        <code>removeXattr</code> are exported for raw byte-level access.
-      </p>
-    </div>
 
-    <div class="doc-section">
-      <h2>Loading data in bulk</h2>
-      <p>
-        Bulk operations coalesce their version-control snapshot: each records a single
-        commit covering every document it touched, instead of one commit per document.
-        Prefer them over a loop of single writes for any real ingest.
-      </p>
-      <pre class="code-block"><code>{batchCode}</code></pre>
-      <div class="doc-note doc-note--warn">
-        <p>
-          <code>import</code> from a URL is for trusted sources. Its SSRF guard blocks
-          private addresses and caps the body at 50 MiB, but it is not a safe target for
-          user-supplied URLs.
-        </p>
-      </div>
-    </div>
+        <div class="doc-section">
+            <h2>The lifecycle</h2>
+            <p>
+                Collections are created explicitly. Everything else — reads, writes, queries,
+                rebuilds — refuses to operate on a collection that does not exist, so a typo fails
+                loudly instead of silently creating a second store.
+            </p>
+            <docs-sample topic="crud" hydrate="load" />
+            <p>
+                <code>patch</code> preserves the TTID. That matters more than it sounds: the TTID is
+                the creation timestamp, the sort order, and the identity used by every index entry,
+                commit, and cursor. An update that changed it would be a delete and an insert
+                wearing a disguise.
+            </p>
+        </div>
 
-    <div class="doc-pager">
-      <a href="/docs/clients">← Language clients</a>
-      <a href="/docs/buckets">Buckets &amp; raw files →</a>
+        <div class="doc-section">
+            <h2>Delete is soft</h2>
+            <p>
+                <code>delete</code> moves the payload from <code>docs/</code> into the hidden
+                sibling <code>.deleted/</code>, keeping the TTID filename. The file's
+                <code>mtime</code> becomes its <code>deletedAt</code>, and it is made read-only
+                (<code>0444</code>). Soft-deleted documents are excluded from ordinary queries.
+            </p>
+            <pre class="code-block"><code>{restoreCode}</code></pre>
+            <p>
+                <code>restore</code> preserves the TTID, moves the payload back, restores writable
+                permissions (<code>0644</code>), rebuilds its index entries, and records the
+                restoration as a live insert event. A tombstoned TTID cannot be written to directly
+                — it must be restored first.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>What a document may contain</h2>
+            <p>
+                Scalars, nested objects, and arrays of scalars. Not an array of objects, at any
+                depth.
+            </p>
+            <pre class="code-block"><code>{rejectCode}</code></pre>
+            <p>
+                The rejection is deterministic and happens before any disk work, so it leaves no
+                partial state, and it applies equally to <code>putData</code>,
+                <code>batchPutData</code>, patches, and the in-process API. To model a collection of
+                records, give them their own collection and reference them by key. To keep an opaque
+                payload you will never field-query, serialize it into a single string field.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Metadata</h2>
+            <p>
+                Metadata is stored as extended attributes on the file itself
+                (<code>user.fylo.meta.*</code>), not as fields inside the payload — so it never
+                collides with your document shape and it travels with the bytes across moves.
+                Filesystem-backed stores use native xattrs on macOS and Linux and an NTFS alternate
+                data stream on Windows; browser document collections use a durable OPFS sidecar with
+                identical semantics.
+            </p>
+            <pre class="code-block"><code>{metaCode}</code></pre>
+            <p>
+                Every record includes <code>id</code>, <code>mtime</code>, <code>updatedAt</code>,
+                and <code>createdAt</code>; raw files also include their stored file descriptor.
+                Canonical fields take precedence if a custom key uses the same name.
+            </p>
+            <p>
+                Keys are 1–64 characters of letters, digits, <code>.</code>, <code>_</code>, or
+                <code>-</code>, starting with a letter or digit. Each value must be
+                JSON-serializable and at most 60 KiB after UTF-8 JSON encoding. A top-level
+                <code>null</code> is a deletion marker, not a storable value. FYLO validates the
+                whole mutation before writing and rolls the xattr batch back if a later write fails.
+            </p>
+            <div class="doc-note">
+                <p>
+                    The fluent <code>put(id, doc).metadata(...)</code> form belongs to the native
+                    JavaScript and browser facades. Binary-backed shims expose the same behaviour as
+                    <code>getMeta</code> and <code>setMeta</code>, with language-appropriate casing.
+                    All surfaces use the same machine operations — no shim invents a second metadata
+                    store or merge policy.
+                </p>
+            </div>
+            <pre class="code-block"><code>{metaMachineCode}</code></pre>
+            <p>
+                On filesystem-backed JSON documents metadata is per-version, because a
+                <code>patch</code> writes a new version file. The low-level helpers
+                <code>getXattr</code>, <code>setXattr</code>, <code>listXattr</code>, and
+                <code>removeXattr</code> are exported for raw byte-level access.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Loading data in bulk</h2>
+            <p>
+                Bulk operations coalesce their version-control snapshot: each records a single
+                commit covering every document it touched, instead of one commit per document.
+                Prefer them over a loop of single writes for any real ingest.
+            </p>
+            <pre class="code-block"><code>{batchCode}</code></pre>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    <code>import</code> from a URL is for trusted sources. Its SSRF guard blocks
+                    private addresses and caps the body at 50 MiB, but it is not a safe target for
+                    user-supplied URLs.
+                </p>
+            </div>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/clients">← Language clients</a>
+            <a href="/docs/buckets">Buckets &amp; raw files →</a>
+        </div>
     </div>
-  </div>
 </div>

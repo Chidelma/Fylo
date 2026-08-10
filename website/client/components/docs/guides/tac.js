@@ -1,4 +1,5 @@
-export default class extends Tac {
+export default class {
+    hydrate() {}
     guides = [
         {
             href: '/docs/concepts',
@@ -19,6 +20,11 @@ export default class extends Tac {
             href: '/docs/querying',
             title: 'Querying & SQL',
             text: 'Operators, which index each one uses, pagination cursors, joins, and the SQL surface.'
+        },
+        {
+            href: '/docs/queue',
+            title: 'Serverless queue',
+            text: 'Brokerless topics, consumer groups, visibility leases, retry fencing, dead letters, and one-batch SDK decorators.'
         },
         {
             href: '/docs/schemas',

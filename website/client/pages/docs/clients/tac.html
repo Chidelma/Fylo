@@ -1,30 +1,73 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
-  #home-content {
-    display: none;
-  }
-  /* The language browser was authored as a standalone marketing section; inside
-     the docs shell it supplies the content and the shell supplies the frame. */
-  .doc-main .docs.section {
-    padding: 0;
-  }
-  .doc-main .docs .w-container {
-    max-width: none;
-    padding-inline: 0;
-  }
-  .doc-main .docs-head {
-    max-width: 46rem;
-  }
+    #home-content {
+        display: none;
+    }
+    .client-language-strip {
+        display: flex;
+        gap: 0.5rem;
+        overflow-x: auto;
+        padding: 0.25rem 0 0.75rem;
+        scrollbar-width: thin;
+    }
+    .client-language-strip .w-chip {
+        flex: 0 0 auto;
+    }
 </style>
 
 <div class="doc-shell">
-  <docs-nav />
+    <docs-nav />
 
-  <div class="doc-main doc-page">
-    <docs-content />
+    <div class="doc-main doc-page">
+        <span class="eyebrow">SDK reference</span>
+        <h1>Language clients</h1>
+        <p class="doc-lede">
+            Every native shim owns the same versioned NDJSON conversation with the FYLO binary.
+            Browser and mobile clients embed the portable engine locally instead of spawning a
+            process.
+        </p>
 
-    <div class="doc-pager">
-      <a href="/docs/concepts">← Concepts</a>
-      <a href="/docs/documents">Documents &amp; metadata →</a>
+        <div class="client-language-strip" aria-label="Supported language clients">
+            <span class="w-chip w-chip-tonal">Python</span
+            ><span class="w-chip w-chip-tonal">Ruby</span
+            ><span class="w-chip w-chip-tonal">Node.js</span
+            ><span class="w-chip w-chip-tonal">PHP</span><span class="w-chip w-chip-tonal">Go</span
+            ><span class="w-chip w-chip-tonal">Rust</span><span class="w-chip w-chip-tonal">C#</span
+            ><span class="w-chip w-chip-tonal">Java</span
+            ><span class="w-chip w-chip-tonal">Swift</span
+            ><span class="w-chip w-chip-tonal">Kotlin</span
+            ><span class="w-chip w-chip-tonal">Dart</span
+            ><span class="w-chip w-chip-tonal">Flutter</span
+            ><span class="w-chip w-chip-tonal">JS (Browser)</span>
+        </div>
+
+        <div class="doc-section">
+            <h2>The same CRUD sequence in every SDK</h2>
+            <docs-sample topic="crud" hydrate="load" />
+        </div>
+
+        <div class="doc-section">
+            <h2>Native shims stay thin</h2>
+            <p>
+                Native clients spawn <code>fylo exec --loop</code>, negotiate capabilities with a
+                handshake, and map stable error codes into language-native exceptions. Copy the
+                version-matched client file from the release archive; there is no package registry
+                or linked storage implementation to keep in sync.
+            </p>
+            <p>
+                See <a href="/docs/protocol">Machine protocol</a> for framing and pagination, or
+                <a href="/docs/browser">Browser &amp; Explorer</a> for the local OPFS and File
+                System Access adapters.
+            </p>
+        </div>
+
+        <div class="doc-pager">
+            <a href="/docs/concepts">← Concepts</a>
+            <a href="/docs/documents">Documents &amp; metadata →</a>
+        </div>
     </div>
-  </div>
 </div>

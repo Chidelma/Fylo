@@ -44,3 +44,16 @@ Within protocol v1:
 - request fields remain operation-specific;
 - changing idempotency, durability, or retry behavior requires a new protocol
   version or an explicit compatibility RFC.
+
+## Embedded serverless queue
+
+Protocol v1 exposes a brokerless filesystem queue through `queuePublish`,
+`queueClaim`, `queueAck`, `queueNack`, `queueExtend`, `queueStats`, and
+`queueDeadLetters`. Delivery is at least once. A claim is durable before its
+receipt is returned; workers must acknowledge with that receipt or the message
+becomes visible after its lease. Producer retries are idempotent only when the
+same `idempotencyKey`, topic, and payload are supplied.
+Topic and consumer-group names contain at most 127 UTF-8 bytes. Queue reads are
+bounded before the engine leases or aggregates records so the response frame
+limit cannot strand an unreturnable delivery. Header discovery and queue stats
+also stop at 64 MiB of message-file scan work per request.

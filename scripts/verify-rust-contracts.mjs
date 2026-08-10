@@ -4,6 +4,7 @@ const MACHINE_PROTOCOL_VERSION = 1
 const operations = JSON.parse(await readFile('api/machine/v1/operations.json', 'utf8'))
 const schema = JSON.parse(await readFile('api/machine/v1/schema.json', 'utf8'))
 const errors = JSON.parse(await readFile('api/errors/v1.json', 'utf8'))
+const queueSchema = JSON.parse(await readFile('api/queue/v1/schema.json', 'utf8'))
 const oracleReleases = JSON.parse(await readFile('api/oracle/v1/releases.json', 'utf8'))
 const fixture = JSON.parse(await readFile('tests/fixtures/rust-format-v1.json', 'utf8'))
 const packageManifest = JSON.parse(await readFile('package.json', 'utf8'))
@@ -26,9 +27,11 @@ const querySource = await readFile('crates/fylo-query/src/lib.rs', 'utf8')
 const formatSource = await readFile('crates/fylo-format/src/lib.rs', 'utf8')
 const storageSource = await readFile('crates/fylo-storage-native/src/lib.rs', 'utf8')
 const storageWriteSource = await readFile('crates/fylo-storage-native/src/write.rs', 'utf8')
+const queueSource = await readFile('crates/fylo-storage-native/src/queue.rs', 'utf8')
 const engineSource = await readFile('crates/fylo-engine/src/lib.rs', 'utf8')
 const wasmHostSource = await readFile('src/browser/wasm/index-scanner.js', 'utf8')
 const ciSource = await readFile('.github/workflows/ci.yml', 'utf8')
+const nightlySource = await readFile('.github/workflows/rust-nightly.yml', 'utf8')
 const releaseSource = await readFile('.github/workflows/publish.yml', 'utf8')
 const implementationSources = [
     machineSource,
@@ -36,6 +39,7 @@ const implementationSources = [
     formatSource,
     storageSource,
     storageWriteSource,
+    queueSource,
     engineSource,
     wasmHostSource
 ]
@@ -46,8 +50,8 @@ assert(
     'response schema protocol version drift'
 )
 assert(
-    schema.$defs.request.properties.op.enum.length === 38,
-    'filesystem-only machine registry must have 38 operations'
+    schema.$defs.request.properties.op.enum.length === 45,
+    'filesystem-only machine registry must have 45 operations'
 )
 
 const registeredOperations = operations.operations.map(({ name }) => name).sort()
@@ -107,6 +111,60 @@ assert(
 )
 assert(storageWriteSource.includes('fylo.collection-transaction.v1'), 'transaction format drift')
 assert(storageWriteSource.includes('fylo.collection-generation.v1'), 'generation format drift')
+for (const [definition, format] of [
+    ['manifest', 'fylo.queue.v1'],
+    ['receiptKey', 'fylo.queue-receipt-key.v1'],
+    ['message', 'fylo.queue-message.v1'],
+    ['consumer', 'fylo.queue-consumer.v1'],
+    ['dedupe', 'fylo.queue-dedupe.v1'],
+    ['deadLetter', 'fylo.queue-dead-letter.v1']
+]) {
+    assert(
+        queueSchema.$defs[definition].properties.format.const === format,
+        `${definition} queue schema format drift`
+    )
+    assert(queueSource.includes(`"${format}"`), `${definition} queue implementation format drift`)
+}
+for (const definition of ['message', 'consumer', 'dedupe', 'deadLetter']) {
+    const properties = queueSchema.$defs[definition].properties
+    for (const name of ['topic', 'group']) {
+        if (properties[name] === undefined) continue
+        assert(properties[name].maxLength === 127, `${definition}.${name} character limit drift`)
+        assert(properties[name]['x-maxBytes'] === 127, `${definition}.${name} byte limit drift`)
+        const pattern = new RegExp(properties[name].pattern, 'u')
+        assert(pattern.test('queue.name'), `${definition}.${name} rejects a valid name`)
+        for (const invalid of ['bad/name', 'bad\\name', 'bad\nname', 'bad\u007fname']) {
+            assert(!pattern.test(invalid), `${definition}.${name} accepts an unsafe name`)
+        }
+    }
+}
+for (const name of ['topic', 'group']) {
+    const property = schema.$defs.request.properties[name]
+    assert(property.maxLength === 127, `machine ${name} character limit drift`)
+    assert(property['x-maxBytes'] === 127, `machine ${name} byte limit drift`)
+    assert(
+        property.pattern === queueSchema.$defs.consumer.properties[name].pattern,
+        `machine ${name} character policy drift`
+    )
+}
+assert(queueSource.includes('MAX_NAME_BYTES: usize = 127'), 'queue runtime name limit drift')
+assert(
+    queueSource.includes('MAX_QUEUE_SCAN_BYTES: u64 = 64 * 1024 * 1024'),
+    'queue scan-work budget drift'
+)
+assert(
+    queueSchema.$defs.consumer.properties.acknowledged.maxProperties === 1000,
+    'queue acknowledged-receipt retention drift'
+)
+assert(
+    queueSchema.$defs.consumer.properties.acknowledgedOrder.maxItems === 1000 &&
+        queueSchema.$defs.consumer.properties.acknowledgedOrder.uniqueItems === true,
+    'queue acknowledgement-recency order drift'
+)
+assert(
+    queueSource.includes('MAX_ACKNOWLEDGED_RECEIPTS: usize = 1_000'),
+    'queue runtime acknowledged-receipt retention drift'
+)
 for (const testCase of fixture.documents) {
     if (testCase.valid) {
         assert(
@@ -136,6 +194,20 @@ assert(
 )
 for (const [path, source] of nativeClients) {
     assert(!source.includes('--worm'), `the retired WORM option remains in ${path}`)
+}
+for (const [path, marker] of [
+    ['clients/node/fylo.mjs', 'queueConsumer'],
+    ['clients/python/fylo.py', 'queue_consumer'],
+    ['clients/ruby/fylo.rb', 'queue_consumer'],
+    ['clients/php/fylo.php', 'FyloQueueConsumer'],
+    ['clients/go/fylo.go', 'QueueConsumerOptions'],
+    ['clients/rust/fylo.rs', 'QueueConsumerOptions'],
+    ['clients/java/Fylo.java', '@interface QueueConsumer'],
+    ['clients/csharp/Fylo.cs', 'FyloQueueConsumerAttribute'],
+    ['clients/dart/fylo.dart', 'FyloQueueConsumer']
+]) {
+    const source = nativeClients.find(([candidate]) => candidate === path)?.[1]
+    assert(source?.includes(marker), `${path} lacks its queue consumer adapter`)
 }
 
 for (const path of [
@@ -171,6 +243,36 @@ assert(
     releaseSource.includes('verify-rust-release-machine-parity.mjs'),
     'release CI must retain immutable previous-release compatibility proof'
 )
+for (const [script, markers] of [
+    ['rust:check', ['--workspace', '--all-targets', '--all-features', '--locked']],
+    ['rust:clippy', ['--workspace', '--all-targets', '--all-features', '--locked']],
+    ['rust:test', ['--workspace', '--all-targets', '--all-features', '--locked']],
+    ['rust:doc', ['--workspace', '--all-features', '--no-deps', '--locked']]
+]) {
+    const command = packageManifest.scripts[script]
+    assert(typeof command === 'string', `missing ${script} qualification command`)
+    for (const marker of markers) {
+        assert(command.includes(marker), `${script} must include ${marker}`)
+    }
+}
+for (const marker of [
+    'workflow_call:',
+    'bun run rust:check',
+    'bun run rust:doc',
+    'RUSTDOCFLAGS: -D warnings',
+    'cargo-deny --version 0.19.7 --locked',
+    'cargo-llvm-cov --version 0.8.6 --locked',
+    'cargo-cyclonedx --version 0.5.7 --locked',
+    'cargo-auditable --version 0.7.0 --locked'
+]) {
+    assert(ciSource.includes(marker), `CI qualification is missing ${marker}`)
+}
+for (const sanitizer of ['address', 'leak', 'thread']) {
+    assert(
+        nightlySource.includes(`-Zsanitizer=${sanitizer}`),
+        `scheduled qualification is missing ${sanitizer} sanitizer`
+    )
+}
 
 assert(oracleReleases.format === 'fylo.released-oracle-sources.v1', 'oracle registry drift')
 for (const release of oracleReleases.releases) {

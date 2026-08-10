@@ -16,7 +16,7 @@
         </div>
 
         <div class="docs-tabs" role="tablist" aria-label="Documentation sections">
-            <loop :for="let section of sections">
+            <loop :for="section of sections">
                 <button
                     type="button"
                     :class="$section === section.key ? 'w-btn w-btn-filled w-btn--sm' : 'w-btn w-btn-ghost w-btn--sm'"
@@ -31,7 +31,7 @@
 
         <logic :if="isCodeSection()">
             <div class="docs-langs" role="tablist" aria-label="Language">
-                <loop :for="let lang of langs">
+                <loop :for="lang of langs">
                     <button
                         type="button"
                         :class="$lang === lang.key ? 'w-btn w-btn-tonal w-btn--sm' : 'w-btn w-btn-ghost w-btn--sm'"
@@ -95,7 +95,7 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                <loop :for="let row of queryStrategies">
+                                <loop :for="row of queryStrategies">
                                     <tr>
                                         <td data-label="Operator"><code>{row.op}</code></td>
                                         <td data-label="Index used">{row.index}</td>

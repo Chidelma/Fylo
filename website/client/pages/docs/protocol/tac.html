@@ -1,3 +1,8 @@
+<script>
+    let __fyloPage = true
+</script>
+<link rel="stylesheet" href="/shared/assets/duvay/duvay.min.css" />
+<link rel="stylesheet" href="/shared/assets/site.css" />
 <style>
     #home-content {
         display: none;
@@ -49,8 +54,9 @@
                 integrity level implemented by this runtime. On macOS and Linux,
                 <code>machineAccess.version === 1</code> lists the operations and denial semantics
                 covered by trusted POSTIX access. Its absence means the build does not provide that
-                authorization boundary. Reject a missing or unknown capability version before
-                touching a production root.
+                authorization boundary. <code>serverlessQueue.version === 1</code> identifies the
+                embedded filesystem queue and publishes its delivery model and limits. Reject a
+                missing or unknown capability version before touching a production root.
             </p>
         </div>
 
@@ -65,18 +71,96 @@
                         </tr>
                     </thead>
                     <tbody>
-                        <loop :for="let row of ops">
-                            <tr>
-                                <td>{row.group}</td>
-                                <td><code>{row.items}</code></td>
-                            </tr>
-                        </loop>
+                        <tr>
+                            <td>Session</td>
+                            <td><code>handshake</code></td>
+                        </tr>
+                        <tr>
+                            <td>Collections</td>
+                            <td>
+                                <code
+                                    >createCollection, dropCollection, inspectCollection,
+                                    rebuildCollection, reshardCollection, verifyCollection</code
+                                >
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Documents</td>
+                            <td>
+                                <code
+                                    >getDoc, getFileData, getLatest, putData, batchPutData,
+                                    patchDoc, patchDocs, delDoc, delDocs, restoreDoc,
+                                    importBulkData</code
+                                >
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Metadata</td>
+                            <td><code>getMeta, setMeta</code></td>
+                        </tr>
+                        <tr>
+                            <td>Queries</td>
+                            <td><code>findDocs, findDeletedDocs, joinDocs, executeSQL</code></td>
+                        </tr>
+                        <tr>
+                            <td>Version control</td>
+                            <td>
+                                <code
+                                    >checkout, branch, commit, log, status, diff, restoreCommit,
+                                    merge</code
+                                >
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Schemas</td>
+                            <td>
+                                <code
+                                    >schemaInspect, schemaCurrent, schemaHistory, schemaDoctor,
+                                    schemaValidate, schemaMaterialize</code
+                                >
+                            </td>
+                        </tr>
+                        <tr>
+                            <td>Serverless queue</td>
+                            <td>
+                                <code
+                                    >queuePublish, queueClaim, queueAck, queueNack, queueExtend,
+                                    queueStats, queueDeadLetters</code
+                                >
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
             </div>
             <p>
                 An operation this runtime does not know returns <code>EUNSUPPORTEDOP</code> — the
                 set is additive across releases, so check the handshake rather than assuming.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Embedded serverless queue</h2>
+            <p>
+                The Rust engine persists brokerless topics, consumer-group state, visibility leases,
+                delayed retries, and group-specific dead letters under
+                <code>.fylo-queue/v1</code>. A claim is durable before its receipt is returned;
+                workers acknowledge with that receipt or the message becomes visible after its
+                lease.
+            </p>
+            <pre class="code-block"><code>{queueCode}</code></pre>
+            <p>
+                Every native SDK shim also provides a consumer decorator, annotation, or callable
+                wrapper. A decorated invocation processes one bounded batch, acknowledges successful
+                handlers, and negative-acknowledges failures—appropriate for a serverless function
+                invocation without hiding an infinite poll loop.
+            </p>
+            <pre class="code-block"><code>{queueDecoratorCode}</code></pre>
+            <p>
+                Delivery is at least once. Publish retries are idempotent only with the same topic,
+                payload, and <code>idempotencyKey</code>. Topic and consumer-group names are limited
+                to 127 UTF-8 bytes, and expired or incorrect receipts are rejected. FYLO still
+                permits one owner process per root, so concurrent worker tasks share that process;
+                this is embedded and brokerless, not a distributed multi-writer queue.
             </p>
         </div>
 

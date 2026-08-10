@@ -1,12 +1,7 @@
 const TITLE = 'Error codes — FYLO'
 document.title = TITLE
 
-export default class extends Tac {
-    constructor(props = {}, tac = undefined) {
-        super(props, tac)
-        if (this.isBrowser) document.title = TITLE
-    }
-
+export default class {
     codes = [
         {
             code: 'EBADREQUEST',
@@ -32,6 +27,21 @@ export default class extends Tac {
             code: 'EACCES',
             meaning: 'The access context is not permitted to perform the operation.',
             retry: 'Do not retry with the same identity.'
+        },
+        {
+            code: 'EQUEUE_INVALID',
+            meaning: 'A queue identity, option, or idempotency-key reuse is invalid.',
+            retry: 'Do not retry without correcting the request.'
+        },
+        {
+            code: 'EQUEUE_RECEIPT',
+            meaning: 'A queue receipt is incorrect, expired, or superseded.',
+            retry: 'Do not acknowledge as that worker.'
+        },
+        {
+            code: 'EQUEUE_LIMIT',
+            meaning: 'A queue message, claim, delay, attempt, state, or read limit was exceeded.',
+            retry: 'Reduce the requested resource.'
         },
         {
             code: 'EDECRYPTFAILED',

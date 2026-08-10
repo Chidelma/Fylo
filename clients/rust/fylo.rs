@@ -33,6 +33,33 @@ pub struct Fylo {
     stdout: BufReader<std::process::ChildStdout>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct QueueConsumerOptions {
+    pub max_messages: usize,
+    pub visibility_timeout_ms: u64,
+    pub max_attempts: u32,
+    pub retry_delay_ms: u64,
+}
+
+impl Default for QueueConsumerOptions {
+    fn default() -> Self {
+        Self {
+            max_messages: 1,
+            visibility_timeout_ms: 30_000,
+            max_attempts: 3,
+            retry_delay_ms: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QueueProcessResult {
+    pub claimed: usize,
+    pub acknowledged: usize,
+    pub retried: usize,
+    pub dead_lettered: usize,
+}
+
 impl Fylo {
     /// Start a warm fylo process rooted at `root`. `binary` is usually "fylo".
     pub fn open(root: &str, binary: &str) -> std::io::Result<Fylo> {
@@ -135,6 +162,175 @@ impl Fylo {
             r#"{{"op":"rebuildCollection","collection":"{}"}}"#,
             esc(collection)
         ))
+    }
+
+    // --- Durable serverless queue ---
+    pub fn queue_publish(
+        &mut self,
+        topic: &str,
+        payload: Json,
+        delay_ms: u64,
+        idempotency_key: Option<&str>,
+    ) -> std::io::Result<String> {
+        let idempotency = idempotency_key.map_or(String::new(), |key| {
+            format!(",\"idempotencyKey\":\"{}\"", esc(key))
+        });
+        self.checked(format!(
+            r#"{{"op":"queuePublish","topic":"{}","payload":{},"delayMs":{}{}}}"#,
+            esc(topic),
+            payload.encode(),
+            delay_ms,
+            idempotency
+        ))
+    }
+    pub fn queue_claim(
+        &mut self,
+        topic: &str,
+        group: &str,
+        max_messages: usize,
+        visibility_timeout_ms: u64,
+        max_attempts: u32,
+    ) -> std::io::Result<String> {
+        self.checked(format!(
+            r#"{{"op":"queueClaim","topic":"{}","group":"{}","maxMessages":{},"visibilityTimeoutMs":{},"maxAttempts":{}}}"#,
+            esc(topic), esc(group), max_messages, visibility_timeout_ms, max_attempts
+        ))
+    }
+    pub fn queue_ack(
+        &mut self,
+        topic: &str,
+        group: &str,
+        id: &str,
+        receipt: &str,
+    ) -> std::io::Result<String> {
+        self.checked(format!(
+            r#"{{"op":"queueAck","topic":"{}","group":"{}","id":"{}","receipt":"{}"}}"#,
+            esc(topic),
+            esc(group),
+            esc(id),
+            esc(receipt)
+        ))
+    }
+    pub fn queue_nack(
+        &mut self,
+        topic: &str,
+        group: &str,
+        id: &str,
+        receipt: &str,
+        delay_ms: u64,
+        reason: &str,
+    ) -> std::io::Result<String> {
+        self.checked(format!(
+            r#"{{"op":"queueNack","topic":"{}","group":"{}","id":"{}","receipt":"{}","delayMs":{},"reason":"{}"}}"#,
+            esc(topic), esc(group), esc(id), esc(receipt), delay_ms, esc(reason)
+        ))
+    }
+    pub fn queue_extend(
+        &mut self,
+        topic: &str,
+        group: &str,
+        id: &str,
+        receipt: &str,
+        visibility_timeout_ms: u64,
+    ) -> std::io::Result<String> {
+        self.checked(format!(
+            r#"{{"op":"queueExtend","topic":"{}","group":"{}","id":"{}","receipt":"{}","visibilityTimeoutMs":{}}}"#,
+            esc(topic), esc(group), esc(id), esc(receipt), visibility_timeout_ms
+        ))
+    }
+    pub fn queue_stats(&mut self, topic: &str, group: &str) -> std::io::Result<String> {
+        self.checked(format!(
+            r#"{{"op":"queueStats","topic":"{}","group":"{}"}}"#,
+            esc(topic),
+            esc(group)
+        ))
+    }
+    pub fn queue_dead_letters(
+        &mut self,
+        topic: &str,
+        group: &str,
+        limit: usize,
+    ) -> std::io::Result<String> {
+        self.checked(format!(
+            r#"{{"op":"queueDeadLetters","topic":"{}","group":"{}","limit":{}}}"#,
+            esc(topic),
+            esc(group),
+            limit
+        ))
+    }
+
+    /// Process and settle one bounded batch. The dependency-free handler sees
+    /// each delivery as a validated raw JSON object.
+    pub fn queue_process<F>(
+        &mut self,
+        topic: &str,
+        group: &str,
+        options: QueueConsumerOptions,
+        mut handler: F,
+    ) -> std::io::Result<QueueProcessResult>
+    where
+        F: FnMut(&str) -> Result<(), String>,
+    {
+        let response = self.queue_claim(
+            topic,
+            group,
+            options.max_messages,
+            options.visibility_timeout_ms,
+            options.max_attempts,
+        )?;
+        let result_json = json_object_field(response.trim(), "result")?;
+        let deliveries: Vec<String> = json_array_values(result_json)?
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let mut result = QueueProcessResult {
+            claimed: deliveries.len(),
+            ..QueueProcessResult::default()
+        };
+        for delivery in deliveries {
+            let id = json_string_field(&delivery, "id")?;
+            let receipt = json_string_field(&delivery, "receipt")?;
+            match handler(&delivery) {
+                Ok(()) => {
+                    self.queue_ack(topic, group, &id, &receipt)?;
+                    result.acknowledged += 1;
+                }
+                Err(_) => {
+                    let response = self.queue_nack(
+                        topic,
+                        group,
+                        &id,
+                        &receipt,
+                        options.retry_delay_ms,
+                        "queue handler failed",
+                    )?;
+                    let nack = json_object_field(response.trim(), "result")?;
+                    if json_object_field(nack, "deadLettered")? == "true" {
+                        result.dead_lettered += 1;
+                    } else {
+                        result.retried += 1;
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Return Rust's attribute-free decorator equivalent: a callable that
+    /// processes one bounded batch whenever it is invoked.
+    pub fn queue_consumer<'a, F>(
+        &'a mut self,
+        topic: &str,
+        group: &str,
+        options: QueueConsumerOptions,
+        mut handler: F,
+    ) -> impl FnMut() -> std::io::Result<QueueProcessResult> + 'a
+    where
+        F: FnMut(&str) -> Result<(), String> + 'a,
+    {
+        let topic = topic.to_string();
+        let group = group.to_string();
+        move || self.queue_process(&topic, &group, options, &mut handler)
     }
 
     // --- Documents (object args are built with Json) ---
@@ -297,6 +493,206 @@ impl Fylo {
             name: name.to_string(),
         }
     }
+}
+
+fn invalid_json(message: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message)
+}
+
+fn skip_json_space(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn json_string_end(bytes: &[u8], start: usize) -> std::io::Result<usize> {
+    if bytes.get(start) != Some(&b'"') {
+        return Err(invalid_json("expected a JSON string"));
+    }
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => return Ok(index + 1),
+            b'\\' => index += 2,
+            0x00..=0x1f => return Err(invalid_json("invalid JSON string control byte")),
+            _ => index += 1,
+        }
+    }
+    Err(invalid_json("unterminated JSON string"))
+}
+
+fn json_value_end(bytes: &[u8], start: usize) -> std::io::Result<usize> {
+    let start = skip_json_space(bytes, start);
+    match bytes.get(start) {
+        Some(b'"') => json_string_end(bytes, start),
+        Some(b'{') | Some(b'[') => {
+            let mut stack = vec![if bytes[start] == b'{' { b'}' } else { b']' }];
+            let mut index = start + 1;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'"' => index = json_string_end(bytes, index)?,
+                    b'{' => {
+                        stack.push(b'}');
+                        index += 1;
+                    }
+                    b'[' => {
+                        stack.push(b']');
+                        index += 1;
+                    }
+                    b'}' | b']' => {
+                        if stack.pop() != Some(bytes[index]) {
+                            return Err(invalid_json("mismatched JSON container"));
+                        }
+                        index += 1;
+                        if stack.is_empty() {
+                            return Ok(index);
+                        }
+                    }
+                    _ => index += 1,
+                }
+            }
+            Err(invalid_json("unterminated JSON container"))
+        }
+        Some(_) => {
+            let mut index = start;
+            while index < bytes.len()
+                && !matches!(bytes[index], b',' | b']' | b'}')
+                && !bytes[index].is_ascii_whitespace()
+            {
+                index += 1;
+            }
+            if index == start {
+                Err(invalid_json("missing JSON value"))
+            } else {
+                Ok(index)
+            }
+        }
+        None => Err(invalid_json("missing JSON value")),
+    }
+}
+
+fn json_object_field<'a>(object: &'a str, wanted: &str) -> std::io::Result<&'a str> {
+    let bytes = object.as_bytes();
+    let mut index = skip_json_space(bytes, 0);
+    if bytes.get(index) != Some(&b'{') {
+        return Err(invalid_json("expected a JSON object"));
+    }
+    index += 1;
+    loop {
+        index = skip_json_space(bytes, index);
+        if bytes.get(index) == Some(&b'}') {
+            break;
+        }
+        let key_end = json_string_end(bytes, index)?;
+        let key = decode_json_string(&object[index..key_end])?;
+        index = skip_json_space(bytes, key_end);
+        if bytes.get(index) != Some(&b':') {
+            return Err(invalid_json("JSON object field lacks a colon"));
+        }
+        let value_start = skip_json_space(bytes, index + 1);
+        let value_end = json_value_end(bytes, value_start)?;
+        if key == wanted {
+            return Ok(&object[value_start..value_end]);
+        }
+        index = skip_json_space(bytes, value_end);
+        match bytes.get(index) {
+            Some(b',') => index += 1,
+            Some(b'}') => break,
+            _ => return Err(invalid_json("invalid JSON object separator")),
+        }
+    }
+    Err(invalid_json("FYLO response lacks an expected JSON field"))
+}
+
+fn json_array_values(array: &str) -> std::io::Result<Vec<&str>> {
+    let bytes = array.as_bytes();
+    let mut index = skip_json_space(bytes, 0);
+    if bytes.get(index) != Some(&b'[') {
+        return Err(invalid_json("expected a JSON array"));
+    }
+    index += 1;
+    let mut values = Vec::new();
+    loop {
+        index = skip_json_space(bytes, index);
+        if bytes.get(index) == Some(&b']') {
+            return Ok(values);
+        }
+        let end = json_value_end(bytes, index)?;
+        values.push(&array[index..end]);
+        index = skip_json_space(bytes, end);
+        match bytes.get(index) {
+            Some(b',') => index += 1,
+            Some(b']') => return Ok(values),
+            _ => return Err(invalid_json("invalid JSON array separator")),
+        }
+    }
+}
+
+fn json_string_field(object: &str, key: &str) -> std::io::Result<String> {
+    decode_json_string(json_object_field(object, key)?)
+}
+
+fn decode_json_string(value: &str) -> std::io::Result<String> {
+    if value.len() < 2 || !value.starts_with('"') || !value.ends_with('"') {
+        return Err(invalid_json("expected a JSON string field"));
+    }
+    let mut chars = value[1..value.len() - 1].chars();
+    let mut decoded = String::new();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match chars
+            .next()
+            .ok_or_else(|| invalid_json("incomplete JSON escape"))?
+        {
+            '"' => decoded.push('"'),
+            '\\' => decoded.push('\\'),
+            '/' => decoded.push('/'),
+            'b' => decoded.push('\u{08}'),
+            'f' => decoded.push('\u{0c}'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            'u' => {
+                let mut code = 0_u32;
+                for _ in 0..4 {
+                    code = code * 16
+                        + chars
+                            .next()
+                            .and_then(|digit| digit.to_digit(16))
+                            .ok_or_else(|| invalid_json("invalid JSON unicode escape"))?;
+                }
+                if (0xd800..=0xdbff).contains(&code) {
+                    if chars.next() != Some('\\') || chars.next() != Some('u') {
+                        return Err(invalid_json("missing JSON low surrogate"));
+                    }
+                    let mut low = 0_u32;
+                    for _ in 0..4 {
+                        low = low * 16
+                            + chars
+                                .next()
+                                .and_then(|digit| digit.to_digit(16))
+                                .ok_or_else(|| invalid_json("invalid JSON low surrogate"))?;
+                    }
+                    if !(0xdc00..=0xdfff).contains(&low) {
+                        return Err(invalid_json("invalid JSON low surrogate"));
+                    }
+                    code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
+                } else if (0xdc00..=0xdfff).contains(&code) {
+                    return Err(invalid_json("unexpected JSON low surrogate"));
+                }
+                decoded.push(
+                    char::from_u32(code)
+                        .ok_or_else(|| invalid_json("invalid JSON unicode scalar"))?,
+                );
+            }
+            _ => return Err(invalid_json("unknown JSON escape")),
+        }
+    }
+    Ok(decoded)
 }
 
 /// A collection-scoped view; methods drop the leading collection argument.
