@@ -3,7 +3,7 @@ document.title = TITLE
 
 export default class {
     loaderCode =
-        `<script src="https://d31ma.github.io/FYLO/version/26.33.01/fylo.js"></` + `script>`
+        `<script src="https://d31ma.github.io/FYLO/version/26.33.02/fylo.js"></` + `script>`
 
     useCode = `const db = await Fylo.open()
 
@@ -29,7 +29,7 @@ await db.ready()`
 cd explorer && bun run serve    # http://localhost:8080
 cd explorer && bun run bundle   # production bundle at explorer/dist/web`
 
-    zipCode = `VERSION=26.33.01
+    zipCode = `VERSION=26.33.02
 curl -fLO "https://github.com/d31ma/Fylo/releases/download/v\${VERSION}/fylo-explorer-\${VERSION}.zip"
 mkdir "fylo-explorer-\${VERSION}"
 unzip "fylo-explorer-\${VERSION}.zip" -d "fylo-explorer-\${VERSION}"

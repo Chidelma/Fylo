@@ -21,7 +21,10 @@
 //! has `From` impls for &str/String/i64/f64/bool). Method names follow Rust's
 //! snake_case; `request` is the raw escape hatch for ops without a method.
 
+use std::collections::BTreeMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -31,6 +34,27 @@ pub struct Fylo {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: BufReader<std::process::ChildStdout>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProcessEnvironment {
+    File(PathBuf),
+    Values(BTreeMap<String, Option<String>>),
+}
+
+#[derive(Clone, Debug)]
+pub struct FyloOptions {
+    pub binary: String,
+    pub env: Option<ProcessEnvironment>,
+}
+
+impl Default for FyloOptions {
+    fn default() -> Self {
+        Self {
+            binary: "fylo".to_string(),
+            env: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,12 +87,28 @@ pub struct QueueProcessResult {
 impl Fylo {
     /// Start a warm fylo process rooted at `root`. `binary` is usually "fylo".
     pub fn open(root: &str, binary: &str) -> std::io::Result<Fylo> {
+        Self::open_with_options(
+            root,
+            FyloOptions {
+                binary: binary.to_string(),
+                env: None,
+            },
+        )
+    }
+
+    pub fn open_with_options(root: &str, options: FyloOptions) -> std::io::Result<Fylo> {
+        let binary = if options.binary.is_empty() {
+            "fylo"
+        } else {
+            &options.binary
+        };
         let mut cmd = Command::new(binary);
         cmd.args(["exec", "--loop", "--root", root]);
         cmd.arg("--max-request-bytes")
             .arg(MAX_REQUEST_BYTES.to_string())
             .arg("--max-response-bytes")
             .arg(MAX_RESPONSE_BYTES.to_string());
+        apply_child_environment(&mut cmd, options.env)?;
         let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
@@ -493,6 +533,166 @@ impl Fylo {
             name: name.to_string(),
         }
     }
+}
+
+fn apply_child_environment(
+    command: &mut Command,
+    config: Option<ProcessEnvironment>,
+) -> std::io::Result<()> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let values = match config {
+        ProcessEnvironment::File(path) => environment_file(&path)?,
+        ProcessEnvironment::Values(values) => values,
+    };
+    let values: Vec<(String, Option<String>)> = if cfg!(windows) {
+        let mut canonical = BTreeMap::new();
+        for (name, value) in values {
+            canonical.insert(name.to_uppercase(), (name, value));
+        }
+        canonical.into_values().collect()
+    } else {
+        values.into_iter().collect()
+    };
+    for (name, value) in values {
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid environment variable name {name:?}"),
+            ));
+        }
+        if value.as_ref().is_some_and(|value| value.contains('\0')) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid environment variable value for {name:?}: contains NUL"),
+            ));
+        }
+        if cfg!(windows) {
+            let canonical_name = name.to_uppercase();
+            for (inherited, _) in std::env::vars_os() {
+                if inherited.to_string_lossy().to_uppercase() == canonical_name {
+                    command.env_remove(inherited);
+                }
+            }
+        }
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn environment_file(path: &PathBuf) -> std::io::Result<BTreeMap<String, Option<String>>> {
+    let source = fs::read_to_string(path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "cannot read FYLO environment file {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    let source = source.strip_prefix('\u{feff}').unwrap_or(&source);
+    let mut values = BTreeMap::new();
+    for (offset, original) in source.lines().enumerate() {
+        let line = offset + 1;
+        let mut entry = original.trim();
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+        if entry.starts_with("export")
+            && entry.as_bytes().get(6).is_some_and(u8::is_ascii_whitespace)
+        {
+            entry = entry[7..].trim_start();
+        }
+        let Some(separator) = entry.find('=') else {
+            return Err(environment_error(path, line, "expected NAME=VALUE"));
+        };
+        let name = entry[..separator].trim();
+        if !valid_environment_name(name) {
+            return Err(environment_error(
+                path,
+                line,
+                &format!("invalid environment variable name {name:?}"),
+            ));
+        }
+        let value = parse_environment_value(path, line, entry[separator + 1..].trim_start())?;
+        values.insert(name.to_string(), Some(value));
+    }
+    Ok(values)
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut characters = name.bytes();
+    characters
+        .next()
+        .is_some_and(|value| value.is_ascii_alphabetic() || value == b'_')
+        && characters.all(|value| value.is_ascii_alphanumeric() || value == b'_')
+}
+
+fn parse_environment_value(path: &PathBuf, line: usize, input: &str) -> std::io::Result<String> {
+    let Some(quote) = input
+        .chars()
+        .next()
+        .filter(|value| *value == '"' || *value == '\'')
+    else {
+        return Ok(input
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_string());
+    };
+    let mut value = String::new();
+    let mut characters = input.char_indices().skip(1);
+    while let Some((index, character)) = characters.next() {
+        if character == quote {
+            let trailing = input[index + character.len_utf8()..].trim();
+            if !trailing.is_empty() && !trailing.starts_with('#') {
+                return Err(environment_error(
+                    path,
+                    line,
+                    "unexpected characters after quoted value",
+                ));
+            }
+            return Ok(value);
+        }
+        if quote == '"' && character == '\\' {
+            let Some((_, escaped)) = characters.next() else {
+                return Err(environment_error(
+                    path,
+                    line,
+                    "unterminated escape sequence",
+                ));
+            };
+            match escaped {
+                'n' => value.push('\n'),
+                'r' => value.push('\r'),
+                't' => value.push('\t'),
+                '"' | '\\' => value.push(escaped),
+                _ => {
+                    value.push('\\');
+                    value.push(escaped);
+                }
+            }
+        } else {
+            value.push(character);
+        }
+    }
+    Err(environment_error(path, line, "unterminated quoted value"))
+}
+
+fn environment_error(path: &PathBuf, line: usize, message: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("{}:{line}: {message}", path.display()),
+    )
 }
 
 fn invalid_json(message: &str) -> std::io::Error {

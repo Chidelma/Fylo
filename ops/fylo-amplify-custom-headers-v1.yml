@@ -1,0 +1,18 @@
+# FYLO Amplify security and cache policy, version 1.
+# Apply this file with the command documented in docs/operations/web-release.md.
+customHeaders:
+    - pattern: '**/*'
+      headers:
+          - key: Strict-Transport-Security
+            value: max-age=31536000
+          - key: X-Content-Type-Options
+            value: nosniff
+          - key: Referrer-Policy
+            value: strict-origin-when-cross-origin
+          - key: Permissions-Policy
+            value: camera=(), geolocation=(), microphone=(), payment=(), usb=()
+          - key: Content-Security-Policy
+            value: >-
+                default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'inline-speculation-rules'; style-src 'self' 'sha256-5HCvsJ3S41K09ossxK/56aVhHK52srMjiJhG/a8egdE=' 'sha256-QyajUN08uwwsWjOD2lhhfkM8OIyIE7ZNYL6FrQGOW2A='; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; media-src 'self'; upgrade-insecure-requests
+          - key: Cache-Control
+            value: no-cache, must-revalidate

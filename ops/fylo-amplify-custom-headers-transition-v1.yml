@@ -1,0 +1,18 @@
+# Transitional FYLO Amplify policy for the legacy-to-Tachyon-26.33.01 rollout.
+# Keep this policy until both current.json checksums are final-policy compatible.
+customHeaders:
+    - pattern: '**/*'
+      headers:
+          - key: Strict-Transport-Security
+            value: max-age=31536000
+          - key: X-Content-Type-Options
+            value: nosniff
+          - key: Referrer-Policy
+            value: strict-origin-when-cross-origin
+          - key: Permissions-Policy
+            value: camera=(), geolocation=(), microphone=(), payment=(), usb=()
+          - key: Content-Security-Policy
+            value: >-
+                default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'inline-speculation-rules' 'unsafe-eval' 'sha256-BFiBhqPWHJntZh+bkcvub23pJ3N2o+3u+92sBneTe5g='; style-src 'self' 'sha256-5HCvsJ3S41K09ossxK/56aVhHK52srMjiJhG/a8egdE=' 'sha256-QyajUN08uwwsWjOD2lhhfkM8OIyIE7ZNYL6FrQGOW2A=' 'sha256-0OawWMA038ECb1H3473ZT2ADfOBFeGeeTmZOS/B6rhc=' 'sha256-DFQg3q12C1VB8P2gQ/L92HrjBRJVZpYFoSoF6yaIkm8=' 'sha256-cmhLwBSZo8AczYLY6wxW772EuAgC3xa+lt3Hgz/dqmk=' 'sha256-IxPrp/aXwvC3sCdOeY/P8AV3O0eoAeeUPWd0WznL7p0=' 'sha256-eQ36STzGvr9I72NYBT5CS3OFjp4EzocAzbc2v980WtU=' 'sha256-o9uz2id5s687iyo0pM4M1iFrdYEdLfX0Tu5Mf+LA8+U=' 'sha256-xIHjDYljpmY16rjFZ7LR6YUOkLAy6xj3kJ4d1djH5kY=' 'sha256-CcbD2/Ye6kbf2kAoSDGqFUq7yymr/3mlRbAz52fH9nQ=' 'sha256-oREzBM06S4WQPSYPNVOW3pPu83zAPOJG86EukO7uBVk=' 'sha256-RoO5NeL6woLZh8hrL23eaOfLQfoyn9Vtz7R85ziLrJI=' 'sha256-/Oq1NdcXkUXhJEQ93mP6qWNIN3O4QdMeVFCCgwvUsAE=' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; media-src 'self'; upgrade-insecure-requests
+          - key: Cache-Control
+            value: no-cache, must-revalidate

@@ -30,8 +30,12 @@ import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public final class Fylo implements AutoCloseable {
@@ -70,22 +74,161 @@ public final class Fylo implements AutoCloseable {
         public int deadLettered;
     }
 
+    public static final class Options {
+        public String binary = "fylo";
+        /** A .env path or Map<String, ?> applied only to the FYLO child. */
+        public Object env;
+    }
+
     public Fylo(String root) throws IOException {
         this(root, "fylo");
     }
 
     public Fylo(String root, String binary) throws IOException {
+        Options options = new Options();
+        options.binary = binary;
+        ProcessState state = start(root, options);
+        this.proc = state.process;
+        this.in = state.input;
+        this.out = state.output;
+    }
+
+    public Fylo(String root, Options options) throws IOException {
+        ProcessState state = start(root, options == null ? new Options() : options);
+        this.proc = state.process;
+        this.in = state.input;
+        this.out = state.output;
+    }
+
+    private static ProcessState start(String root, Options options) throws IOException {
+        String binary = options.binary == null || options.binary.isEmpty() ? "fylo" : options.binary;
         List<String> args = new ArrayList<>(List.of(binary, "exec", "--loop", "--root", root));
         args.add("--max-request-bytes");
         args.add(Integer.toString(MAX_REQUEST_BYTES));
         args.add("--max-response-bytes");
         args.add(Integer.toString(MAX_RESPONSE_BYTES));
-        this.proc = new ProcessBuilder(args)
-                .redirectError(ProcessBuilder.Redirect.INHERIT)
-                .start();
-        this.in = new BufferedWriter(
-                new OutputStreamWriter(proc.getOutputStream(), StandardCharsets.UTF_8));
-        this.out = new BufferedInputStream(proc.getInputStream());
+        ProcessBuilder builder = new ProcessBuilder(args).redirectError(ProcessBuilder.Redirect.INHERIT);
+        applyChildEnvironment(builder, options.env);
+        Process process = builder.start();
+        return new ProcessState(
+                process,
+                new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8)),
+                new BufferedInputStream(process.getInputStream()));
+    }
+
+    private static final class ProcessState {
+        final Process process;
+        final BufferedWriter input;
+        final InputStream output;
+
+        ProcessState(Process process, BufferedWriter input, InputStream output) {
+            this.process = process;
+            this.input = input;
+            this.output = output;
+        }
+    }
+
+    private static void applyChildEnvironment(ProcessBuilder builder, Object config) throws IOException {
+        if (config == null) return;
+        Map<?, ?> overrides;
+        if (config instanceof String) overrides = environmentFile((String) config);
+        else if (config instanceof Map) overrides = (Map<?, ?>) config;
+        else throw new IllegalArgumentException("env must be a .env file path or an environment variable Map");
+        Map<String, String> environment = builder.environment();
+        for (Map.Entry<?, ?> entry : overrides.entrySet()) {
+            String name = String.valueOf(entry.getKey());
+            if (name.isEmpty() || name.indexOf('=') >= 0 || name.indexOf('\0') >= 0) {
+                throw new IllegalArgumentException("invalid environment variable name " + quote(name));
+            }
+            String value = entry.getValue() == null ? null : String.valueOf(entry.getValue());
+            if (value != null && value.indexOf('\0') >= 0) {
+                throw new IllegalArgumentException(
+                        "invalid environment variable value for " + quote(name) + ": contains NUL");
+            }
+            if (isWindows()) {
+                environment.keySet().removeIf(existing -> existing.equalsIgnoreCase(name));
+            }
+            if (value == null) environment.remove(name);
+            else environment.put(name, value);
+        }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
+    }
+
+    private static Map<String, String> environmentFile(String path) throws IOException {
+        List<String> lines;
+        try {
+            lines = Files.readAllLines(Path.of(path), StandardCharsets.UTF_8);
+        } catch (IOException error) {
+            throw new IOException("cannot read FYLO environment file " + path + ": " + error.getMessage(), error);
+        }
+        Map<String, String> values = new LinkedHashMap<>();
+        for (int offset = 0; offset < lines.size(); offset++) {
+            int line = offset + 1;
+            String entry = lines.get(offset).trim();
+            if (offset == 0 && entry.startsWith("\uFEFF")) entry = entry.substring(1);
+            if (entry.isEmpty() || entry.startsWith("#")) continue;
+            if (entry.startsWith("export ") || entry.startsWith("export\t")) {
+                entry = entry.substring(7).stripLeading();
+            }
+            int separator = entry.indexOf('=');
+            if (separator < 0) throw environmentError(path, line, "expected NAME=VALUE");
+            String name = entry.substring(0, separator).trim();
+            if (!validEnvironmentName(name)) {
+                throw environmentError(path, line, "invalid environment variable name " + quote(name));
+            }
+            values.put(name, environmentValue(path, line, entry.substring(separator + 1).stripLeading()));
+        }
+        return values;
+    }
+
+    private static boolean validEnvironmentName(String name) {
+        if (name.isEmpty() || !(isAsciiLetter(name.charAt(0)) || name.charAt(0) == '_')) return false;
+        for (int index = 1; index < name.length(); index++) {
+            char character = name.charAt(index);
+            if (!(isAsciiLetter(character) || (character >= '0' && character <= '9') || character == '_')) return false;
+        }
+        return true;
+    }
+
+    private static boolean isAsciiLetter(char value) {
+        return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+    }
+
+    private static String environmentValue(String path, int line, String input) throws IOException {
+        if (input.isEmpty() || (input.charAt(0) != '"' && input.charAt(0) != '\'')) {
+            int comment = input.indexOf('#');
+            return (comment < 0 ? input : input.substring(0, comment)).stripTrailing();
+        }
+        char quote = input.charAt(0);
+        StringBuilder value = new StringBuilder();
+        for (int index = 1; index < input.length(); index++) {
+            char character = input.charAt(index);
+            if (character == quote) {
+                String trailing = input.substring(index + 1).trim();
+                if (!trailing.isEmpty() && !trailing.startsWith("#")) {
+                    throw environmentError(path, line, "unexpected characters after quoted value");
+                }
+                return value.toString();
+            }
+            if (quote == '"' && character == '\\') {
+                index++;
+                if (index >= input.length()) throw environmentError(path, line, "unterminated escape sequence");
+                char escaped = input.charAt(index);
+                if (escaped == 'n') value.append('\n');
+                else if (escaped == 'r') value.append('\r');
+                else if (escaped == 't') value.append('\t');
+                else if (escaped == '"' || escaped == '\\') value.append(escaped);
+                else value.append('\\').append(escaped);
+            } else value.append(character);
+        }
+        throw environmentError(path, line, "unterminated quoted value");
+    }
+
+    private static IOException environmentError(String path, int line, String message) {
+        return new IOException(path + ":" + line + ": " + message);
     }
 
     /** Send one raw machine-protocol op (JSON string); returns the response line. */

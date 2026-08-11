@@ -7,6 +7,92 @@
             "branch": "master",
             "sourceDir": "website/dist/web",
             "origin": "https://fylo.del.ma",
+            "headersPolicy": "ops/fylo-amplify-custom-headers-transition-v1.yml",
+            "finalHeadersPolicy": "ops/fylo-amplify-custom-headers-v1.yml",
+            "requiredHeaders": {
+                "strict-transport-security": "max-age=31536000",
+                "x-content-type-options": "nosniff",
+                "referrer-policy": "strict-origin-when-cross-origin",
+                "permissions-policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+                "content-security-policy": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'inline-speculation-rules' 'unsafe-eval' 'sha256-BFiBhqPWHJntZh+bkcvub23pJ3N2o+3u+92sBneTe5g='; style-src 'self' 'sha256-5HCvsJ3S41K09ossxK/56aVhHK52srMjiJhG/a8egdE=' 'sha256-QyajUN08uwwsWjOD2lhhfkM8OIyIE7ZNYL6FrQGOW2A=' 'sha256-0OawWMA038ECb1H3473ZT2ADfOBFeGeeTmZOS/B6rhc=' 'sha256-DFQg3q12C1VB8P2gQ/L92HrjBRJVZpYFoSoF6yaIkm8=' 'sha256-cmhLwBSZo8AczYLY6wxW772EuAgC3xa+lt3Hgz/dqmk=' 'sha256-IxPrp/aXwvC3sCdOeY/P8AV3O0eoAeeUPWd0WznL7p0=' 'sha256-eQ36STzGvr9I72NYBT5CS3OFjp4EzocAzbc2v980WtU=' 'sha256-o9uz2id5s687iyo0pM4M1iFrdYEdLfX0Tu5Mf+LA8+U=' 'sha256-xIHjDYljpmY16rjFZ7LR6YUOkLAy6xj3kJ4d1djH5kY=' 'sha256-CcbD2/Ye6kbf2kAoSDGqFUq7yymr/3mlRbAz52fH9nQ=' 'sha256-oREzBM06S4WQPSYPNVOW3pPu83zAPOJG86EukO7uBVk=' 'sha256-RoO5NeL6woLZh8hrL23eaOfLQfoyn9Vtz7R85ziLrJI=' 'sha256-/Oq1NdcXkUXhJEQ93mP6qWNIN3O4QdMeVFCCgwvUsAE=' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; media-src 'self'; upgrade-insecure-requests",
+                "cache-control": "no-cache, must-revalidate"
+            },
+            "artifactContracts": {
+                "0c14fea889d6ff7b69b75c40b506b92247353ec34d938c4221b93a3c7cd6aa6c": {
+                    "requiredHeaders": {},
+                    "requiredScriptSrcTokens": ["'unsafe-eval'"],
+                    "probes": [
+                        { "path": "/", "contains": "FYLO", "contentTypes": ["text/html"] },
+                        {
+                            "path": "/docs",
+                            "contains": "FYLO documentation",
+                            "contentTypes": ["text/html"]
+                        },
+                        {
+                            "path": "/download",
+                            "contains": "Download FYLO",
+                            "contentTypes": ["text/html"]
+                        },
+                        {
+                            "path": "/shared/assets/site.css",
+                            "contains": "--w-primary",
+                            "contentTypes": ["text/css"]
+                        },
+                        {
+                            "path": "/imports.js",
+                            "contains": "tachyon:navigate",
+                            "contentTypes": ["application/javascript", "text/javascript"]
+                        },
+                        {
+                            "path": "/components/hero/tac.js",
+                            "contains": "https://fylo.del.ma/install.sh",
+                            "contentTypes": ["application/javascript", "text/javascript"]
+                        },
+                        {
+                            "path": "/fylo-browser-worker.js",
+                            "contains": "self.addEventListener",
+                            "contentTypes": ["application/javascript", "text/javascript"]
+                        }
+                    ]
+                },
+                "16e24d877d60e40aa88f1611492d8abd42174ea7b669f482e0977dcf22554736": {
+                    "requiredHeaders": {},
+                    "requiredScriptSrcTokens": ["'unsafe-eval'"],
+                    "probes": [
+                        { "path": "/", "contains": "FYLO", "contentTypes": ["text/html"] },
+                        {
+                            "path": "/docs",
+                            "contains": "FYLO documentation",
+                            "contentTypes": ["text/html"]
+                        },
+                        {
+                            "path": "/download",
+                            "contains": "Download FYLO",
+                            "contentTypes": ["text/html"]
+                        },
+                        {
+                            "path": "/shared/assets/site.css",
+                            "contains": "--w-primary",
+                            "contentTypes": ["text/css"]
+                        },
+                        {
+                            "path": "/imports.js",
+                            "contains": "tachyon:navigate",
+                            "contentTypes": ["application/javascript", "text/javascript"]
+                        },
+                        {
+                            "path": "/components/hero/tac.js",
+                            "contains": "https://fylo.del.ma/install.sh",
+                            "contentTypes": ["application/javascript", "text/javascript"]
+                        },
+                        {
+                            "path": "/fylo-browser-worker.js",
+                            "contains": "self.addEventListener",
+                            "contentTypes": ["application/javascript", "text/javascript"]
+                        }
+                    ]
+                }
+            },
             "probes": [
                 {
                     "path": "/",
@@ -42,64 +128,19 @@
                     "path": "/.tachyon/islands.js",
                     "contains": "bindDeferred",
                     "contentTypes": ["application/javascript", "text/javascript"]
-                }
-            ]
-        },
-        "fxp": {
-            "appId": "dnjtojrhwtus2",
-            "branch": "master",
-            "sourceDir": "explorer/dist/web",
-            "origin": "https://fx.del.ma",
-            "probes": [
-                {
-                    "path": "/",
-                    "contains": "FX | Fylo Explorer",
-                    "contentTypes": ["text/html"]
                 },
                 {
-                    "path": "/shared/assets/explorer.css",
-                    "contains": ".explorer",
-                    "contentTypes": ["text/css"]
-                },
-                {
-                    "path": "/imports.js",
-                    "contains": "/shared/assets/fylo-web.mjs",
-                    "contentTypes": ["application/javascript", "text/javascript"]
-                },
-                {
-                    "path": "/components/explorer/app/tac.js",
-                    "contains": "/shared/assets/fylo-web.mjs",
-                    "contentTypes": ["application/javascript", "text/javascript"]
-                },
-                {
-                    "path": "/shared/assets/duvay/duvay-wc.min.js",
-                    "contains": "customElements.define",
-                    "contentTypes": ["application/javascript", "text/javascript"]
-                },
-                {
-                    "path": "/fylo-browser-worker.js",
+                    "path": "/tachyon-sw.js",
                     "contains": "self.addEventListener",
                     "contentTypes": ["application/javascript", "text/javascript"]
                 },
                 {
-                    "path": "/shared/assets/fylo-web.mjs",
-                    "contains": "createWorkerClient",
-                    "contentTypes": ["application/javascript", "text/javascript"]
+                    "path": "/install.sh",
+                    "contains": "FYLO"
                 },
                 {
-                    "path": "/shared/assets/shared.js",
-                    "contains": "src/browser/worker/shared.js",
-                    "contentTypes": ["application/javascript", "text/javascript"]
-                },
-                {
-                    "path": "/shared/assets/dedicated.js",
-                    "contains": "src/browser/worker/dedicated.js",
-                    "contentTypes": ["application/javascript", "text/javascript"]
-                },
-                {
-                    "path": "/shared/assets/fylo-index.wasm",
-                    "startsWithHex": "0061736d",
-                    "contentTypes": ["application/wasm"]
+                    "path": "/install.ps1",
+                    "contains": "FYLO"
                 }
             ]
         }

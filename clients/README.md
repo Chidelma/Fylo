@@ -390,6 +390,65 @@ const identity = await db.handshake()
 console.log(identity.runtimeVersion, identity.commit, identity.machine)
 ```
 
+Every binary-backed shim accepts an optional child environment. Point it at a
+`.env` file, or supply the language's native map/dictionary when configuration
+already lives in application memory. The file form is exposed idiomatically in
+each SDK:
+
+| SDK             | Configuration                                                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Node/TypeScript | `new Fylo(root, { env: './fylo.env' })`                                                                                         |
+| Python          | `Fylo(root, env='./fylo.env')`                                                                                                  |
+| Ruby            | `Fylo.open(root, env: './fylo.env')`                                                                                            |
+| PHP             | `new Fylo($root, 'fylo', './fylo.env')`                                                                                         |
+| Go              | `fylo.OpenWithOptions(root, fylo.Options{Env: &fylo.Environment{File: "./fylo.env"}})`                                          |
+| Rust            | `Fylo::open_with_options(root, FyloOptions { env: Some(ProcessEnvironment::File("./fylo.env".into())), ..Default::default() })` |
+| Java            | `new Fylo(root, options)` with `options.env = "./fylo.env"`                                                                     |
+| C#              | `new Fylo(root, new Fylo.Options { Env = "./fylo.env" })`                                                                       |
+| Dart            | `Fylo.open(root, env: './fylo.env')`                                                                                            |
+
+For example, Node/TypeScript can use either form:
+
+```js
+const mail = new Fylo('/var/lib/caduceus/mail', {
+    binary: '/opt/fylo/bin/fylo',
+    env: './config/mail.fylo.env'
+})
+
+const identity = new Fylo('/var/lib/caduceus/identity', {
+    binary: '/opt/fylo/bin/fylo',
+    env: {
+        FYLO_SCHEMA: '/srv/identity/schemas',
+        FYLO_STRICT: '1'
+    }
+})
+```
+
+The `.env` format accepts blank lines, comments, an optional `export` prefix,
+and quoted or unquoted values. File/map values override inherited variables
+for the spawned FYLO process only; they never mutate the host process
+environment. Use a null/nil value in a map to remove an inherited key. Explicit
+constructor roots and engine flags retain their normal CLI precedence. Missing
+or malformed files fail before a child is started. Variable expansion and
+command substitution are deliberately unsupported.
+
+Treat both forms as trusted bootstrap configuration. Never accept an environment
+file path or map from an HTTP request, tenant setting, upload, job payload, or
+other untrusted input: arbitrary keys can change `PATH`, dynamic-loader
+behavior, and which program the child starts. Use an absolute,
+administrator-controlled binary path and allowlist the `FYLO_*` keys your
+application supports. When values must come from the host environment, copy
+named keys explicitly instead of spreading the complete environment; audit the
+inherited baseline and use null/nil removal for unrelated keys. Keep populated
+files out of source control, prefer a secret manager for credentials, and make
+local secret files owner-readable only (for example, `chmod 600`). Add every
+chosen file name or pattern to the consuming application's ignore rules — the
+example `./config/mail.fylo.env` is not automatically protected by this
+repository's root `.env` rule.
+
+Browser and mobile clients do not expose this setting because they do not spawn
+the native FYLO binary. Configure their storage adapters directly instead.
+
 `exclusiveRoot` makes a competing loop reject its startup handshake with
 `EROOTLOCKED`. The configured frame limits are passed to the child and must
 match the effective values returned by its handshake. The Node shim rejects an
@@ -429,7 +488,7 @@ directly — fully offline, no backend, no network.
 For a regular website, add a version-pinned loader to the document head:
 
 ```html
-<script src="https://d31ma.github.io/FYLO/version/26.33.01/fylo.js"></script>
+<script src="https://d31ma.github.io/FYLO/version/26.33.02/fylo.js"></script>
 ```
 
 Then open the browser-local database from your application code:
@@ -448,11 +507,21 @@ want the newest release. For direct ESM imports, the engine is published beside
 the loader:
 
 ```js
-import { createBrowserClient } from 'https://d31ma.github.io/FYLO/version/26.33.01/fylo-web.mjs'
+import { createBrowserClient } from 'https://d31ma.github.io/FYLO/version/26.33.02/fylo-web.mjs'
 
 const db = createBrowserClient()
 await db.ready()
 ```
+
+The loader is executable code with the embedding origin's authority, including
+access to that origin's FYLO data. Production applications should pin the
+immutable version path; use the mutable `version/latest/` alias only for a
+controlled upgrade policy. Higher-assurance deployments should download the
+loader and all adjacent module, worker, and Wasm assets from the matching
+release, verify them against `SHA256SUMS`, and self-host them. Constrain the
+allowed script, module, worker, and asset origins with CSP. Subresource
+integrity on `fylo.js` alone cannot authenticate the modules it imports
+dynamically.
 
 Enable the worker-hosted Wasm index scanner, or mount a user-selected FYLO root:
 

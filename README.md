@@ -235,7 +235,7 @@ hosting the engine in a WebView) owns its own database.
 Add the version-pinned loader to the document head:
 
 ```html
-<script src="https://d31ma.github.io/FYLO/version/26.30.04/fylo.js"></script>
+<script src="https://d31ma.github.io/FYLO/version/26.33.02/fylo.js"></script>
 ```
 
 ```ts
@@ -249,7 +249,16 @@ const doc = await db.users.latest(id)
 
 Use `https://d31ma.github.io/FYLO/version/latest/fylo.js` to track the newest
 successful release. Direct ESM consumers can import
-`https://d31ma.github.io/FYLO/version/26.30.04/fylo-web.mjs` instead.
+`https://d31ma.github.io/FYLO/version/26.33.02/fylo-web.mjs` instead.
+
+Treat the loader as executable supply-chain input: it runs with the embedding
+origin's authority, including access to that origin's FYLO data. Production
+applications should use the immutable version URL, not the mutable
+`version/latest/` alias. For higher-assurance deployments, download the loader
+and every adjacent module, worker, and Wasm asset from the matching release,
+verify them against `SHA256SUMS`, and serve them from your own origin. Restrict
+the permitted script, module, worker, and asset origins with CSP; integrity on
+`fylo.js` alone does not cover the modules it imports dynamically.
 
 The browser index scanner also has an opt-in Wasm prototype. It keeps the
 existing OPFS snapshot + WAL format: Wasm scans the immutable snapshot inside
@@ -305,7 +314,7 @@ Every GitHub release also includes a versioned, checksum-covered
 Extract it directly into the root of a static host:
 
 ```bash
-VERSION=26.30.04
+VERSION=26.33.02
 curl -fLO "https://github.com/d31ma/Fylo/releases/download/v${VERSION}/fylo-explorer-${VERSION}.zip"
 mkdir "fylo-explorer-${VERSION}"
 unzip "fylo-explorer-${VERSION}.zip" -d "fylo-explorer-${VERSION}"
@@ -363,11 +372,50 @@ should not share its JavaScript execution boundary.
 | `FYLO_ROOT`           | Filesystem root for collections                 | `./.fylo-data` |
 | `FYLO_SCHEMA`         | Directory containing JSON validation schemas    | —              |
 | `FYLO_STRICT`         | Validate documents with chex before writes      | —              |
+| `FYLO_SHARD_WIDTH`    | Shard width for newly created collections (1–4) | `1`            |
 | `FYLO_ENCRYPTION_KEY` | AES-GCM key for `$encrypted` fields (≥32 chars) | —              |
 | `FYLO_CIPHER_SALT`    | Salt for blind index derivation                 | —              |
-| `FYLO_LOGGING`        | Enable logging (`"1"`)                          | —              |
 
 Copy `.env.example` to `.env` and fill in your values.
+
+Every binary-backed SDK shim can scope a `.env` file to one FYLO child. For
+example, Node/TypeScript uses:
+
+```js
+const db = new Fylo('/mnt/fylo', {
+    binary: '/opt/fylo/bin/fylo',
+    env: './config/mail.fylo.env'
+})
+```
+
+Each shim also accepts its language's native environment map/dictionary. In
+Node/TypeScript, pass only the settings this child needs:
+
+```js
+const db = new Fylo('/mnt/fylo', {
+    env: {
+        FYLO_SCHEMA: '/srv/mail/schemas',
+        FYLO_STRICT: '1'
+    }
+})
+```
+
+The configured values override inherited variables for that child without
+mutating the host process environment. An explicit constructor root,
+`shardWidth`, or enabled `strictSchema` is passed as a CLI flag and takes
+precedence over its environment equivalent. A missing or malformed `.env` file
+fails before FYLO is spawned. See [the SDK shim guide](clients/README.md) for
+Python, Ruby, PHP, Go, Rust, Java, C#, and Dart syntax.
+
+Treat both the environment file path and map as trusted bootstrap configuration.
+Never accept either from a request, tenant setting, upload, or other untrusted
+input: arbitrary environment keys can alter `PATH`, dynamic-loader behavior,
+and the program that the child starts. Use an absolute, administrator-controlled
+binary path; copy only explicitly approved `FYLO_*` values instead of spreading
+`process.env`; and audit inherited variables, removing unrelated keys where the
+shim supports null/nil removal. Keep populated files out of source control,
+store secrets in a secret manager when possible, and make local secret files
+owner-readable only (for example, `chmod 600`).
 
 ## CRUD Operations
 

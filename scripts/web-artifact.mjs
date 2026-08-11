@@ -7,6 +7,20 @@ import path from 'node:path'
 
 const EPOCH = new Date('2000-01-01T00:00:00.000Z')
 const SYNC_CONFLICT = /conflicted copy/i
+const BUILD_ONLY_TACHYON_PATHS = new Set([
+    '.tachyon/build-state.json',
+    '.tachyon/source-maps',
+    '.tachyon/view-ir'
+])
+
+function isBuildOnlyTachyonPath(root, target) {
+    const relative = path.relative(root, target).split(path.sep).join('/')
+    return (
+        BUILD_ONLY_TACHYON_PATHS.has(relative) ||
+        relative.startsWith('.tachyon/source-maps/') ||
+        relative.startsWith('.tachyon/view-ir/')
+    )
+}
 
 async function filesBelow(root, directory = root) {
     const files = []
@@ -17,6 +31,7 @@ async function filesBelow(root, directory = root) {
         if (SYNC_CONFLICT.test(entry.name))
             throw new Error(`Refusing sync-conflict file in web artifact: ${target}`)
         if (entry.isSymbolicLink()) throw new Error(`Refusing symlink in web artifact: ${target}`)
+        if (isBuildOnlyTachyonPath(root, target)) continue
         if (entry.isDirectory()) files.push(...(await filesBelow(root, target)))
         else if (entry.isFile()) files.push(path.relative(root, target))
         else throw new Error(`Unsupported web artifact entry: ${target}`)

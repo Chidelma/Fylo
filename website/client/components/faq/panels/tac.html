@@ -8,15 +8,22 @@
         <div class="w-accordion w-accordion--variant-default">
             <div class="w-expand open" data-faq="rebuild">
                 <button
+                    id="faq-rebuild-trigger"
                     type="button"
                     class="w-expand-header"
                     on:click="toggle('rebuild')"
                     aria-expanded="true"
+                    aria-controls="faq-rebuild-answer"
                 >
                     <span class="w-expand-title">What happens if an index gets corrupted?</span
                     ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
                 </button>
-                <div class="w-expand-body">
+                <div
+                    id="faq-rebuild-answer"
+                    class="w-expand-body"
+                    role="region"
+                    aria-labelledby="faq-rebuild-trigger"
+                >
                     Nothing is lost. Documents are the source of truth and indexes are derived
                     accelerators — the rebuild operation reconstructs every index entry by scanning
                     the canonical document files.
@@ -24,15 +31,22 @@
             </div>
             <div class="w-expand" data-faq="languages">
                 <button
+                    id="faq-languages-trigger"
                     type="button"
                     class="w-expand-header"
                     on:click="toggle('languages')"
                     aria-expanded="false"
+                    aria-controls="faq-languages-answer"
                 >
                     <span class="w-expand-title">Which languages can I use FYLO from?</span
                     ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
                 </button>
-                <div class="w-expand-body">
+                <div
+                    id="faq-languages-answer"
+                    class="w-expand-body"
+                    role="region"
+                    aria-labelledby="faq-languages-trigger"
+                >
                     Any language that can spawn a process. FYLO ships as a single binary that speaks
                     a JSON machine protocol over stdin/stdout; drop-in shims are provided for
                     Python, Ruby, Node/TypeScript, PHP, Go, Rust, C#, Java, and Dart, and the
@@ -42,17 +56,50 @@
                     client.
                 </div>
             </div>
+            <div class="w-expand" data-faq="environment">
+                <button
+                    id="faq-environment-trigger"
+                    type="button"
+                    class="w-expand-header"
+                    on:click="toggle('environment')"
+                    aria-expanded="false"
+                    aria-controls="faq-environment-answer"
+                >
+                    <span class="w-expand-title"
+                        >Can one application run multiple FYLO configurations?</span
+                    ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
+                </button>
+                <div
+                    id="faq-environment-answer"
+                    class="w-expand-body"
+                    role="region"
+                    aria-labelledby="faq-environment-trigger"
+                >
+                    Yes. Every binary-backed shim accepts an optional .env path or native map and
+                    applies it only to the FYLO child it starts. The shim merges those values over
+                    the inherited environment without mutating the host process, so an application
+                    and its dependencies can use separate roots, schemas, and credentials. Explicit
+                    constructor and CLI arguments take precedence.
+                </div>
+            </div>
             <div class="w-expand" data-faq="explorer">
                 <button
+                    id="faq-explorer-trigger"
                     type="button"
                     class="w-expand-header"
                     on:click="toggle('explorer')"
                     aria-expanded="false"
+                    aria-controls="faq-explorer-answer"
                 >
                     <span class="w-expand-title">Can I browse a FYLO database visually?</span
                     ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
                 </button>
-                <div class="w-expand-body">
+                <div
+                    id="faq-explorer-answer"
+                    class="w-expand-body"
+                    role="region"
+                    aria-labelledby="faq-explorer-trigger"
+                >
                     Yes — Fylo Explorer is a browser UI over a real FYLO root on your disk, opened
                     through the File System Access API. Pick the folder once and browse collections,
                     inspect documents, and filter with SQL WHERE expressions (role = 'admin' AND age
@@ -65,15 +112,22 @@
             </div>
             <div class="w-expand" data-faq="replication">
                 <button
+                    id="faq-replication-trigger"
                     type="button"
                     class="w-expand-header"
                     on:click="toggle('replication')"
                     aria-expanded="false"
+                    aria-controls="faq-replication-answer"
                 >
                     <span class="w-expand-title">How do I back up or replicate a root?</span
                     ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
                 </button>
-                <div class="w-expand-body">
+                <div
+                    id="faq-replication-answer"
+                    class="w-expand-body"
+                    role="region"
+                    aria-labelledby="faq-replication-trigger"
+                >
                     FYLO is filesystem-only. Quiesce the writer, take a byte- and
                     metadata-preserving snapshot of the complete root, and verify a restore into a
                     new empty path. You can copy that snapshot with the storage or synchronization
@@ -83,15 +137,22 @@
             </div>
             <div class="w-expand" data-faq="transactions">
                 <button
+                    id="faq-transactions-trigger"
                     type="button"
                     class="w-expand-header"
                     on:click="toggle('transactions')"
                     aria-expanded="false"
+                    aria-controls="faq-transactions-answer"
                 >
                     <span class="w-expand-title">Are there transactions?</span
                     ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
                 </button>
-                <div class="w-expand-body">
+                <div
+                    id="faq-transactions-answer"
+                    class="w-expand-body"
+                    role="region"
+                    aria-labelledby="faq-transactions-trigger"
+                >
                     Writes are serialized per collection with advisory file locks. There are no
                     cross-collection atomic commits — declare related objects as their own
                     collections and join them at query time with joinDocs.
@@ -99,15 +160,22 @@
             </div>
             <div class="w-expand" data-faq="encryption">
                 <button
+                    id="faq-encryption-trigger"
                     type="button"
                     class="w-expand-header"
                     on:click="toggle('encryption')"
                     aria-expanded="false"
+                    aria-controls="faq-encryption-answer"
                 >
                     <span class="w-expand-title">Is my data encrypted at rest?</span
                     ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
                 </button>
-                <div class="w-expand-body">
+                <div
+                    id="faq-encryption-answer"
+                    class="w-expand-body"
+                    role="region"
+                    aria-labelledby="faq-encryption-trigger"
+                >
                     Fields listed in a schema’s $encrypted array are stored with AES-GCM. Equality
                     lookups use HMAC blind indexes, so queries work without decrypting — with the
                     documented trade-off that value repetition counts are observable.
@@ -115,15 +183,22 @@
             </div>
             <div class="w-expand" data-faq="groups">
                 <button
+                    id="faq-groups-trigger"
                     type="button"
                     class="w-expand-header"
                     on:click="toggle('groups')"
                     aria-expanded="false"
+                    aria-controls="faq-groups-answer"
                 >
                     <span class="w-expand-title">Can multiple users share a document or file?</span
                     ><span class="w-expand-chevron" aria-hidden="true">⌄</span>
                 </button>
-                <div class="w-expand-body">
+                <div
+                    id="faq-groups-answer"
+                    class="w-expand-body"
+                    role="region"
+                    aria-labelledby="faq-groups-trigger"
+                >
                     Yes. Write it with .as(&#123; gid: editorsGid, mode: 0o660 &#125;), then
                     authenticated group members read, update, or delete with .as(&#123; uid:
                     memberUid &#125;). FYLO resolves membership from the host POSIX group database.

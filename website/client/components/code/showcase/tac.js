@@ -15,7 +15,7 @@ const LANGS = [
     { key: 'web', label: 'JS (Browser)', cmt: '//' }
 ]
 
-const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.33.01/fylo.js'
+const FYLO_BROWSER_LOADER = 'https://d31ma.github.io/FYLO/version/26.33.02/fylo.js'
 
 // Native object/array literal renderers, one per language.
 function pyLit(v) {
@@ -356,14 +356,14 @@ export default class {
             button.className = active
                 ? 'w-btn w-btn-filled w-btn--sm'
                 : 'w-btn w-btn-text w-btn--sm'
-            button.setAttribute('aria-selected', String(active))
+            button.setAttribute('aria-pressed', String(active))
         }
         for (const button of this.root?.querySelectorAll('[data-lang]') ?? []) {
             const active = button.dataset.lang === this.$lang
             button.className = active
                 ? 'w-btn w-btn-tonal w-btn--sm'
                 : 'w-btn w-btn-ghost w-btn--sm'
-            button.setAttribute('aria-selected', String(active))
+            button.setAttribute('aria-pressed', String(active))
         }
     }
 
@@ -382,11 +382,13 @@ export default class {
     // JS (Browser): local OPFS/FSA storage, not a binary shim.
     webScaffold(body) {
         return [
-            `// Add once to <head>: <script src="${FYLO_BROWSER_LOADER}"></script>`,
+            `<script src="${FYLO_BROWSER_LOADER}"></script>`,
+            '<script type="module">',
             '',
-            'const db = await Fylo.open({ wasm: true })',
+            '  const db = await Fylo.open({ wasm: true })',
             '',
-            ...body
+            ...body.map((line) => (line ? `  ${line}` : line)),
+            '</script>'
         ].join('\n')
     }
 

@@ -70,7 +70,7 @@ describe('GitHub Pages browser client publishing', () => {
     test('documents both pinned and latest Pages URLs', async () => {
         const clients = await Bun.file(path.join(root, 'clients/README.md')).text()
 
-        expect(clients).toContain('https://d31ma.github.io/FYLO/version/26.33.01/fylo.js')
+        expect(clients).toContain('https://d31ma.github.io/FYLO/version/26.33.02/fylo.js')
         expect(clients).toContain('https://d31ma.github.io/FYLO/version/latest/fylo.js')
     })
 
@@ -81,7 +81,7 @@ describe('GitHub Pages browser client publishing', () => {
         ])
 
         for (const example of examples) {
-            expect(example).toContain('https://d31ma.github.io/FYLO/version/26.33.01/fylo.js')
+            expect(example).toContain('https://d31ma.github.io/FYLO/version/26.33.02/fylo.js')
             expect(example).toContain('const db = await Fylo.open({ wasm: true })')
             expect(example).not.toContain("createBrowserClient } from './fylo-web.mjs'")
         }
@@ -89,12 +89,13 @@ describe('GitHub Pages browser client publishing', () => {
 
     test('pins every website release reference to the current version', async () => {
         // The loader-alignment test above covers two components by name. These
-        // three carry the same version and were drifting unguarded: the browser
+        // sources carry the same version and were drifting unguarded: the browser
         // page shipped a 26.30.04 loader while the rest of the site said
-        // 26.33.01, and the download page names the Explorer zip by version
+        // 26.33.02, and the download page names the Explorer zip by version
         // under a /latest/download/ URL, so a missed bump 404s it.
         const pinned = await Promise.all(
             [
+                'README.md',
                 'website/client/components/docs/sample/tac.js',
                 'website/client/pages/docs/browser/tac.js',
                 'website/client/components/download/content/tac.js'
@@ -102,7 +103,7 @@ describe('GitHub Pages browser client publishing', () => {
         )
 
         for (const source of pinned) {
-            const stale = source.match(/26\.\d+\.\d+/g)?.filter((v) => v !== '26.33.01') ?? []
+            const stale = source.match(/26\.\d+\.\d+/g)?.filter((v) => v !== '26.33.02') ?? []
             expect(stale).toEqual([])
         }
     })

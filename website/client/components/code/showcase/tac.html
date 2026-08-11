@@ -11,13 +11,12 @@
         </div>
 
         <div class="showcase-toolbar">
-            <div class="showcase-tabs" role="tablist" aria-label="Code samples">
+            <div class="showcase-tabs" role="group" aria-label="Code sample">
                 <button
                     type="button"
                     class="w-btn w-btn-filled w-btn--sm"
-                    aria-selected="true"
+                    aria-pressed="true"
                     data-tab="start"
-                    role="tab"
                     on:click="show('start')"
                 >
                     Quick start
@@ -25,9 +24,8 @@
                 <button
                     type="button"
                     class="w-btn w-btn-text w-btn--sm"
-                    aria-selected="false"
+                    aria-pressed="false"
                     data-tab="query"
-                    role="tab"
                     on:click="show('query')"
                 >
                     Query
@@ -35,9 +33,8 @@
                 <button
                     type="button"
                     class="w-btn w-btn-text w-btn--sm"
-                    aria-selected="false"
+                    aria-pressed="false"
                     data-tab="sql"
-                    role="tab"
                     on:click="show('sql')"
                 >
                     SQL
@@ -56,13 +53,12 @@
             </label>
         </div>
 
-        <div class="showcase-langs" role="tablist" aria-label="Language">
+        <div class="showcase-langs" role="group" aria-label="Language">
             <button
                 type="button"
                 class="w-btn w-btn-tonal w-btn--sm"
-                aria-selected="true"
+                aria-pressed="true"
                 data-lang="python"
-                role="tab"
                 on:click="showLang('python')"
             >
                 Python
@@ -70,9 +66,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="ruby"
-                role="tab"
                 on:click="showLang('ruby')"
             >
                 Ruby
@@ -80,9 +75,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="node"
-                role="tab"
                 on:click="showLang('node')"
             >
                 Node.js
@@ -90,9 +84,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="php"
-                role="tab"
                 on:click="showLang('php')"
             >
                 PHP
@@ -100,9 +93,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="go"
-                role="tab"
                 on:click="showLang('go')"
             >
                 Go
@@ -110,9 +102,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="rust"
-                role="tab"
                 on:click="showLang('rust')"
             >
                 Rust
@@ -120,9 +111,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="csharp"
-                role="tab"
                 on:click="showLang('csharp')"
             >
                 C#
@@ -130,9 +120,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="java"
-                role="tab"
                 on:click="showLang('java')"
             >
                 Java
@@ -140,9 +129,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="swift"
-                role="tab"
                 on:click="showLang('swift')"
             >
                 Swift (iOS)
@@ -150,9 +138,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="kotlin"
-                role="tab"
                 on:click="showLang('kotlin')"
             >
                 Kotlin (Android)
@@ -160,9 +147,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="dart"
-                role="tab"
                 on:click="showLang('dart')"
             >
                 Dart
@@ -170,9 +156,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="flutter"
-                role="tab"
                 on:click="showLang('flutter')"
             >
                 Flutter
@@ -180,9 +165,8 @@
             <button
                 type="button"
                 class="w-btn w-btn-ghost w-btn--sm"
-                aria-selected="false"
+                aria-pressed="false"
                 data-lang="web"
-                role="tab"
                 on:click="showLang('web')"
             >
                 JS (Browser)
@@ -190,7 +174,7 @@
         </div>
 
         <div class="showcase-panel">
-            <pre class="code-block"><code>{currentCode()}</code></pre>
+            <pre class="code-block" aria-live="polite"><code>{currentCode()}</code></pre>
 
             <button
                 type="button"

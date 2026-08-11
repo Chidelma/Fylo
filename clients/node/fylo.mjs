@@ -21,12 +21,14 @@
 // Requests are queued: each resolves with its own response line, in order.
 
 import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 
 const MAX_SHARD_WIDTH = 4
 const DEFAULT_MAX_REQUEST_BYTES = 1024 * 1024
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const MAX_FRAME_BYTES = 64 * 1024 * 1024
 const responseDecoder = new TextDecoder('utf-8', { fatal: true })
+const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 function protocolError(code, message) {
     const error = new Error(message)
@@ -40,6 +42,110 @@ function frameLimit(value, fallback, name, minimum) {
         throw new RangeError(`${name} must be an integer between ${minimum} and ${MAX_FRAME_BYTES}`)
     }
     return limit
+}
+
+function environmentError(path, line, message) {
+    return new SyntaxError(`${path}:${line}: ${message}`)
+}
+
+function quotedEnvironmentValue(path, line, input, quote) {
+    let value = ''
+    for (let index = 1; index < input.length; index += 1) {
+        const character = input[index]
+        if (character === quote) {
+            const trailing = input.slice(index + 1).trim()
+            if (trailing && !trailing.startsWith('#')) {
+                throw environmentError(path, line, 'unexpected characters after quoted value')
+            }
+            return value
+        }
+        if (quote === '"' && character === '\\') {
+            index += 1
+            if (index >= input.length) {
+                throw environmentError(path, line, 'unterminated escape sequence')
+            }
+            const escaped = input[index]
+            value +=
+                escaped === 'n'
+                    ? '\n'
+                    : escaped === 'r'
+                      ? '\r'
+                      : escaped === 't'
+                        ? '\t'
+                        : escaped === '"' || escaped === '\\'
+                          ? escaped
+                          : `\\${escaped}`
+            continue
+        }
+        value += character
+    }
+    throw environmentError(path, line, 'unterminated quoted value')
+}
+
+function parseEnvironmentFile(path) {
+    let source
+    try {
+        source = readFileSync(path, 'utf8')
+    } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        throw new Error(`cannot read FYLO environment file ${path}: ${detail}`)
+    }
+    if (source.charCodeAt(0) === 0xfeff) source = source.slice(1)
+    const values = Object.create(null)
+    for (const [index, original] of source.split(/\r?\n/).entries()) {
+        const line = index + 1
+        let entry = original.trim()
+        if (!entry || entry.startsWith('#')) continue
+        if (/^export\s+/.test(entry)) entry = entry.replace(/^export\s+/, '')
+        const separator = entry.indexOf('=')
+        if (separator < 0) throw environmentError(path, line, 'expected NAME=VALUE')
+        const name = entry.slice(0, separator).trim()
+        if (!ENVIRONMENT_NAME.test(name)) {
+            throw environmentError(
+                path,
+                line,
+                `invalid environment variable name ${JSON.stringify(name)}`
+            )
+        }
+        const input = entry.slice(separator + 1).trimStart()
+        if (input.startsWith('"') || input.startsWith("'")) {
+            values[name] = quotedEnvironmentValue(path, line, input, input[0])
+            continue
+        }
+        const comment = input.indexOf('#')
+        values[name] = (comment < 0 ? input : input.slice(0, comment)).trimEnd()
+    }
+    return values
+}
+
+function childEnvironment(config) {
+    if (config === undefined) return undefined
+    const overrides = typeof config === 'string' ? parseEnvironmentFile(config) : config
+    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
+        throw new TypeError('env must be a .env file path or an environment variable object')
+    }
+    const environment = Object.create(null)
+    for (const [name, value] of Object.entries(process.env)) {
+        environment[process.platform === 'win32' ? name.toUpperCase() : name] = value
+    }
+    for (const [name, value] of Object.entries(overrides)) {
+        if (!name || name.includes('=') || name.includes('\0')) {
+            throw new TypeError(`invalid environment variable name ${JSON.stringify(name)}`)
+        }
+        const environmentName = process.platform === 'win32' ? name.toUpperCase() : name
+        if (value === undefined || value === null) {
+            delete environment[environmentName]
+        } else {
+            const environmentValue = String(value)
+            if (environmentValue.includes('\0')) {
+                throw new TypeError(
+                    `invalid environment variable value for ${JSON.stringify(name)}: NUL is not allowed`
+                )
+            }
+            environment[environmentName] = environmentValue
+        }
+    }
+    return environment
 }
 
 // Property access that isn't a real method/field falls through to a collection
@@ -57,7 +163,7 @@ const FACADE = {
 export class Fylo {
     /**
      * @param {string} root
-     * @param {{ binary?: string, exclusiveRoot?: boolean, maxRequestBytes?: number, maxResponseBytes?: number }} [opts]
+     * @param {{ binary?: string, env?: string | Record<string, string | number | boolean | null | undefined>, exclusiveRoot?: boolean, strictSchema?: boolean, shardWidth?: number, maxRequestBytes?: number, maxResponseBytes?: number }} [opts]
      */
     constructor(root, opts = {}) {
         const args = ['exec', '--loop', '--root', root]
@@ -76,9 +182,8 @@ export class Fylo {
         )
         args.push('--max-request-bytes', String(this.maxRequestBytes))
         args.push('--max-response-bytes', String(this.maxResponseBytes))
-        // Engine knobs are constructor options, not inherited environment, so
-        // one process can drive two roots with different settings and a browser
-        // host can pass the same keys where no environment exists.
+        // Direct constructor knobs become CLI flags, letting one host drive
+        // different roots without changing its own process environment.
         if (opts.strictSchema) args.push('--strict-schema')
         if (opts.shardWidth !== undefined) {
             if (
@@ -90,7 +195,10 @@ export class Fylo {
             }
             args.push('--shard-width', String(opts.shardWidth))
         }
-        this._proc = spawn(opts.binary ?? 'fylo', args, { stdio: ['pipe', 'pipe', 'inherit'] })
+        this._proc = spawn(opts.binary ?? 'fylo', args, {
+            stdio: ['pipe', 'pipe', 'inherit'],
+            env: childEnvironment(opts.env)
+        })
         this._queue = [] // pending { resolve, reject } in request order
         this._responseBuffer = Buffer.allocUnsafe(this.maxResponseBytes)
         this._responseLength = 0

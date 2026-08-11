@@ -573,12 +573,14 @@ body {
     white-space: nowrap;
 }
 
-@media (max-width: 599.98px) {
+@media (hover: none) and (pointer: coarse), (max-width: 599.98px) {
     .doc-sample-langs .w-btn {
         min-width: 44px;
         min-height: 44px;
     }
+}
 
+@media (max-width: 599.98px) {
     /* Full-bleed swipeable strip — 13 languages never fit on a phone. */
     .doc-sample-langs {
         flex-wrap: nowrap;

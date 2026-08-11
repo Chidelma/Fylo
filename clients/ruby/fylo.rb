@@ -27,8 +27,80 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 class FyloError < StandardError; end
 
 class Fylo
-  def self.open(root, binary: "fylo")
-    db = new(root, binary: binary)
+  ENVIRONMENT_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
+
+  def self.environment_file(path)
+    values = {}
+    File.read(path, encoding: "bom|utf-8").each_line.with_index(1) do |original, line|
+      entry = original.strip
+      next if entry.empty? || entry.start_with?("#")
+      entry = entry.sub(/\Aexport\s+/, "")
+      separator = entry.index("=")
+      raise FyloError, "#{path}:#{line}: expected NAME=VALUE" unless separator
+      name = entry[0...separator].strip
+      raise FyloError, "#{path}:#{line}: invalid environment variable name #{name.inspect}" unless ENVIRONMENT_NAME.match?(name)
+      input = entry[(separator + 1)..].lstrip
+      if input.start_with?("\"", "'")
+        quote = input[0]
+        value = +""
+        index = 1
+        closed = false
+        while index < input.length
+          character = input[index]
+          if character == quote
+            trailing = input[(index + 1)..].strip
+            raise FyloError, "#{path}:#{line}: unexpected characters after quoted value" unless trailing.empty? || trailing.start_with?("#")
+            closed = true
+            break
+          end
+          if quote == "\"" && character == "\\"
+            index += 1
+            raise FyloError, "#{path}:#{line}: unterminated escape sequence" if index >= input.length
+            escaped = input[index]
+            value << ({ "n" => "\n", "r" => "\r", "t" => "\t", "\"" => "\"", "\\" => "\\" }[escaped] || "\\#{escaped}")
+          else
+            value << character
+          end
+          index += 1
+        end
+        raise FyloError, "#{path}:#{line}: unterminated quoted value" unless closed
+        values[name] = value
+      else
+        values[name] = input.split("#", 2).first.rstrip
+      end
+    end
+    values
+  rescue SystemCallError, EncodingError => error
+    raise FyloError, "cannot read FYLO environment file #{path}: #{error.message}"
+  end
+
+  def self.child_environment(config)
+    return nil if config.nil?
+    path = config.respond_to?(:to_path) ? config.to_path : config.to_s
+    overrides = config.is_a?(Hash) ? config : environment_file(path)
+    windows = /mswin|mingw/i.match?(RUBY_PLATFORM)
+    environment = ENV.to_h.each_with_object({}) do |(name, value), result|
+      result[windows ? name.upcase : name] = value
+    end
+    overrides.each do |name, value|
+      name = name.to_s
+      raise ArgumentError, "invalid environment variable name #{name.inspect}" if name.empty? || name.include?("=") || name.include?("\0")
+      environment_name = windows ? name.upcase : name
+      if value.nil?
+        environment.delete(environment_name)
+      else
+        environment_value = value.to_s
+        if environment_value.include?("\0")
+          raise ArgumentError, "invalid environment variable value for #{name.inspect}: NUL is not allowed"
+        end
+        environment[environment_name] = environment_value
+      end
+    end
+    environment
+  end
+
+  def self.open(root, binary: "fylo", env: nil)
+    db = new(root, binary: binary, env: env)
     return db unless block_given?
     begin
       yield db
@@ -37,13 +109,18 @@ class Fylo
     end
   end
 
-  def initialize(root, binary: "fylo")
+  def initialize(root, binary: "fylo", env: nil)
     args = [
       binary, "exec", "--loop", "--root", root,
       "--max-request-bytes", MAX_REQUEST_BYTES.to_s,
       "--max-response-bytes", MAX_RESPONSE_BYTES.to_s
     ]
-    @stdin, @stdout, @wait = Open3.popen2(*args)
+    environment = self.class.child_environment(env)
+    @stdin, @stdout, @wait = if environment
+      Open3.popen2(environment, *args, unsetenv_others: true)
+    else
+      Open3.popen2(*args)
+    end
     @mutex = Mutex.new
   end
 
