@@ -40,10 +40,42 @@ pub/sub are outside the 26.33.01 Rust compiler contract.
 Create a private, versioned S3 bucket for release artifacts. Block all public access and enable
 default encryption. Grant the release operator only these capabilities:
 
-- `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` under `fylo/web-releases/`
-  (S3 `HeadObject` authorization is covered by `s3:GetObject`)
+- Bucket-level `s3:ListBucket` on `arn:aws:s3:::your-private-release-bucket`, with a
+  `StringLike` `s3:prefix` condition limited to `fylo/web-releases/*`
+- Object-level `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` on
+  `arn:aws:s3:::your-private-release-bucket/fylo/web-releases/*`
 - `amplify:CreateDeployment`, `amplify:StartDeployment`, `amplify:GetJob`,
   `amplify:GetApp`, and `amplify:UpdateApp` for the FYLO app
+
+For example, substitute the exact release bucket name in this IAM policy:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": "s3:ListBucket",
+            "Resource": "arn:aws:s3:::your-private-release-bucket",
+            "Condition": {
+                "StringLike": {
+                    "s3:prefix": "fylo/web-releases/*"
+                }
+            }
+        },
+        {
+            "Effect": "Allow",
+            "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+            "Resource": "arn:aws:s3:::your-private-release-bucket/fylo/web-releases/*"
+        }
+    ]
+}
+```
+
+`HeadObject` uses `s3:GetObject` when the object exists, but the scoped `s3:ListBucket`
+permission is also required for S3 to report an absent artifact as `404 Not Found` instead of
+`403 Forbidden`. Without that distinction, the release command correctly treats the result as an
+authorization failure and stops rather than assuming the artifact is missing.
 
 Export the bucket name; AWS credentials and region continue to use the normal AWS CLI credential
 chain. Never place credentials in the repository or command history.

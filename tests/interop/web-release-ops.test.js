@@ -1269,6 +1269,19 @@ describe('web release operations', () => {
         }
     })
 
+    test('documents least-privilege S3 access for web release state and artifacts', async () => {
+        const runbook = await Bun.file('docs/operations/web-release.md').text()
+        expect(runbook).toContain('"Action": "s3:ListBucket"')
+        expect(runbook).toContain('"Resource": "arn:aws:s3:::your-private-release-bucket"')
+        expect(runbook).toContain('"s3:prefix": "fylo/web-releases/*"')
+        expect(runbook).toContain('"Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]')
+        expect(runbook).toContain(
+            '"Resource": "arn:aws:s3:::your-private-release-bucket/fylo/web-releases/*"'
+        )
+        expect(runbook).toContain('report an absent artifact as `404 Not Found`')
+        expect(runbook).not.toContain('`HeadObject` authorization is covered by `s3:GetObject`')
+    })
+
     test('wires Pages post-deploy verification and documents rollback', async () => {
         const workflow = await Bun.file('.github/workflows/pages.yml').text()
         const runbook = await Bun.file('docs/operations/web-release.md').text()
