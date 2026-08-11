@@ -31,6 +31,21 @@
                 Direct ESM consumers can import <code>fylo-web.mjs</code> from the same pinned
                 directory instead.
             </p>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    The loader is executable code with this page's origin authority, including
+                    access to the origin's FYLO data. Production applications should use the
+                    immutable version URL; reserve the mutable <code>version/latest/</code> alias
+                    for a controlled upgrade policy.
+                </p>
+                <p>
+                    For higher assurance, download the loader and every adjacent module, worker, and
+                    Wasm asset from the matching release, verify them against
+                    <code>SHA256SUMS</code>, and serve them from your own origin. Restrict script,
+                    module, worker, and asset origins with CSP. Integrity on the loader alone does
+                    not cover modules it imports dynamically.
+                </p>
+            </div>
             <div class="doc-note">
                 <p>
                     Mobile clients — iOS/Swift, Android/Kotlin, and Flutter — host this same engine

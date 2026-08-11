@@ -77,7 +77,7 @@
     right: 0.6rem;
 }
 
-@media (max-width: 599.98px) {
+@media (hover: none) and (pointer: coarse), (max-width: 599.98px) {
     .showcase-tabs .w-btn,
     .showcase-langs .w-btn {
         min-width: 44px;
@@ -88,7 +88,9 @@
     .showcase-copy {
         min-height: 44px;
     }
+}
 
+@media (max-width: 599.98px) {
     .showcase-tabs {
         width: 100%;
         overflow-x: auto;

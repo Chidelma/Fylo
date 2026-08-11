@@ -15,6 +15,18 @@ export async function smokeSite(site, fetcher = fetch) {
         })
         if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`)
 
+        for (const [name, expected] of Object.entries({
+            ...site.requiredHeaders,
+            ...probe.requiredHeaders
+        })) {
+            const actual = response.headers.get(name)
+            if (actual !== expected) {
+                throw new Error(
+                    `${url} returned unexpected ${name} header ${JSON.stringify(actual)}; expected ${JSON.stringify(expected)}`
+                )
+            }
+        }
+
         const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim() ?? ''
         if (probe.contentTypes?.length && !probe.contentTypes.includes(contentType)) {
             throw new Error(

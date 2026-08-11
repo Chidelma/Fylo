@@ -67,7 +67,7 @@ describe('release recovery and supply-chain gates', () => {
         const canRunPrivilegedAssets = (ref, defaultBranch) => ref === `refs/heads/${defaultBranch}`
         expect(canRunPrivilegedAssets('refs/heads/main', 'main')).toBe(true)
         expect(canRunPrivilegedAssets('refs/heads/feature/queue', 'main')).toBe(false)
-        expect(canRunPrivilegedAssets('refs/tags/v26.33.01', 'main')).toBe(false)
+        expect(canRunPrivilegedAssets('refs/tags/v26.33.02', 'main')).toBe(false)
     })
 
     test('keeps the Windows filesystem capability behind native NTFS tests', async () => {

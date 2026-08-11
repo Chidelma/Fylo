@@ -8,7 +8,7 @@ export default class {
         { label: 'Linux (x64)', file: 'fylo-linux-x64' },
         { label: 'Linux (ARM64)', file: 'fylo-linux-arm64' },
         { label: 'Windows (x64)', file: 'fylo-windows-x64.exe' },
-        { label: 'Web (self-hosted Explorer)', file: 'fylo-explorer-26.33.01.zip' }
+        { label: 'Web (self-hosted Explorer)', file: 'fylo-explorer-26.33.02.zip' }
     ]
 
     assetUrl(file) {

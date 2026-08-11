@@ -18,9 +18,12 @@
 // with System.Text.Json. Request(json) is the raw escape hatch.
 
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
@@ -66,11 +69,21 @@ namespace Fylo
         private readonly byte[] _responseBuffer = new byte[MaxResponseBytes + 1];
         private readonly object _lock = new object();
 
-        public Fylo(string root, string binary = "fylo")
+        public sealed class Options
         {
+            public string Binary { get; set; } = "fylo";
+            public object Env { get; set; }
+        }
+
+        public Fylo(string root, string binary = "fylo")
+            : this(root, new Options { Binary = binary }) { }
+
+        public Fylo(string root, Options options)
+        {
+            options = options ?? new Options();
             var psi = new ProcessStartInfo
             {
-                FileName = binary,
+                FileName = string.IsNullOrEmpty(options.Binary) ? "fylo" : options.Binary,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 UseShellExecute = false,
@@ -86,8 +99,109 @@ namespace Fylo
             psi.ArgumentList.Add(MaxRequestBytes.ToString());
             psi.ArgumentList.Add("--max-response-bytes");
             psi.ArgumentList.Add(MaxResponseBytes.ToString());
+            ApplyChildEnvironment(psi, options.Env);
             _proc = Process.Start(psi) ?? throw new InvalidOperationException("failed to start fylo");
             _stdout = _proc.StandardOutput.BaseStream;
+        }
+
+        private static void ApplyChildEnvironment(ProcessStartInfo process, object config)
+        {
+            if (config == null) return;
+            IDictionary values;
+            if (config is string path) values = EnvironmentFile(path);
+            else if (config is IDictionary mapping) values = mapping;
+            else throw new ArgumentException("env must be a .env file path or an environment variable dictionary");
+            foreach (DictionaryEntry entry in values)
+            {
+                string name = entry.Key?.ToString() ?? "";
+                if (name.Length == 0 || name.Contains("=") || name.Contains("\0"))
+                    throw new ArgumentException($"invalid environment variable name {JsonSerializer.Serialize(name)}");
+                string value = entry.Value?.ToString();
+                if (value != null && value.Contains("\0"))
+                    throw new ArgumentException($"invalid environment variable value for {JsonSerializer.Serialize(name)}: contains NUL");
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    var aliases = new List<string>();
+                    foreach (string existing in process.Environment.Keys)
+                        if (StringComparer.OrdinalIgnoreCase.Equals(existing, name)) aliases.Add(existing);
+                    foreach (string alias in aliases) process.Environment.Remove(alias);
+                }
+                if (value == null) process.Environment.Remove(name);
+                else process.Environment[name] = value;
+            }
+        }
+
+        private static Dictionary<string, string> EnvironmentFile(string path)
+        {
+            string[] lines;
+            try { lines = File.ReadAllLines(path, new UTF8Encoding(false, true)); }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+            {
+                throw new FyloException($"cannot read FYLO environment file {path}: {error.Message}");
+            }
+            var values = new Dictionary<string, string>();
+            for (int offset = 0; offset < lines.Length; offset++)
+            {
+                int line = offset + 1;
+                string entry = lines[offset].Trim().TrimStart('\uFEFF');
+                if (entry.Length == 0 || entry.StartsWith("#")) continue;
+                if (entry.StartsWith("export ") || entry.StartsWith("export\t"))
+                    entry = entry.Substring(7).TrimStart();
+                int separator = entry.IndexOf('=');
+                if (separator < 0) throw new FyloException($"{path}:{line}: expected NAME=VALUE");
+                string name = entry.Substring(0, separator).Trim();
+                if (!ValidEnvironmentName(name))
+                    throw new FyloException($"{path}:{line}: invalid environment variable name {JsonSerializer.Serialize(name)}");
+                string input = entry.Substring(separator + 1).TrimStart();
+                values[name] = EnvironmentValue(path, line, input);
+            }
+            return values;
+        }
+
+        private static bool ValidEnvironmentName(string name)
+        {
+            if (name.Length == 0 || !(IsAsciiLetter(name[0]) || name[0] == '_')) return false;
+            for (int index = 1; index < name.Length; index++)
+                if (!(IsAsciiLetter(name[index]) || (name[index] >= '0' && name[index] <= '9') || name[index] == '_')) return false;
+            return true;
+        }
+
+        private static bool IsAsciiLetter(char value) =>
+            (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
+
+        private static string EnvironmentValue(string path, int line, string input)
+        {
+            if (input.Length == 0 || (input[0] != '"' && input[0] != '\''))
+            {
+                int comment = input.IndexOf('#');
+                return (comment < 0 ? input : input.Substring(0, comment)).TrimEnd();
+            }
+            char quote = input[0];
+            var value = new StringBuilder();
+            for (int index = 1; index < input.Length; index++)
+            {
+                char character = input[index];
+                if (character == quote)
+                {
+                    string trailing = input.Substring(index + 1).Trim();
+                    if (trailing.Length != 0 && !trailing.StartsWith("#"))
+                        throw new FyloException($"{path}:{line}: unexpected characters after quoted value");
+                    return value.ToString();
+                }
+                if (quote == '"' && character == '\\')
+                {
+                    index++;
+                    if (index >= input.Length) throw new FyloException($"{path}:{line}: unterminated escape sequence");
+                    char escaped = input[index];
+                    if (escaped == 'n') value.Append('\n');
+                    else if (escaped == 'r') value.Append('\r');
+                    else if (escaped == 't') value.Append('\t');
+                    else if (escaped == '"' || escaped == '\\') value.Append(escaped);
+                    else value.Append('\\').Append(escaped);
+                }
+                else value.Append(character);
+            }
+            throw new FyloException($"{path}:{line}: unterminated quoted value");
         }
 
         /// <summary>Send one raw machine-protocol op (JSON string); returns the full response.</summary>

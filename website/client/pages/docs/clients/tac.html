@@ -65,6 +65,45 @@
             </p>
         </div>
 
+        <div class="doc-section">
+            <h2>Scope environment to one FYLO child</h2>
+            <p>
+                Every binary-backed SDK shim accepts an optional child environment. Point it at a
+                <code>.env</code> file or pass the language's native map or dictionary. File and map
+                values override inherited variables for that child without changing the host
+                process.
+            </p>
+            <docs-sample topic="environment" hydrate="load" />
+            <p>The same file can be used by every native shim:</p>
+            <pre class="code-block"><code># ./config/fylo.env
+export FYLO_SCHEMA="/srv/app/schemas"
+FYLO_STRICT=1
+FYLO_SHARD_WIDTH=2</code></pre>
+            <p>
+                A missing or malformed file fails before FYLO starts. The loader supports comments,
+                an optional <code>export</code> prefix, and quoted values; it deliberately does not
+                execute substitutions or mutate the host environment. The same setting is available
+                in the Python, Ruby, PHP, Go, Rust, Java, C#, and Dart shims. Browser and mobile
+                clients configure their storage adapters directly because they do not launch a FYLO
+                child process.
+            </p>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    Relative <code>.env</code> paths resolve from the application process's working
+                    directory. Keep files containing encryption credentials out of source control
+                    and restrict their filesystem permissions.
+                </p>
+                <p>
+                    Treat both the file path and map as trusted bootstrap configuration. Never take
+                    either from a request, tenant setting, upload, or job payload: arbitrary keys
+                    can alter <code>PATH</code>, dynamic-loader behavior, and the child program. Use
+                    an absolute, administrator-controlled binary path, allowlist supported
+                    <code>FYLO_*</code> keys, copy inherited values explicitly, and prefer a secret
+                    manager or owner-only files (for example, <code>chmod 600</code>).
+                </p>
+            </div>
+        </div>
+
         <div class="doc-pager">
             <a href="/docs/concepts">← Concepts</a>
             <a href="/docs/documents">Documents &amp; metadata →</a>

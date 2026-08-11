@@ -54,6 +54,16 @@ if (typeof document !== 'undefined') {
     // together is to replay the click — which also keeps each component the
     // single owner of its own state. The guard stops the replay recursing.
     let syncingLang = false
+    const revealInScroller = (active, scroller) => {
+        if (!active || !scroller || scroller.scrollWidth <= scroller.clientWidth) return
+        const offset = active.offsetLeft - (scroller.clientWidth - active.offsetWidth) / 2
+        scroller.scrollTo({ left: Math.max(0, offset) })
+    }
+    const revealLanguageSelections = () => {
+        for (const strip of document.querySelectorAll('.doc-sample-langs')) {
+            revealInScroller(strip.querySelector('[aria-pressed="true"]'), strip)
+        }
+    }
     document.addEventListener('click', (event) => {
         const button = event.target.closest('.doc-sample-langs button')
         if (!button || syncingLang) return
@@ -69,10 +79,11 @@ if (typeof document !== 'undefined') {
                 const match = [...strip.querySelectorAll('button')].find(
                     (candidate) => candidate.textContent.trim() === label
                 )
-                if (match && match.getAttribute('aria-selected') !== 'true') match.click()
+                if (match && match.getAttribute('aria-pressed') !== 'true') match.click()
             }
         } finally {
             syncingLang = false
+            requestAnimationFrame(revealLanguageSelections)
         }
     })
     // Close the mobile menu on SPA navigation.
@@ -124,16 +135,9 @@ if (typeof document !== 'undefined') {
     // On narrow screens the docs sidebar collapses to a horizontal strip, where
     // the current page can sit off-screen with nothing to suggest it exists.
     const revealActive = () => {
-        for (const selector of [
-            '.doc-nav-list a.active',
-            '.doc-sample-langs [aria-selected="true"]'
-        ]) {
-            const active = document.querySelector(selector)
-            const scroller = active?.closest('.doc-nav-inner, .doc-sample-langs')
-            if (!active || !scroller || scroller.scrollWidth <= scroller.clientWidth) continue
-            const offset = active.offsetLeft - (scroller.clientWidth - active.offsetWidth) / 2
-            scroller.scrollTo({ left: Math.max(0, offset) })
-        }
+        const docLink = document.querySelector('.doc-nav-list a.active')
+        revealInScroller(docLink, docLink?.closest('.doc-nav-inner'))
+        revealLanguageSelections()
     }
     const syncRoute = () => {
         syncTitle()

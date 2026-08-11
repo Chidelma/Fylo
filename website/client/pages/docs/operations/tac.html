@@ -47,6 +47,13 @@
                             <td>—</td>
                         </tr>
                         <tr>
+                            <td><code>FYLO_SHARD_WIDTH</code></td>
+                            <td>
+                                Trailing TTID characters used for newly created collection shards
+                            </td>
+                            <td><code>1</code></td>
+                        </tr>
+                        <tr>
                             <td><code>FYLO_ENCRYPTION_KEY</code></td>
                             <td>AES-GCM key for <code>$encrypted</code> fields (≥32 chars)</td>
                             <td>—</td>
@@ -54,11 +61,6 @@
                         <tr>
                             <td><code>FYLO_CIPHER_SALT</code></td>
                             <td>Salt for blind index derivation</td>
-                            <td>—</td>
-                        </tr>
-                        <tr>
-                            <td><code>FYLO_LOGGING</code></td>
-                            <td>Enable logging (<code>"1"</code>)</td>
                             <td>—</td>
                         </tr>
                         <tr>
@@ -79,6 +81,57 @@
                 <code>--exclusive-root</code> for long-lived processes that require one
                 authoritative owner.
             </p>
+            <p>
+                Binary-backed SDK applications can provide a <code>.env</code> path or native
+                environment map when constructing the shim. Those values are scoped to the child
+                process and override inherited values without modifying the host environment.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2>Resolution and isolation</h2>
+            <p>FYLO resolves native configuration in this order:</p>
+            <ol>
+                <li>Explicit constructor and command-line arguments.</li>
+                <li>The shim's optional <code>.env</code> file or environment map.</li>
+                <li>Variables inherited from the host process.</li>
+                <li>Engine defaults.</li>
+            </ol>
+            <p>
+                Each shim builds a fresh environment for its own child. This lets an application and
+                its dependencies run independently configured FYLO roots in one process without
+                changing global environment state. A null or nil map value removes an inherited key
+                for that child.
+            </p>
+        </div>
+
+        <div class="doc-section">
+            <h2><code>.env</code> syntax</h2>
+            <pre class="code-block"><code># Blank lines and comments are ignored.
+export FYLO_SCHEMA="/srv/app/schemas" # inline comments are supported
+FYLO_STRICT=1
+FYLO_SHARD_WIDTH=2</code></pre>
+            <p>
+                Values may be quoted or unquoted. Variable expansion, command substitution, and
+                executable shell syntax are intentionally unsupported. Missing files and malformed
+                entries fail before the native child starts.
+            </p>
+            <div class="doc-note doc-note--warn">
+                <p>
+                    Environment files and maps are administrator-controlled bootstrap input. Never
+                    derive either from a request, tenant setting, upload, or job payload: arbitrary
+                    keys can change <code>PATH</code>, dynamic-loader behavior, and which program
+                    starts. Use an absolute, administrator-controlled binary path, allowlist the
+                    required <code>FYLO_*</code> keys, and copy inherited values explicitly rather
+                    than forwarding an entire environment.
+                </p>
+                <p>
+                    Keep populated files out of source control. Prefer a secret manager for
+                    credentials; when a file is required, add its exact name or pattern to the
+                    consuming application's ignore rules and make it owner-readable only (for
+                    example, <code>chmod 600</code>).
+                </p>
+            </div>
         </div>
 
         <div class="doc-pager">

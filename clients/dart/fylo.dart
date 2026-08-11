@@ -118,8 +118,9 @@ class Fylo {
     _queue.clear();
   }
 
-  /// Start a warm fylo process rooted at [root]. [binary] defaults to `fylo`.
-  static Future<Fylo> open(String root, {String binary = 'fylo'}) async {
+  /// Start a warm fylo process rooted at [root]. [env] is a .env path or map.
+  static Future<Fylo> open(String root,
+      {String binary = 'fylo', Object? env}) async {
     final args = [
       'exec',
       '--loop',
@@ -130,8 +131,120 @@ class Fylo {
       '--max-response-bytes',
       '$maxResponseBytes'
     ];
-    final proc = await Process.start(binary, args);
+    final childEnv = await _childEnvironment(env);
+    final proc = await Process.start(binary, args,
+        environment: childEnv, includeParentEnvironment: childEnv == null);
     return Fylo._(proc, proc.stdin, proc.stdout);
+  }
+
+  static Future<Map<String, String>?> _childEnvironment(Object? config) async {
+    if (config == null) return null;
+    final Map<dynamic, dynamic> overrides;
+    if (config is String) {
+      overrides = await _environmentFile(config);
+    } else if (config is Map) {
+      overrides = config;
+    } else {
+      throw ArgumentError(
+          'env must be a .env file path or an environment variable Map');
+    }
+    final environment = <String, String>{};
+    for (final entry in Platform.environment.entries) {
+      environment[Platform.isWindows ? entry.key.toUpperCase() : entry.key] =
+          entry.value;
+    }
+    for (final entry in overrides.entries) {
+      final name = entry.key.toString();
+      if (name.isEmpty || name.contains('=') || name.contains('\u0000')) {
+        throw ArgumentError(
+            'invalid environment variable name ${jsonEncode(name)}');
+      }
+      final environmentName = Platform.isWindows ? name.toUpperCase() : name;
+      if (entry.value == null) {
+        environment.remove(environmentName);
+      } else {
+        final environmentValue = entry.value.toString();
+        if (environmentValue.contains('\u0000')) {
+          throw ArgumentError(
+              'invalid environment variable value for ${jsonEncode(name)}: NUL is not allowed');
+        }
+        environment[environmentName] = environmentValue;
+      }
+    }
+    return environment;
+  }
+
+  static Future<Map<String, String>> _environmentFile(String path) async {
+    final String source;
+    try {
+      source = await File(path).readAsString();
+    } on FileSystemException catch (error) {
+      throw FyloException(
+          'cannot read FYLO environment file $path: ${error.message}');
+    }
+    final values = <String, String>{};
+    final lines = source.replaceFirst('\uFEFF', '').split(RegExp(r'\r?\n'));
+    final namePattern = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*$');
+    for (var offset = 0; offset < lines.length; offset++) {
+      final line = offset + 1;
+      var text = lines[offset].trim();
+      if (text.isEmpty || text.startsWith('#')) continue;
+      text = text.replaceFirst(RegExp(r'^export\s+'), '');
+      final separator = text.indexOf('=');
+      if (separator < 0) {
+        throw FyloException('$path:$line: expected NAME=VALUE');
+      }
+      final name = text.substring(0, separator).trim();
+      if (!namePattern.hasMatch(name)) {
+        throw FyloException(
+            '$path:$line: invalid environment variable name ${jsonEncode(name)}');
+      }
+      final input = text.substring(separator + 1).trimLeft();
+      values[name] = _environmentValue(path, line, input);
+    }
+    return values;
+  }
+
+  static String _environmentValue(String path, int line, String input) {
+    if (input.isEmpty || (input[0] != '"' && input[0] != "'")) {
+      final comment = input.indexOf('#');
+      return (comment < 0 ? input : input.substring(0, comment)).trimRight();
+    }
+    final quote = input[0];
+    final value = StringBuffer();
+    for (var index = 1; index < input.length; index++) {
+      final character = input[index];
+      if (character == quote) {
+        final trailing = input.substring(index + 1).trim();
+        if (trailing.isNotEmpty && !trailing.startsWith('#')) {
+          throw FyloException(
+              '$path:$line: unexpected characters after quoted value');
+        }
+        return value.toString();
+      }
+      if (quote == '"' && character == r'\') {
+        index++;
+        if (index >= input.length) {
+          throw FyloException('$path:$line: unterminated escape sequence');
+        }
+        final escaped = input[index];
+        if (escaped == 'n') {
+          value.write('\n');
+        } else if (escaped == 'r') {
+          value.write('\r');
+        } else if (escaped == 't') {
+          value.write('\t');
+        } else if (escaped == '"' || escaped == r'\') {
+          value.write(escaped);
+        } else {
+          value.write(r'\');
+          value.write(escaped);
+        }
+      } else {
+        value.write(character);
+      }
+    }
+    throw FyloException('$path:$line: unterminated quoted value');
   }
 
   /// Send one raw machine-protocol op; resolves with the full response object.

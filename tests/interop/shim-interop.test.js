@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -91,6 +91,38 @@ describe('client shim interop via fylo exec --loop', () => {
             const source = await readFile(path.join(shimRoot, relative), 'utf8')
             for (const method of methods) expect(source, relative).toContain(method)
         }
+    })
+
+    test('every binary-backed language shim exposes child-scoped environment configuration', async () => {
+        const contracts = new Map([
+            ['node/fylo.mjs', ['childEnvironment', 'env?: string']],
+            ['python/fylo.py', ['_child_environment', 'env=None']],
+            ['ruby/fylo.rb', ['child_environment', 'env: nil']],
+            ['php/fylo.php', ['childEnvironment', 'string|array|null $env']],
+            ['go/fylo.go', ['OpenWithOptions', 'type Environment struct']],
+            ['rust/fylo.rs', ['ProcessEnvironment', 'open_with_options']],
+            ['java/Fylo.java', ['class Options', 'applyChildEnvironment']],
+            ['csharp/Fylo.cs', ['class Options', 'ApplyChildEnvironment']],
+            ['dart/fylo.dart', ['_childEnvironment', 'Object? env']]
+        ])
+        for (const [relative, markers] of contracts) {
+            const source = await readFile(path.join(shimRoot, relative), 'utf8')
+            for (const marker of markers) expect(source, relative).toContain(marker)
+        }
+    })
+
+    test('the published environment template uses native FYLO variable names and defaults', async () => {
+        const [example, ignore] = await Promise.all([
+            readFile(path.join(repoRoot, '.env.example'), 'utf8'),
+            readFile(path.join(repoRoot, '.gitignore'), 'utf8')
+        ])
+        expect(example).toContain('FYLO_SCHEMA=')
+        expect(example).toContain('FYLO_SHARD_WIDTH=1')
+        expect(example).not.toContain('FYLO_SCHEMA_DIR')
+        expect(example).not.toContain('CHEX_SCHEMA_DIR')
+        expect(example).not.toContain('FYLO_LOGGING')
+        expect(ignore.split(/\r?\n/)).toContain('fylo.env')
+        expect(ignore.split(/\r?\n/)).toContain('*.fylo.env')
     })
 
     test('every binary-backed language shim exposes the durable queue lifecycle', async () => {
@@ -447,6 +479,173 @@ try {
         expect(JSON.parse(result.stdout).ok).toBe(true)
     })
 
+    test('Node shim scopes a .env file or environment map to its FYLO child', async () => {
+        await requireCommand('node')
+        const fileRoot = await tempRoot('fylo-node-env-file-')
+        const mappedRoot = await tempRoot('fylo-node-env-map-')
+        const optionRoot = await tempRoot('fylo-node-env-option-')
+        const envFile = path.join(fileRoot, 'fylo.env')
+        const malformedFile = path.join(fileRoot, 'malformed.env')
+        await writeFile(
+            envFile,
+            [
+                '# File values override the inherited child environment.',
+                'export FYLO_SHARD_WIDTH = "2" # quoted values and comments are supported',
+                'FYLO_ROOT=/this/root/must/not/win',
+                ''
+            ].join('\n')
+        )
+        await writeFile(malformedFile, 'FYLO_SHARD_WIDTH="2"\nBROKEN\n')
+        const script = `
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { Fylo } from ${JSON.stringify(path.join(shimRoot, 'node', 'fylo.mjs'))}
+
+const inherited = process.env.FYLO_SHARD_WIDTH
+const fromFile = new Fylo(${JSON.stringify(fileRoot)}, {
+  binary: ${JSON.stringify(binaryPath)},
+  env: ${JSON.stringify(envFile)},
+})
+let fileId
+try {
+  await fromFile.createCollection('users')
+  fileId = await fromFile.putData('users', { source: 'file' })
+} finally {
+  await fromFile.close()
+}
+if (!existsSync(join(${JSON.stringify(fileRoot)}, '.collections', 'users', 'docs', fileId.slice(-2), fileId + '.json'))) {
+  throw new Error('.env shard width was not applied to the FYLO child')
+}
+if (process.env.FYLO_SHARD_WIDTH !== inherited) {
+  throw new Error('FYLO .env configuration mutated process.env')
+}
+
+const fromMap = new Fylo(${JSON.stringify(mappedRoot)}, {
+  binary: ${JSON.stringify(binaryPath)},
+  env: { ...process.env, FYLO_SHARD_WIDTH: 3 },
+})
+let mappedId
+try {
+  await fromMap.createCollection('users')
+  mappedId = await fromMap.putData('users', { source: 'map' })
+} finally {
+  await fromMap.close()
+}
+if (!existsSync(join(${JSON.stringify(mappedRoot)}, '.collections', 'users', 'docs', mappedId.slice(-3), mappedId + '.json'))) {
+  throw new Error('environment map was not applied to the FYLO child')
+}
+
+const fromOption = new Fylo(${JSON.stringify(optionRoot)}, {
+  binary: ${JSON.stringify(binaryPath)},
+  env: ${JSON.stringify(envFile)},
+  shardWidth: 1,
+})
+let optionId
+try {
+  await fromOption.createCollection('users')
+  optionId = await fromOption.putData('users', { source: 'option' })
+} finally {
+  await fromOption.close()
+}
+if (!existsSync(join(${JSON.stringify(optionRoot)}, '.collections', 'users', 'docs', optionId.slice(-1), optionId + '.json'))) {
+  throw new Error('explicit shardWidth did not override the child environment')
+}
+
+let malformedRejected = false
+try {
+  new Fylo(${JSON.stringify(fileRoot)}, {
+    binary: ${JSON.stringify(binaryPath)},
+    env: ${JSON.stringify(malformedFile)},
+  })
+} catch (error) {
+  malformedRejected = error instanceof SyntaxError && error.message.includes('malformed.env:2')
+}
+if (!malformedRejected) throw new Error('malformed .env file did not fail before spawn')
+
+let missingRejected = false
+try {
+  new Fylo(${JSON.stringify(fileRoot)}, {
+    binary: ${JSON.stringify(binaryPath)},
+    env: ${JSON.stringify(path.join(fileRoot, 'missing.env'))},
+  })
+} catch (error) {
+  missingRejected = error.message.includes('cannot read FYLO environment file')
+}
+if (!missingRejected) throw new Error('missing .env file did not fail before spawn')
+
+const secretSentinel = 'SHOULD_NOT_APPEAR_IN_AN_ERROR'
+let nulRejectedWithoutLeak = false
+try {
+  new Fylo(${JSON.stringify(fileRoot)}, {
+    binary: ${JSON.stringify(binaryPath)},
+    env: { FYLO_ENCRYPTION_KEY: secretSentinel + '\\0tail' },
+  })
+} catch (error) {
+  nulRejectedWithoutLeak = error.message.includes('FYLO_ENCRYPTION_KEY') &&
+    !error.message.includes(secretSentinel)
+}
+if (!nulRejectedWithoutLeak) {
+  throw new Error('NUL environment value was accepted or leaked its secret value')
+}
+console.log(JSON.stringify({ ok: true, inherited }))
+`
+        const result = await run(['node', '--input-type=module', '-e', script], {
+            env: { FYLO_SHARD_WIDTH: '4' }
+        })
+        expectSuccess('Node child environment scoping', result)
+        expect(JSON.parse(result.stdout)).toEqual({ ok: true, inherited: '4' })
+    })
+
+    test.skipIf(process.platform === 'win32')(
+        'Node shim preserves reserved object-property names in a child environment file',
+        async () => {
+            await requireCommand('node')
+            const root = await tempRoot('fylo-node-env-reserved-')
+            const environmentFile = path.join(root, 'reserved.fylo.env')
+            const probe = path.join(root, 'environment-probe.mjs')
+            await writeFile(environmentFile, '__proto__=preserved\n')
+            await writeFile(
+                probe,
+                `#!/usr/bin/env node
+if (!Object.prototype.hasOwnProperty.call(process.env, '__proto__') || process.env['__proto__'] !== 'preserved') {
+  process.stderr.write('reserved environment key was not preserved')
+  process.exit(2)
+}
+let buffer = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (chunk) => {
+  buffer += chunk
+  const newline = buffer.indexOf('\\n')
+  if (newline < 0) return
+  buffer = buffer.slice(newline + 1)
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    result: { machine: { maxRequestBytes: 1048576, maxResponseBytes: 8388608 } }
+  }) + '\\n')
+})
+process.stdin.on('end', () => process.exit(0))
+`
+            )
+            await chmod(probe, 0o700)
+            const script = `
+import { Fylo } from ${JSON.stringify(path.join(shimRoot, 'node', 'fylo.mjs'))}
+const db = new Fylo(${JSON.stringify(root)}, {
+  binary: ${JSON.stringify(probe)},
+  env: ${JSON.stringify(environmentFile)},
+})
+try {
+  await db.ready
+  console.log(JSON.stringify({ ok: true }))
+} finally {
+  await db.close()
+}
+`
+            const result = await run(['node', '--input-type=module', '-e', script])
+            expectSuccess('Node reserved environment key', result)
+            expect(JSON.parse(result.stdout)).toEqual({ ok: true })
+        }
+    )
+
     test.skipIf(process.platform === 'win32' || !process.getuid)(
         'Node shim applies trusted virtual-group access to documents and raw files (#68)',
         async () => {
@@ -595,5 +794,37 @@ end
         const parsed = JSON.parse(result.stdout)
         expect(parsed.ok).toBe(true)
         expect(parsed.found[parsed.id].name).toBe('Ada')
+    })
+
+    test('Ruby shim can remove an inherited variable from its FYLO child', async () => {
+        await requireCommand('ruby')
+        const root = await tempRoot('fylo-ruby-env-unset-')
+        const script = `
+$LOAD_PATH.unshift(${JSON.stringify(path.join(shimRoot, 'ruby'))})
+require 'fylo'
+require 'json'
+
+db = Fylo.new(
+  ${JSON.stringify(root)},
+  binary: ${JSON.stringify(binaryPath)},
+  env: { 'FYLO_SHARD_WIDTH' => nil }
+)
+begin
+  db.create_collection('users')
+  id = db.put_data('users', { 'source' => 'ruby-unset' })
+  docs = File.join(${JSON.stringify(root)}, '.collections', 'users', 'docs')
+  puts JSON.generate({
+    one: File.exist?(File.join(docs, id[-1], id + '.json')),
+    four: File.exist?(File.join(docs, id[-4, 4], id + '.json'))
+  })
+ensure
+  db.close
+end
+`
+        const result = await run(['ruby', '-e', script], {
+            env: { FYLO_SHARD_WIDTH: '4' }
+        })
+        expectSuccess('Ruby child environment removal', result)
+        expect(JSON.parse(result.stdout)).toEqual({ one: true, four: false })
     })
 })

@@ -1,5 +1,58 @@
 # Changelog
 
+## 26.33.02 - 2026-08-11
+
+### Added
+
+- The Node/TypeScript, Python, Ruby, PHP, Go, Rust, Java, C#, and Dart shims now
+  accept child-scoped configuration from either a `.env` file or the language's
+  native environment map. Values merge over the inherited environment without
+  mutating the parent process, null or nil map values remove inherited keys,
+  and explicit constructor and engine options retain command-line precedence.
+  Missing or malformed files fail before the FYLO child starts; browser and
+  mobile clients remain storage-adapter clients and do not expose this
+  native-process setting.
+
+### Changed
+
+- The marketing-site release path now targets only the FYLO Amplify app. The
+  retired FXP target and `fx.del.ma` deployment are no longer managed; Explorer
+  remains a checksum-covered, self-hostable release archive.
+- FYLO's Amplify deploy and rollback flow now builds deterministic artifacts,
+  verifies the configured header policy before any release mutation, binds
+  legacy rollback probes to known checksums, and uses ETag-fenced
+  `preparing`/`mutating` leases. Target deployment, production smoke, state
+  commit, and verified fallback compensation form one transaction, with
+  fail-closed handling for timeouts, ambiguous state writes, and stale mutating
+  leases.
+
+### Security
+
+- Environment file paths and maps are documented as trusted bootstrap input,
+  never request-, tenant-, upload-, or job-controlled configuration. Guidance
+  now calls for an absolute administrator-controlled FYLO binary, an allowlist
+  of supported `FYLO_*` keys, an explicitly audited inherited environment,
+  owner-only local secret files, source-control exclusions, and a secret manager
+  where available. Browser-loader guidance likewise recommends immutable
+  version pins or checksum-verified self-hosting plus a restrictive CSP instead
+  of trusting the mutable `latest` alias.
+- FYLO's Amplify release configuration now defines versioned HSTS,
+  MIME-sniffing, referrer, permissions, cache, and CSP policies. A
+  checksum-bound transitional policy supports the two verified legacy rollback
+  archives; the final policy removes their temporary `unsafe-eval`
+  compatibility. Promotion fails closed until both the current and previous
+  artifacts are final-policy compatible. The generated service worker is
+  network-first for same-origin requests, using its versioned cache only as an
+  offline fallback to avoid mixed-version pages.
+
+### Fixed
+
+- Access-control documentation now consistently uses POSTIX terminology.
+  Website language choosers expose pressed-button state and live updates,
+  remember the selected language, and keep samples in sync; FAQ controls
+  identify their answer regions, coarse-pointer targets meet the intended touch
+  size, and responsive code samples preserve readable overflow.
+
 ## 26.33.01 - 2026-08-10
 
 ### Added

@@ -3,6 +3,8 @@ dist
 dist-bin
 target/
 .env
+fylo.env
+*.fylo.env
 db
 docker-compose.yml
 Dockerfile
